@@ -868,31 +868,34 @@ fn site_publication_preserves_existing_outputs_until_successful_confirmed_replac
 }
 
 #[test]
-fn site_publication_lock_fallback_never_clobbers_and_clears_its_lock() {
-    let root = std::env::temp_dir().join(format!(
-        "site-publish-lock-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&root).unwrap();
+fn site_publication_link_errors_never_overwrite_or_publish() {
+    use std::io::ErrorKind;
+    let root = case_with_nml("site-publication-link", "&nl_colm\n/\n");
     let staged = root.join("staged.nc");
     let out = root.join("site.nc");
-    std::fs::write(&staged, b"fallback").unwrap();
-    super::install_site_output_with_lock(&staged, &out).unwrap();
-    assert_eq!(std::fs::read(&out).unwrap(), b"fallback");
-    assert!(!root.join(".site.nc.publish.lock").exists(), "锁必须被清理");
-    let staged2 = root.join("staged2.nc");
-    std::fs::write(&staged2, b"second").unwrap();
-    let error = super::install_site_output_with_lock(&staged2, &out).unwrap_err();
-    assert!(error.to_string().contains("产物已存在，未覆盖"), "{error}");
-    assert_eq!(std::fs::read(&out).unwrap(), b"fallback");
-    // 崩溃留下的锁不会被自动删除，而是给出可操作的错误，避免两个发布者同时 rename。
-    std::fs::write(root.join(".site.nc.publish.lock"), b"stale").unwrap();
-    let error = super::install_site_output_with_lock(&staged2, &out).unwrap_err();
-    assert!(error.to_string().contains("publish.lock"), "{error}");
+    std::fs::write(&staged, b"generated").unwrap();
+    for kind in [ErrorKind::Unsupported, ErrorKind::PermissionDenied] {
+        for competing in [false, true] {
+            let error = super::install_site_output_with_link(&staged, &out, |_, target| {
+                if competing {
+                    std::fs::write(target, b"other writer")?;
+                }
+                Err(std::io::Error::new(kind, "injected link failure"))
+            })
+            .unwrap_err();
+            assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), kind);
+            assert!(error
+                .to_string()
+                .contains("Cannot publish without risking an overwrite"));
+            assert_eq!(std::fs::read(&staged).unwrap(), b"generated");
+            if competing {
+                assert_eq!(std::fs::read(&out).unwrap(), b"other writer");
+                std::fs::remove_file(&out).unwrap();
+            } else {
+                assert!(!out.exists(), "unsupported links must not publish");
+            }
+        }
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 

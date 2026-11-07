@@ -274,6 +274,35 @@ fn looks_like_path(field: &str, raw: &str) -> bool {
         || raw.starts_with('/')
 }
 
+// 不同输入不能因同名而复用或覆盖，重复引用同一内容则只复制一次。
+fn copy_staged_input(source: &Path, destination: &Path) -> Result<u64> {
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_file()
+                    && metadata.len() == std::fs::metadata(source)?.len()
+                    && crate::fingerprint::sha256_file(source)?
+                        == crate::fingerprint::sha256_file(destination)?,
+                "conflicting staged input at {} for {}",
+                destination.display(),
+                source.display()
+            );
+            Ok(0)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(
+                destination
+                    .parent()
+                    .context("staged input needs a parent")?,
+            )?;
+            std::fs::copy(source, destination)
+                .with_context(|| format!("cannot copy {}", source.display()))
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("cannot inspect staged input {}", destination.display())),
+    }
+}
+
 /// 改写一个 namelist 文件里的全部路径字段。
 #[allow(clippy::too_many_arguments)]
 fn rewrite_namelist(
@@ -285,6 +314,7 @@ fn rewrite_namelist(
     staging: &Path,
     staged: &mut Staged,
     server_inputs: bool,
+    input_case: Option<&Path>,
 ) -> Result<()> {
     let text =
         std::fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
@@ -341,23 +371,51 @@ fn rewrite_namelist(
                 }
                 document.set(&field, Value::Str(remote))?;
             }
-            Placed::Unmapped(local) if upload_unmapped && local.is_file() => {
-                let name = local
-                    .file_name()
-                    .context("input file has no name")?
-                    .to_string_lossy()
-                    .into_owned();
-                let extra = staging.join("inputs");
-                std::fs::create_dir_all(&extra)?;
-                staged.bytes += std::fs::copy(&local, extra.join(&name))
-                    .with_context(|| format!("cannot copy {}", local.display()))?;
-                document.set(
-                    &field,
-                    Value::Str(format!("{}/inputs/{name}", trim_slash(remote_case))),
-                )?;
-                staged.uploaded_extra.push(local);
+            Placed::Unmapped(local) => {
+                // 只自动携带源算例内的普通文件，目录和逃逸路径仍交给具名映射。
+                let source_file = if let Some(input) = input_case {
+                    let metadata = std::fs::symlink_metadata(&local)?;
+                    if metadata.is_file()
+                        && !local
+                            .components()
+                            .any(|part| matches!(part, std::path::Component::ParentDir))
+                    {
+                        let path = local.canonicalize()?;
+                        path.strip_prefix(input)
+                            .ok()
+                            .map(|rest| (rest.to_path_buf(), path.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some((rest, path)) = source_file {
+                    staged.bytes += copy_staged_input(&path, &staging.join(&rest))?;
+                    document.set(
+                        &field,
+                        Value::Str(format!(
+                            "{}/{}",
+                            trim_slash(remote_case),
+                            rest.to_string_lossy().replace('\\', "/")
+                        )),
+                    )?;
+                } else if upload_unmapped && local.is_file() {
+                    let name = local
+                        .file_name()
+                        .context("input file has no name")?
+                        .to_string_lossy()
+                        .into_owned();
+                    staged.bytes += copy_staged_input(&local, &staging.join("inputs").join(&name))?;
+                    document.set(
+                        &field,
+                        Value::Str(format!("{}/inputs/{name}", trim_slash(remote_case))),
+                    )?;
+                    staged.uploaded_extra.push(local);
+                } else {
+                    staged.unmapped.push(local);
+                }
             }
-            Placed::Unmapped(local) => staged.unmapped.push(local),
             Placed::Keep => {}
         }
     }
@@ -384,6 +442,11 @@ fn stage_case_inputs(
     upload_unmapped: bool,
     server_inputs: bool,
 ) -> Result<Staged> {
+    let input_case = if !server_inputs && case.join(colm_model::RUN_MANIFEST).is_file() {
+        Some(source_case(case)?)
+    } else {
+        None
+    };
     let mut staged = Staged::default();
     let mut effective_maps = if server_inputs {
         Vec::new()
@@ -438,7 +501,34 @@ fn stage_case_inputs(
             staging,
             &mut staged,
             server_inputs,
+            input_case.as_deref(),
         )?;
+    }
+    let manifest = staging.join(colm_model::RUN_MANIFEST);
+    if manifest.is_file() {
+        let mut run: colm_model::MaterializedRun =
+            serde_json::from_slice(&std::fs::read(&manifest)?)?;
+        let root = case.canonicalize()?;
+        ensure!(
+            run.run_case.canonicalize()? == root,
+            "model run path changed"
+        );
+        for artifact in &mut run.artifact_paths {
+            let local = case.join(&*artifact).canonicalize()?;
+            let relative = local
+                .strip_prefix(&root)
+                .context("model artifact escapes run case")?;
+            *artifact = PathBuf::from(format!(
+                "{}/{}",
+                trim_slash(remote_case),
+                relative.to_string_lossy().replace('\\', "/")
+            ));
+        }
+        run.run_case = PathBuf::from(remote_case);
+        run.effective_nml_sha256 =
+            colm_kernel::sha256_hex(&std::fs::read(staging.join("case.nml"))?);
+        std::fs::write(manifest, serde_json::to_vec_pretty(&run)?)?;
+        let _ = std::fs::remove_file(staging.join("full-input-identity.json"));
     }
     staged.remote_inputs.sort();
     staged.remote_inputs.dedup();
@@ -2215,7 +2305,10 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         &maps,
         upload_unmapped,
         server_case.is_some(),
-    )?;
+    )
+    .inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&staging);
+    })?;
     if !staged.unmapped.is_empty() {
         let _ = std::fs::remove_dir_all(&staging);
         let list: Vec<String> = staged
@@ -2230,28 +2323,14 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         );
     }
 
-    let remote_model_run = if case.join(colm_model::RUN_MANIFEST).is_file() {
-        let mut run: colm_model::MaterializedRun =
-            serde_json::from_slice(&std::fs::read(case.join(colm_model::RUN_MANIFEST))?)?;
-        run.run_case = PathBuf::from(&remote_case);
-        for path in &mut run.artifact_paths {
-            *path = PathBuf::from(&remote_case).join(
-                path.strip_prefix(&case)
-                    .context("model artifact escapes run case")?,
-            );
-        }
-        run.effective_nml_sha256 =
-            colm_kernel::sha256_hex(&std::fs::read(staging.join("case.nml"))?);
+    let remote_model_run = if staging.join(colm_model::RUN_MANIFEST).is_file() {
+        let run: colm_model::MaterializedRun =
+            serde_json::from_slice(&std::fs::read(staging.join(colm_model::RUN_MANIFEST))?)?;
         for flag in ["--highres-params", "--soil-hyper-albedo-dir"] {
             if run.inputs.contains_key(&format!("execution-option:{flag}")) {
                 bail!("remote spectral data options require an explicit server input mapping");
             }
         }
-        std::fs::write(
-            staging.join(colm_model::RUN_MANIFEST),
-            serde_json::to_vec_pretty(&run)?,
-        )?;
-        let _ = std::fs::remove_file(staging.join("full-input-identity.json"));
         Some(serde_json::to_value(run)?)
     } else {
         None

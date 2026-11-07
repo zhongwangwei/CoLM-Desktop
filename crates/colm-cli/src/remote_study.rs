@@ -830,13 +830,6 @@ fn stage_study_assets_inner(
             maps,
             upload_unmapped,
         )?;
-        let run_file = staging.join(base).join(colm_model::RUN_MANIFEST);
-        if run_file.is_file() {
-            let mut run: colm_model::MaterializedRun =
-                serde_json::from_slice(&std::fs::read(&run_file)?)?;
-            run.run_case = PathBuf::from(format!("{remote_project}/{base}"));
-            std::fs::write(run_file, serde_json::to_vec_pretty(&run)?)?;
-        }
         unmapped.extend(staged.unmapped);
         remote_inputs.extend(staged.remote_inputs);
         bytes += staged.bytes;

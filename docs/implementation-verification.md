@@ -45822,3 +45822,186 @@ T7920 隔离任务 `codex-16a34662fa11481ba36172c4e520c319` 使用当前源码�
 `8fc266fa` 的 CI `42322035644` 在 Ubuntu/macOS GUI 实测 **674 通过 / 1 ignored**，随后新版 Clippy 以 `manual_noop_waker` 拒绝测试手写的空 `Wake` 实现。改为标准库 `Waker::noop()`，移除手写结构和不再使用的导入，不修改生产代码或取消测试断言。[官方文档](https://doc.rust-lang.org/std/task/struct.Waker.html#method.noop) 标明自 Rust 1.85.0 稳定，满足现有最低版本。定向取消回归 **1/1**，GUI `cargo clippy --lib --tests --offline --locked -- -D warnings` 通过（7.53秒）。
 
 测试修正后原生应用再次构建成功，并通过完整路径重启；设置页和强制清理入口正常。引擎源码快照仍为 `00e1fffc2d9d5473`。
+
+### 2026-11-07 真实环境验收（7 项）
+
+有真实环境可用：`land02`（Slurm，partition first 7 节点 ×96 核，`sinfo/sbatch/srun` 可用）、
+`/Volumes/Data`（本地 exFAT）、`/Volumes/Students`（SMB）、真实模型注册表/历史台账副本、可构建的
+真实 GUI app bundle。
+
+- **F-C-01（通过）**：在 land02 的真实 OpenBench 项目下建临时 runs（成功+失败各一条），真实
+  `remote-bench-status` 返回顺序/字段正确（created_at/finished_at/report/error 不再错位）；
+  `remote-bench-fetch --run` 真实 SSH 取回报告与本机镜像。**验收中发现并修复新 P2**：`--run`
+  取回清单同时列报告文件与父目录，GNU tar 存成自硬链接，macOS tar 报错使取回退出码 1；新增
+  `nested_entries` 只对下载清单去重（报告存在性检查仍用完整清单），修复后取回 exit 0 且报告/
+  meta 均落盘；新增单测。临时远程项目/本地镜像已清理。
+- **F-D-05（当时串行验收通过，发布竞态见 beta.7 复审）**：真实 exFAT（/Volumes/Data）与 SMB（/Volumes/Students）上 `site-new`：
+  首次发布成功（硬链接不可用时回退发布锁+rename），未确认覆盖被拒绝，`--overwrite 1` 才能替换；
+  临时目录已清理。
+- **F-V-06（通过，UI 层）**：用当前源码重新构建带 e2e-driver 的真实 app bundle；隔离 HOME
+  复制真实模型注册表，用注册表 API 冻结一个真实自定义修订；在真实窗口里打开"选择已有版本"→
+  "删除"→"确认删除"，页面显示"已删除 1 个版本修订，清理 0 个源码快照"，磁盘 `versions/`
+  只剩 official。真实 UI 删除路径通过（绑定的拒绝路径仍由核心单测覆盖）。
+- **F-A-07（通过，真实 agent 重配失败路径）**：真实 app 里打开助手设置并保存，助手已就绪时
+  `assistant_start` 因数据外发确认缺失失败，页面出现"设置已保存，但助手重配失败：…下一次发送会
+  自动重试。" 的提示（F-A-07 目标症状被真实触发并验证）。验收中发现并修复双句号文案
+  （`。。`）。
+- **F-R-09（部分）**：真实 Slurm 集群可访问且资源符合预期（partition first：7 节点 ×96 核，
+  sbatch/srun 可用）；未提交真实站点批量作业 —— 该集群上没有可直接用的 Linux Fortran 内核+
+  可运行站点批量算例（现有内核清单为 Darwin 构建，需先 `remote-build-kernel` 并准备强迫数据，
+  会改动你的集群环境）。GUI 侧 ranks=1 与 pack 语义仍由纯函数/单元测试覆盖。
+- **H-16（未能端到端）**：复制真实历史台账（23,216 events / 10,863 operations），但可见操作
+  44 条且**没有多成员 run_group**（没有真实多站点批量运行记录），无法用真实数据验证"折叠 vs
+  审计导出"的差异；临时 ledger 单测覆盖该逻辑。要完成需一次真实多站点批量运行。
+- **F-S-09（未做真实模型会话）**：需要真实助手模型 API Key/网络并让模型主动调用工具，会在隔离
+  HOME 之外使用你的真实凭据并产生付费请求；本轮未触发。契约 `disabled` 回归测试仍在。
+
+验收后清理：远程临时项目、本地镜像、临时 app/HOME/台账副本均已删除；工作树仅保留修复本身
+（`remote_bench.rs`、`remote_bench_tests.rs`、`AssistantPanel.tsx` 待提交）。
+
+### 2026-11-07 真实环境验收（第二轮：F-S-09 / H-16 / F-R-09）
+
+- **F-S-09（通过，真实助手会话）**：把真实 `assistant.json`+`assistant-keys.json` 复制到隔离
+  HOME（真实 DeepSeek Key），打开从 land02 取回的空间算例，停在"范围与网格"步骤；真实模型
+  （deepseek-flash）依次执行 `ui_state`/`read_case_config`/`ui_fill`/`search_code`，其中
+  `ui_fill` **失败**：`{"fields":[{"field":"case-DEF_domain%edgew","value":"2.0"}]}`
+  → `error: case-DEF_domain%edgew cannot be changed here`。F-S-09 目标（真实会话里空间算例
+  范围字段被契约 disabled 挡住）已验证。（该轮模型随后一次工具调用 JSON 无效，属模型输出问题
+  而非契约问题；未改产品代码。）
+- **H-16（通过，真实多站点台账）**：在隔离 HOME 复制两个真实站点算例（CN-Cng、AU-Preston，
+  缩短时段）用真实 app 本地批量运行；台账里两条 `run` 共享同一 `run_id`（真实 2 成员
+  run_group，1 完成 1 失败）。用真实台账副本导出：折叠导出 5 行（含 `member_count` 列，
+  batch 折叠为一行），审计导出 6 行（表头无 `member_count`，两台站各一行）。F-H-16 的
+  "全局 CSV 一行一操作、不再折叠"已在真实台账上验证。
+- **F-R-09（受限，无法实测）**：真实集群可达：land02（Slurm，partition first 7×96 核）、
+  tianhe（Slurm+LSF，gfortran /usr/bin/gfortran、sbatch/bsub 可用、JRA3Q 强迫数据与既有空间
+  验证算例）。但 **没有任何可用的 Linux Fortran 内核**：land02 无 gfortran；tianhe 有 gfortran
+  但缺 netCDF-Fortran/MPI（无 netcdf.mod、无 mpif90、modulefiles 只有空壳）；两台机器上现有
+  kernel 目录只有 Darwin-arm64 清单、无 Linux 二进制；`/usr` 与 `$HOME` 未找到 netCDF-Fortran。
+  故无法构建 Fortran 内核、也就无法提交真实站点批量，F-R-09 仍为"受集群工具链限制未实测"。
+  已验证的替代证据：GUI 提交侧 ranks=1 纯函数/单元测试 + 服务器上 Slurm 调度器可识别
+  （`sinfo`/`sbatch` 可用、partition/资源读得到）。
+
+### 2026-11-07 真实环境验收（第三轮：F-R-09 通过；用户提示 source 环境）
+
+用户提示「是不是要 source 一下文件」后复查 tianhe 登录环境，确认 `source /etc/profile.d/modules.sh`
++ 显式 module load 后工具链完整（`.bashrc-intel` 首行非交互直接 `return`，不能靠它）：
+`gfortran 11.4.0`（系统） + `mpi/openmpi/5.0.0-gcc-11.4.0-ch4` + `hdf5/1.14.3-gcc-11.4.0-openmpi-5.0.0`
++ `netcdf/4.6.3-gcc-11.4.0-openmpi-5.0.0` + `blas/3.8.0-gcc-11.4.0 lapack/3.8.0-gcc-11.4.0`；
+可在登录节点编 netCDF-Fortran 测试程序。计算节点没有 `/usr/bin/gfortran` 与 binutils 开发文件，
+故内核用 `remote-kernel --scheduler bare` 在登录节点编（用户授权；编一次约 15 分钟）。
+
+**F-R-09（通过，真实 Slurm + 真实 Fortran 内核）**：
+- `remote-kernel --host tianhe --preset default --scheduler bare --env-script '<modules>'`
+  编出 Linux-x86_64 完整内核 `kernels/default-bc4789b9`（manifest `full:true`、`platform:Linux-x86_64`）。
+- 用两个站点算例（CN-Cng、AU-Preston，缩到 3 天）以同一 `--pack-batch accept-pack-1794053390`
+  提交 Fortran 站点批量。真实 pack 证据：
+  - 池 `pools/accept-pack-1794053390`：`slots=64`；`queue/` 两个作业先后入队，
+    `claimed/run-accept-cn-*` 与 `claimed/run-accept-au-*` 的 `carrier` 都是 **8945430**；
+  - `scontrol show job 8945430`：`NumNodes=1 NumCPUs=64 JobState=RUNNING`（两个站点只占 1 个节点，
+    不是每站一节点）；
+  - 载体脚本 `SLOTS=64`，每个站点用 `setsid "$JOBS/$j/script.sh"` 直接起一个进程；
+  - 站点脚本 `#SBATCH --nodes=1 --ntasks=1 --cpus-per-task=1`、`RAYON_NUM_THREADS=1`，
+    命令直接 `colm-cli run ... --engine fortran`，**没有 srun、没有 >1 的 ranks**（F-R-09 的
+    ranks=1/打包行为在真实 Slurm 上成立）。
+  - 两站均为单 rank 跑：CN-Cng `exit_code=0` 并产出 `out/CN-Cng/landdata/srfdata.nc`；
+    AU-Preston `exit_code=1`，失败在 `mkinidata`（我构造的 3 天时段与其强迫数据不匹配的
+    netcdf error(2)），与打包/ranks 无关。
+- 验收后远程临时池/作业目录/临时算例/临时输入目录已清理；保留编译好的内核
+  `kernels/default-bc4789b9`（约几 MB，方便复用；不需要可删）。
+- 备注：Rust 引擎在 tianhe 重建时曾因模块里的系统 HDF5 与 vendored hdf5 符号冲突链接失败；
+  改用不加载 hdf5/netcdf 模块的 `remote-engine-prepare` 预编译 Rust 引擎后复用成功（文档备查）。
+
+### 2026-11-07 远程 Rust 引擎 smoke（用户追问后补测）
+
+确认远程 Rust 引擎路径未被移除，并用 tianhe 已缓存引擎做真实 Slurm smoke：
+- `remote-engine-prepare` 返回 `{"engine":{"cached":true,"id":"e1d4bfc722cdd521"},"ready":true}`；
+  服务器 `<root>/engine/e1d4bfc722cdd521/bin/` 有 `colm-cli`、`colm-rs`、`mksrfdata-rs`、`mkinidata-rs`。
+- `remote-run`（不传 `--engine`，即 Rust；`--kernel <本机内核目录>`）提交 CN-Cng 站点批量：
+  `engine_kind=source`、`engine_uploaded=false`、`scheduler=slurm-pack`；站点脚本直接
+  `colm-cli run ... --engine rust --preprocessors rust --location server`，`RAYON_NUM_THREADS=1`，
+  无 srun；载体作业单节点 64 CPU，pool 认领与该 Fortran 路径一致。
+- 实跑结果：`colm-stage colm ok`、`CoLM Execution Completed.`、`exit_code=0`，产出
+  `out/CN-Cng/history/CN-Cng_hist_2008-01.nc` 与 `out/CN-Cng/landdata/srfdata.nc`。
+- 说明：F-R-09 仍是 Fortran 专项结论；这次 smoke 证明 **Rust 远程引擎（含 pack 提交）仍可用**，
+  且服务器上已有当前源码的缓存引擎，无需重建。验收后远程临时池/作业/算例已清理。
+
+### 2026-11-07 第四轮真实验收：GUI 驱动的 Rust 远程站点批量
+
+目标：不从 CLI，而是从真实 app 的「批量运行」页把 Rust 站点批量交到 tianhe Slurm。
+环境：真实 app bundle（当前源码 + e2e-driver）、隔离 HOME、真实 `remote.json`（tianhe，
+partition=debug、threads/cpus=1、cores_per_node=64），项目内两个真实站点算例
+（CN-Cng 2008-01-01→01-10、AU-Preston 2000-01-01→01-04），算例 profile `run_host=tianhe`、
+engine=rust。
+
+- 第一次提交被路径映射拦下：`site.nc` 没有服务器路径（GUI 远程批量需要显式映射）。给
+  `remote.json` 的 tianhe `maps` 补「项目目录→服务器目录」，并把算例输入预上传到该服务器
+  目录后重试成功。**观察（未改代码，留作后续 UX 项）**：CLI staging 会自动把 case 内的
+  `site.nc`/`forcing.nml` 映射到服务器算例副本，而 GUI 远程批量预检要求项目目录也有显式
+  map；真实 GUI 用户建站点批量时可能需要手动加这条映射。
+- 成功提交证据：
+  - GUI 生成的 pack 池名就是这次批量的 run uuid：`pools/95683f4d-ce31-45f4-9395-2ac84dc9558c`，
+    `slots=64`；
+  - 两个站点作业 `run-016b333f...`（CN-Cng）与 `run-f3abf8a7...`（AU-Preston）的
+    `claimed/*/carrier` 都是 **8946267**（同一个载体/单节点），`squeue` 显示
+    `colm_pack 1 节点`；
+  - 站点脚本：`--engine rust --preprocessors rust --location server`、`RAYON_NUM_THREADS=1`、
+    无 srun；均来自 GUI 提交（不是手工 CLI 参数）；
+  - 实跑：CN-Cng `exit_code=0`，日志 `CoLM Execution Completed.`、
+    `=== colm-stage colm ok ===`，产出
+    `cases/CN-Cng-6948c862/out/CN-Cng/history/CN-Cng_hist_2008-01.nc`；
+    AU-Preston `exit_code=1`（还是我构造的短时段/强迫数据不匹配，与 Rust/打包无关）。
+  - GUI 页面最终显示「已结束 2/2，完成 1、失败 1」，与服务器结果一致。
+- 清理：远程池/作业/算例/临时项目、本地 app/HOME/工程均已删除；未留作业。
+
+### 2026-11-08 修复：物化 run 的源算例文件在远程 staging 中丢失映射
+
+**症状**：GUI 远程批量/远程运行（Rust 或 Fortran，只要走模型修订版）提交时报
+```
+these inputs are on this computer but have no server path: .../<case>/site.nc
+```
+而同一算例用 CLI 直接 `remote-run`（不带 `--model-id/--model-revision`）却正常；用户只能在
+服务器配置里手动给项目目录加 `map` 才能绕过。
+
+**根因**：GUI 的远程运行总会带 `--model-id/--model-revision`，于是 CLI
+`model_version::prepare` 先把算例物化成 `<case>/runs/<operation>/`。物化只把 namelist
+复制进 run 目录并改写 namelist 引用；`site.nc`、rawdata 等**数据路径按设计保持指向源算例**
+（科学数据只读引用，不复制）。远程 staging 原先只把 run 目录/执行别名映射到服务器算例副本，
+源算例内的 `site.nc` 等路径就成了 unmapped。CLI 直接运行没有物化步骤，staging 原算例目录时
+会把算例内文件自动带上，所以两边行为不一致。
+
+最终修复在 `stage_case_inputs` 共享入口识别物化 run，并复用 `source_case()` 验证来源和运行目录身份。普通源文件经 canonicalize 核对归属后随 staging 携带，目录使用显式映射。同名不同内容或目录冲突会报错，相同内容的重复引用允许复用。单次运行和远程研究统一更新 manifest 的 `run_case`、`artifact_paths` 和 `effective_nml_sha256`，资产归属检查先规范化本机路径，远端使用 POSIX 路径。
+
+DeepSeek 初版曾对真实 official@183/tianhe 执行 `--dry-run`。当时修复前为 site.nc unmapped，退出码 1，初版修复后退出码 0 并生成作业脚本。本轮最终版本的验证见后续复审记录。
+
+
+### 2026-11-07 两日更新复审与 beta.7
+
+本轮复审范围为 `77f38c48..1879b936` 的提交和当前未提交改动。已核实 `1879b936` 的主 CI、Windows 内核真实算例和 release 流水线均成功，beta.6 已发布且包含全部平台安装包。新增修复升为 `0.3.0-beta.7`，同步两个 workspace、Tauri、npm、锁文件及双语 README。
+
+复审坐实并修复四处问题。
+
+- 准备页拆分表格后，修改变量名、单位或附加降水映射仍会完成旧暂存，可能使用旧的科学输入。实际映射变化现在使暂存失效，要求重新拆分。相同值和 ERA5 辅助参数输入保留待办。
+- 旧草稿恢复后启用 CROP，界面会显示合法 PFT 方案，但原提交仍发送旧 IGBP 值。显示与提交现共用合法的有效方案。
+- 安装到数据集目录首次选择后永久复用缓存路径，界面没有更换入口。每次安装现打开原生目录选择器，取消不安装、不扫描，并删除无用的额外目录缓存状态。
+- CLI `site-new` 仍遗留硬链接失败后使用发布锁、存在性检查和 rename 的回退。外部写入者不受锁约束，可能在检查后创建目标而被覆盖。现仅通过原子硬链接发布默认产物，保留原始 IO 错误。显式授权覆盖仍可替换目标。不支持硬链接的卷会明确拒绝默认发布。
+
+站点发布回归先在旧回退上失败，表现为预期错误时返回成功。修复后定向 3/3 通过，覆盖 Unsupported/PermissionDenied 与有无竞争目标的四种组合、旧文件保留、生成失败、授权替换和暂存清理。删除只验证旧回退实现的发布锁测试。
+
+当前未提交的远程报告修复也已复核。取回清单合并目录与内部文件，避免 GNU tar 生成自硬链接导致 macOS 解包报错，报告存在性检查仍使用完整清单。原始失败记录在 `tmp/accept-fetch.err`，修后 `tmp/accept-fetch2.err` 为空且报告元数据返回成功。远程比较模块 65/65 测试通过。助手重配错误的结尾标点整理一并保留。
+
+两名独立审查者分别核查 22 个后端文件和 23 个 GUI 生产文件及调用关系，准备页三处修复已独立复核。GUI 全量 1774/1774、typecheck、lint、Prettier 通过。范围内没有新增的其他确认缺陷。DeepSeek 的物化 run staging 初版随后完成，最终审查记录见下文。
+
+
+### 2026-11-08 DeepSeek staging 最终审查与整合
+
+用户确认 DeepSeek 已完成后，复审仍发现公共研究入口漏接、已有同名暂存被静默复用，以及研究 manifest 保留本机资产路径的问题。旧单测直接注入来源路径，未覆盖真实 manifest 与公共入口。最终实现把来源识别、校验和运行清单重定位统一放到共享 staging。单次运行读取已经处理的清单，研究删除原来只更新 `run_case` 的局部逻辑。
+
+新增回归使用注册表真实物化 run。公共入口冲突和身份校验先在初版上失败，再修复通过。研究回归先复现配置哈希未更新，修复后把暂存移动到另一模拟服务器目录，并删除本机来源与物化目录，仍能成功建立完整输入指纹。定向物化 7/7、研究跨目录验收 1/1、显式上传同名不同内容拒绝 1/1、server_inputs 既有语义 1/1 通过，覆盖具名映射优先、相同内容复用、符号链接/父目录穿越、资产逃逸与 POSIX 路径。跨平台正向夹具使用 Windows 普通 namelist 路径表示。
+
+独立后端复审 APPROVE，GUI 全量 1774/1774、typecheck、lint、Prettier 在当前 beta.7 再次通过。未重新提交真实集群作业。后续完整 Cargo 检查通过 T7920 隔离任务执行，随后检查 GitHub 原生 runner 的平台结果。
+
+
+整合验证实测完成。T7920 任务 `codex-d3fa9946b802497bb26e6665b2478c5f` 终态 succeeded，全部 13 个检查退出码为 0。workspace 2079 通过/6 ignored，CLI 877/877，init 239 通过/9 ignored，srfdata 357 通过/1 ignored，研究 CLI 集成 24/24，namelist roundtrip 5/5，histmap 5/5，四张 drift 表全部通过，remote Python 34/34，根 all-targets Clippy 与 fmt 通过。输入为当前代码的独立、校验过的 112 MB 快照，只携带入库夹具，源数据和产物使用服务器私有目录。`colm-workspace` 运行时测试需要嵌套 bubblewrap 用户命名空间，T7920 隔离环境不支持，由后续 GitHub 原生 CI 补验，该 crate 仍参加 all-targets Clippy。结果保存在 `/tmp/colm-beta7-final-verification-d3fa9946/results/`。
+
+完整测试前已完成 beta.7 原生构建，并通过完整应用路径启动、确认首页内核和操作入口就绪。最终整合源码快照 `df426a19c14dde5d` 再次构建并重启，准备输入数据页正常加载。实际 app 内携带的源码包逐字节匹配当前 `remote_cmd.rs`、`remote_study.rs`、`main.rs` 与根 `Cargo.toml`。当前版本未重复提交真实集群任务。

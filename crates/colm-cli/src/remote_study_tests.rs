@@ -644,6 +644,61 @@ fn observation_staging_fixture() -> (PathBuf, study::spec::Manifest) {
     (root, manifest)
 }
 
+#[cfg(unix)]
+#[test]
+fn frozen_study_staging_relocates_artifacts_for_server_input_capture() {
+    let (root, manifest) = observation_staging_fixture();
+    let root = root.canonicalize().unwrap();
+    let registry = colm_model::Registry::open(root.join("registry")).unwrap();
+    let revision = registry
+        .install_official(colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        })
+        .unwrap();
+    let source = root.join("cases/site");
+    std::fs::create_dir(root.join("frozen")).unwrap();
+    let run = registry
+        .materialize_run(
+            &revision.version,
+            &source,
+            &root.join("frozen/site"),
+            "site",
+        )
+        .unwrap();
+    std::fs::write(
+        Path::new(&manifest.root).join("model-inputs.json"),
+        json!({"base_root":root.join("frozen")}).to_string(),
+    )
+    .unwrap();
+    let staging = root.join("stage");
+    let server = root.join("server");
+    stage_study_assets(&manifest, &staging, &server.to_string_lossy(), &[], false).unwrap();
+    std::fs::rename(staging, &server).unwrap();
+    std::fs::remove_dir_all(&source).unwrap();
+    std::fs::remove_dir_all(root.join("frozen")).unwrap();
+    let base = server.join("site");
+    let transported: colm_model::MaterializedRun =
+        serde_json::from_slice(&std::fs::read(base.join(colm_model::RUN_MANIFEST)).unwrap())
+            .unwrap();
+    assert_eq!(
+        transported.source_case, run.source_case,
+        "preserve source provenance"
+    );
+    assert_eq!(
+        transported.effective_nml_sha256,
+        colm_kernel::sha256_hex(&std::fs::read(base.join("case.nml")).unwrap())
+    );
+    assert!(transported
+        .artifact_paths
+        .iter()
+        .all(|path| path.starts_with(&base) && path.is_file()));
+    assert!(crate::fingerprint::full_inputs(&base).unwrap().complete);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn every_local_observation_source_is_staged_under_a_unique_name() {
     let (root, manifest) = observation_staging_fixture();

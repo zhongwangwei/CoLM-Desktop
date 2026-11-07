@@ -548,14 +548,6 @@ export default function PreparationPage() {
     [declined, setDeclined] = useState(''),
     // 这一页做出来、能直接给新算例用的文件：站点文件、转换或修补好的强迫场。
     [produced, setProduced] = useState<{ site?: string; met?: string }>({}),
-    // 安装到哪个数据集根（Sitedata/Forcing 的父目录）；记住上次选择（D-06 残留）。
-    [datasetRoot, setDatasetRoot] = useState(() => {
-      try {
-        return globalThis.localStorage?.getItem('colm-prep-dataset-root') ?? '';
-      } catch {
-        return '';
-      }
-    }),
     [datasetScan, setDatasetScan] = useState<{
       root: string;
       count: number;
@@ -583,6 +575,11 @@ export default function PreparationPage() {
     ...(probe?.columns ?? []).map((v) => v.name),
   ];
   const preparation = casePreparationOptions(state.selectedCase?.profile, state.newCaseSeed);
+  const siteModes = preparationSiteModes(preparation.crop === true);
+  const requestedSiteMode = form.site_mode || preparation.mode;
+  const effectiveSiteMode = siteModes.includes(requestedSiteMode)
+    ? requestedSiteMode
+    : siteModes[0];
   // 准备页的源文件/映射/探测结果都只活在组件 state 里；一次成功的生成之前切页会全部丢失
   // （GUI 审查 D-05）。生成出产物后允许离开：用户的目的已经达到，继续拦反而挡住“用于新算例”。
   // **不能用 result 是否为空判断完成**：检查输入也会写 result（见 inputsConsumed 注释）。
@@ -932,7 +929,7 @@ export default function PreparationPage() {
             lat: num('lat'),
             landtype: optional('landtype'),
             rawdata: form.rawdata || null,
-            mode: form.site_mode || preparation.mode,
+            mode: effectiveSiteMode,
             crop: preparation.crop,
             overwrite,
           }),
@@ -1086,18 +1083,9 @@ export default function PreparationPage() {
   // 以前产物要用户手工搬进这两个目录，转换完也不会刷新扫描）。
   async function installToDataset() {
     if (!produced.site && !produced.met) return;
-    let root = datasetRoot.trim();
-    if (!root) {
-      const picked = await invoke<string | null>('pick_folder', { key: 'prep-dataset' });
-      if (!picked) return;
-      root = picked;
-      setDatasetRoot(root);
-      try {
-        globalThis.localStorage?.setItem('colm-prep-dataset-root', root);
-      } catch {
-        /* 存储不可用：本次会话内继续用这个目录。 */
-      }
-    }
+    // 每次安装都可选择目标；原生选择器通过 key 记住上次目录。
+    const root = await invoke<string | null>('pick_folder', { key: 'prep-dataset' });
+    if (!root) return;
     const final = preparedDatasetDestinations(produced, root);
     const install = async (source: string, destination: string) => {
       try {
@@ -1317,11 +1305,7 @@ export default function PreparationPage() {
           {
             id: 'prep-site-mode',
             label: t('地表覆盖 / 植被方案', 'Land cover / vegetation scheme'),
-            value: (() => {
-              const allowed = preparationSiteModes(preparation.crop === true);
-              const current = form.site_mode || preparation.mode;
-              return allowed.includes(current) ? current : allowed[0];
-            })(),
+            value: effectiveSiteMode,
             type: 'choice' as const,
             hint:
               preparation.crop === true
@@ -1376,6 +1360,10 @@ export default function PreparationPage() {
         type: 'text' as const,
         disabled: busy,
         set: (v: string) => {
+          const current = key === 'also_add' ? s.also_add.join(',') : s[key as 'name' | 'units'];
+          if (v === current) return;
+          // 暂存已应用旧映射；更改映射后必须重新拆分，不能继续修复旧暂存。
+          setImported([]);
           // 映射改了，上一次的"成功"与已产物都不再对应当前输入（GUI 审查 D-10/D-12）。
           setResult(null);
           setProduced({});

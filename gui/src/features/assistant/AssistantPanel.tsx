@@ -799,10 +799,12 @@ export default function AssistantPanel() {
         });
       } catch (error) {
         // 设置已经落盘，不把保存报错；但要明确告诉用户"重配失败、何时生效"（F-A-07）。
+        // 后端错误自己可能带句号，先去掉再拼，避免真实界面出现"。。"。
+        const reason = String(error).replace(/[。.]+$/, '');
         setReconfigureNotice(
           t(
-            `设置已保存，但助手重配失败：${String(error)}。下一次发送会自动重试。`,
-            `Settings saved, but reconfiguring the assistant failed: ${String(error)}. The next message will retry.`,
+            `设置已保存，但助手重配失败：${reason}。下一次发送会自动重试。`,
+            `Settings saved, but reconfiguring the assistant failed: ${reason}. The next message will retry.`,
           ),
         );
       }

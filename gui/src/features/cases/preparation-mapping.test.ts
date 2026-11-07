@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { EMPTY_PREP_FORM } from './preparation-draft';
+import { EMPTY_PREP_FORM, type PrepDraft } from './preparation-draft';
 import {
   preparedDatasetDestinations,
   preparedSiteDestination,
@@ -50,7 +50,8 @@ function treeSelects(node: unknown): RenderedSelect[] {
       : [];
   return [...own, ...treeSelects(element.props?.children)];
 }
-function page(total = false, snow = true) {
+function page(total = false, snow = true, draft: PrepDraft | null = null) {
+  let preparation = { classification: 'IGBP', mode: 'igbp', crop: false };
   const values: unknown[] = [],
     calls: { name: string; args: Record<string, unknown> }[] = [];
   let cursor = 0,
@@ -118,10 +119,10 @@ function page(total = false, snow = true) {
     },
     requiredNumber: (v: string) => Number(v),
     preparedDestination: () => '/output',
-    casePreparationOptions: () => ({ classification: 'IGBP', mode: 'igbp', crop: false }),
+    casePreparationOptions: () => preparation,
     // 准备页从准备草稿模块导入的纯函数（D-05）；测试里不恢复草稿、不写存储。
     EMPTY_PREP_FORM,
-    readPrepDraft: () => null,
+    readPrepDraft: () => draft,
     prepDraftHasInput: () => false,
     writePrepDraft: () => {},
     clearPrepDraft: () => {},
@@ -153,6 +154,9 @@ function page(total = false, snow = true) {
   return {
     render,
     calls,
+    enableCrop: () => {
+      preparation = { classification: 'IGBP', mode: 'pft', crop: true };
+    },
     navigationReason: () => {
       render();
       return navigationGuard ? navigationGuard() : null;
@@ -291,3 +295,75 @@ test('site generation exposes and forwards the land-cover/vegetation scheme', as
   assert.ok(call, 'make_site was invoked');
   assert.equal(call.args.mode, 'usgs');
 });
+
+for (const [key, value] of [
+  ['name', 'Precip'],
+  ['units', 'mm/s'],
+  ['also_add', ''],
+]) {
+  test(`changing split-table slot ${key} requires splitting again`, async () => {
+    const p = page();
+    p.set('prep-mode', 'table');
+    p.set('prep-src', '/input');
+    await p.run('prep-inspect');
+    await p.run('prep-execute');
+    assert.ok(p.render().actions.some((a) => a.id === 'prep-finish-0'));
+    p.set(`prep-slot-4-${key}`, value!);
+    assert.ok(!p.render().actions.some((a) => a.id === 'prep-finish-0'));
+    await p.run('prep-execute');
+    await p.run('prep-finish-0');
+    assert.equal(p.calls.filter((c) => c.name === 'convert_forcing_table').length, 2);
+  });
+}
+
+test('unchanged mapping and repair-only inputs preserve split-table completion', async () => {
+  const p = page();
+  p.set('prep-mode', 'table');
+  p.set('prep-src', '/input');
+  await p.run('prep-inspect');
+  await p.run('prep-execute');
+  p.set('prep-slot-4-name', 'Rainf');
+  p.set('prep-slot-4-units', 'unit');
+  p.set('prep-slot-4-also_add', 'Snowf');
+  p.set('prep-batch-era5', '/era5');
+  await p.run('prep-finish-0');
+  assert.equal(p.calls.filter((c) => c.name === 'convert_forcing_table').length, 1);
+});
+
+for (const restored of [false, true]) {
+  test(`${restored ? 'restored' : 'selected'} site scheme matches submitted mode after enabling CROP`, async () => {
+    const p = page(
+      false,
+      true,
+      restored
+        ? {
+            mode: 'site',
+            form: {
+              ...EMPTY_PREP_FORM,
+              site_mode: 'igbp',
+              dst: '/out/test_site.nc',
+              lon: '10',
+              lat: '20',
+            },
+          }
+        : null,
+    );
+    if (!restored) {
+      p.set('prep-mode', 'site');
+      p.set('prep-site-mode', 'igbp');
+      p.set('prep-dst', '/out/test_site.nc');
+      p.set('prep-lon', '10');
+      p.set('prep-lat', '20');
+    }
+    p.enableCrop();
+    const scheme = p.selects().find((select) => select.options.includes('pft'));
+    assert.ok(scheme);
+    assert.equal(scheme.value, 'pft');
+    assert.ok(!scheme.options.includes('igbp'));
+    await p.run('prep-execute');
+    const call = p.calls.find((c) => c.name === 'make_site');
+    assert.ok(call);
+    assert.equal(call.args.mode, scheme.value);
+    assert.equal(call.args.crop, true);
+  });
+}

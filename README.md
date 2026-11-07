@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.6"><img src="https://img.shields.io/badge/version-v0.3.0--beta.6-orange" alt="当前测试版：v0.3.0-beta.6"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.7"><img src="https://img.shields.io/badge/version-v0.3.0--beta.7-orange" alt="当前测试版：v0.3.0-beta.7"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="状态：Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="许可证：MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="平台">
@@ -20,14 +20,14 @@
 CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运行和结果评估整合到一个图形界面中。地表数据（`mksrfdata`）、初始场（`mkinidata`）与模型主循环（`colm`）三个阶段全部由 **Rust 引擎**完成，结果与 CoLM202X 原版**逐位一致**。安装包开箱即用，无需安装 Rust、Fortran、MPI 或 NetCDF 编译环境。
 
 > [!WARNING]
-> **当前版本为 `0.3.0-beta.6` 测试版。** 功能仍在快速迭代，可能存在已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
+> **当前版本为 `0.3.0-beta.7` 测试版。** 功能仍在快速迭代，可能存在已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
 
 > [!IMPORTANT]
 > 支持**站点**与**空间**两类模拟。空间模拟覆盖流域、区域与 **0.1° 全球**范围，可用经纬度网格、非结构网格与流域网格；Rust 引擎的空间主循环支持 **Linux 集群多节点**（`srun`/`mpiexec`）与块级 SPMD，已在 8 节点 tianhe 上跑通 0.1° 全球 10 天片。多个站点可作为独立算例并发运行；参数率定、不确定性分析和 AI 研究也可用于流域、区域和全球算例。
 
 ## 下载
 
-前往 [v0.3.0-beta.6 测试版发布页](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.6) 下载对应平台的安装包：
+前往 [v0.3.0-beta.7 测试版发布页](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.7) 下载对应平台的安装包：
 
 | 平台 | 架构 | 发行格式 |
 |---|---|---|
@@ -43,6 +43,13 @@ CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运
 终端无需打开桌面窗口：`colm-agent chat --project-root /你的项目目录` 可直接对话，支持流式回答、写操作审批和历史会话恢复。模型服务地址、模型、API 格式和思考程度可通过 `colm-agent config` 设置；也可选择现有 Codex、Claude Code、OpenCode 后端。
 
 pip 分发暂时停用，不再生成或发布 wheel。桌面端与原生 CLI 继续可用，详见 [终端助手使用说明](docs/terminal-assistant.md)。
+
+## 0.3.0-beta.7 的主要变化
+
+- 修改准备页的表格变量映射后要求重新拆分，避免继续使用旧映射的暂存数据。恢复草稿后，作物建站方案的显示与实际提交一致。
+- 远程比较报告的下载清单合并嵌套路径，避免 macOS 取回报告时出现自硬链接错误。
+- 模型修订版的远程运行和研究自动携带源算例内的普通输入文件，并更新运行清单中的服务器路径。外部数据目录通过显式映射定位。
+- 硬链接不可用时明确拒绝默认发布站点文件，显式授权覆盖后才能替换目标。
 
 ## 0.3.0-beta.6 的主要变化
 

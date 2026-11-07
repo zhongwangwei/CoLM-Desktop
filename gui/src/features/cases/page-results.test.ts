@@ -1355,7 +1355,7 @@ test('result time-window changes clear sampled curves while observation edits pr
 });
 
 test('preparation sends only active case or pending case settings to native data generation', async () => {
-  const { casePreparationOptions } = await import('./case-model');
+  const { casePreparationOptions, preparationSiteModes } = await import('./case-model');
   const legacy = {
     physics: { DEF_URBAN_RUN: '.true.', DEF_TUNING_CROP_PLANTING_DAY: '0', DEF_USE_PC: '.true.' },
     parameters: [],
@@ -1369,6 +1369,10 @@ test('preparation sends only active case or pending case settings to native data
   };
   const produced: Record<string, string>[] = [];
   const run = async (preparation: ReturnType<typeof casePreparationOptions>, mode: string) => {
+    const siteModes = preparationSiteModes(preparation.crop === true);
+    const effectiveSiteMode = siteModes.includes(preparation.mode)
+      ? preparation.mode
+      : siteModes[0];
     const execute = callback(prep, 'execute', {
       preparedSiteNameValid: () => true,
       preparedSiteDestination: (_directory: string, current: string) => current,
@@ -1383,6 +1387,7 @@ test('preparation sends only active case or pending case settings to native data
       work: async (fn: () => Promise<unknown>) => fn(),
       state,
       preparation,
+      effectiveSiteMode,
       mode,
       confirmOverwrite: (write: (overwrite: boolean) => Promise<unknown>) => write(false),
       form: { dst: '/new-data.nc', rawdata: '/raw' },

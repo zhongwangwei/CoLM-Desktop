@@ -1278,6 +1278,273 @@ fn server_destination_is_confined_to_project_runs() {
     assert!(server_destination("/data/project", Some("../escape")).is_err());
 }
 
+fn materialized_staging_fixture(label: &str) -> (PendingFixture, colm_model::MaterializedRun) {
+    let (fixture, _) = PendingFixture::new(label);
+    let source = fixture.0.join("source");
+    std::fs::create_dir_all(source.join("rawdata")).unwrap();
+    std::fs::create_dir_all(source.join("runs")).unwrap();
+    std::fs::write(source.join("site.nc"), b"site-data").unwrap();
+    let site = colm_kernel::manifest::plain(source.join("site.nc"))
+        .to_string_lossy()
+        .replace('\\', "/");
+    let rawdata = colm_kernel::manifest::plain(source.join("rawdata"))
+        .to_string_lossy()
+        .replace('\\', "/");
+    let forcing = colm_kernel::manifest::plain(source.join("forcing.nml"))
+        .to_string_lossy()
+        .replace('\\', "/");
+    std::fs::write(
+        source.join("case.nml"),
+        format!(
+            "&nl_colm\n DEF_CASE_NAME='demo'\n SITE_fsitedata='{site}'\n DEF_file_mesh='{site}'\n DEF_dir_rawdata='{rawdata}/'\n DEF_forcing_namelist='{forcing}'\n DEF_dir_output='out/'\n/\n"
+        ),
+    ).unwrap();
+    std::fs::write(
+        source.join("forcing.nml"),
+        "&nl_colm_forcing\n DEF_dir_forcing='/server/data/'\n/\n",
+    )
+    .unwrap();
+    let registry = colm_model::Registry::open(fixture.0.join("registry")).unwrap();
+    let revision = registry
+        .install_official(colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        })
+        .unwrap();
+    let run = registry
+        .materialize_run(&revision.version, &source, &source.join("runs/op"), "op")
+        .unwrap();
+    (fixture, run)
+}
+
+#[test]
+fn materialized_run_source_case_files_are_staged_and_rewritten() {
+    let (fixture, run) = materialized_staging_fixture("materialized-stage");
+    let staging = fixture.0.join("stage");
+    // 研究与单次运行共用的入口必须自行读取真实 manifest。
+    let staged = stage_case(
+        &run.run_case,
+        &staging,
+        "/server/project/cases/demo",
+        &[],
+        false,
+    )
+    .unwrap();
+    let doc =
+        colm_namelist::parse(&std::fs::read_to_string(staging.join("case.nml")).unwrap()).unwrap();
+    assert_eq!(
+        doc.get("SITE_fsitedata"),
+        Some(&Value::Str("/server/project/cases/demo/site.nc".into()))
+    );
+    assert_eq!(doc.get("DEF_file_mesh"), doc.get("SITE_fsitedata"));
+    assert_eq!(
+        std::fs::read(staging.join("site.nc")).unwrap(),
+        b"site-data"
+    );
+    assert!(staged
+        .unmapped
+        .iter()
+        .any(|path| path.canonicalize().unwrap() == run.source_case.join("rawdata")));
+    assert!(!staged.unmapped.iter().any(|path| path.ends_with("site.nc")));
+    assert!(staged.bytes >= b"site-data".len() as u64);
+    let transported: colm_model::MaterializedRun =
+        serde_json::from_slice(&std::fs::read(staging.join(colm_model::RUN_MANIFEST)).unwrap())
+            .unwrap();
+    assert_eq!(
+        transported.run_case,
+        PathBuf::from("/server/project/cases/demo")
+    );
+    assert!(transported.artifact_paths.iter().all(|path| {
+        let path = path.to_string_lossy();
+        path.starts_with("/server/project/cases/demo/") && !path.contains('\\')
+    }));
+    assert_eq!(
+        transported.effective_nml_sha256,
+        colm_kernel::sha256_hex(&std::fs::read(staging.join("case.nml")).unwrap())
+    );
+    // 具名映射仍优先，外部目录不会被自动携带。
+    let maps = [
+        parse_mapping(&format!(
+            "{}=/server/raw",
+            colm_kernel::manifest::plain(run.source_case.join("rawdata")).display()
+        ))
+        .unwrap(),
+        parse_mapping(&format!(
+            "{}=/server/site.nc",
+            colm_kernel::manifest::plain(run.source_case.join("site.nc")).display()
+        ))
+        .unwrap(),
+    ];
+    let mapped = fixture.0.join("mapped");
+    let staged = stage_case(&run.run_case, &mapped, "/server/case", &maps, false).unwrap();
+    assert!(staged.unmapped.is_empty());
+    assert!(!mapped.join("site.nc").exists());
+    assert!(staged
+        .remote_inputs
+        .contains(&"/server/site.nc".to_string()));
+    assert!(staged.remote_inputs.contains(&"/server/raw/".to_string()));
+}
+
+#[test]
+fn materialized_staging_rejects_conflicting_inputs_and_accepts_identical_files() {
+    for conflict in ["different file", "directory", "same file"] {
+        let (fixture, run) = materialized_staging_fixture("materialized-conflict");
+        let existing = run.run_case.join("site.nc");
+        if conflict == "directory" {
+            std::fs::create_dir(&existing).unwrap();
+        } else {
+            std::fs::write(
+                &existing,
+                if conflict == "same file" {
+                    b"site-data".as_slice()
+                } else {
+                    b"different".as_slice()
+                },
+            )
+            .unwrap();
+        }
+        let staging = fixture.0.join("stage");
+        let result = stage_case(&run.run_case, &staging, "/server/case", &[], false);
+        if conflict == "same file" {
+            assert!(result.is_ok());
+            assert_eq!(
+                std::fs::read(staging.join("site.nc")).unwrap(),
+                b"site-data"
+            );
+        } else {
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("conflicting staged input"));
+        }
+        assert_eq!(
+            std::fs::read(run.source_case.join("site.nc")).unwrap(),
+            b"site-data"
+        );
+    }
+}
+
+#[test]
+fn materialized_staging_validates_manifest_before_copying() {
+    let (fixture, run) = materialized_staging_fixture("materialized-identity");
+    let mut invalid = run.clone();
+    invalid.run_case = run.source_case.clone();
+    std::fs::write(
+        run.run_case.join(colm_model::RUN_MANIFEST),
+        serde_json::to_vec(&invalid).unwrap(),
+    )
+    .unwrap();
+    let staging = fixture.0.join("stage");
+    assert!(
+        stage_case(&run.run_case, &staging, "/server/case", &[], false)
+            .unwrap_err()
+            .to_string()
+            .contains("model run path changed")
+    );
+    assert!(!staging.exists());
+}
+
+#[test]
+fn materialized_staging_refuses_artifacts_outside_the_run() {
+    let (fixture, mut run) = materialized_staging_fixture("materialized-artifact");
+    run.artifact_paths.push(run.source_case.join("site.nc"));
+    std::fs::write(
+        run.run_case.join(colm_model::RUN_MANIFEST),
+        serde_json::to_vec(&run).unwrap(),
+    )
+    .unwrap();
+    let error = stage_case(
+        &run.run_case,
+        &fixture.0.join("stage"),
+        "/server/case",
+        &[],
+        false,
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("model artifact escapes run case"));
+}
+
+#[cfg(unix)]
+#[test]
+fn materialized_staging_does_not_auto_upload_links_or_parent_traversal() {
+    use std::os::unix::fs::symlink;
+    let (fixture, run) = materialized_staging_fixture("materialized-bounds");
+    let outside = fixture.0.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("site.nc"), b"external-data").unwrap();
+    let source = &run.source_case;
+    std::fs::create_dir(source.join("sub")).unwrap();
+    symlink(source.join("site.nc"), source.join("linked.nc")).unwrap();
+    symlink(&outside, source.join("external")).unwrap();
+    for (index, path) in [
+        source.join("linked.nc"),
+        source.join("external/site.nc"),
+        source.join("sub/../../outside/site.nc"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let staging = fixture.0.join(format!("stage-{index}"));
+        std::fs::create_dir(&staging).unwrap();
+        let nml = staging.join("case.nml");
+        std::fs::write(
+            &nml,
+            format!("&nl_colm\n SITE_fsitedata='{}'\n/\n", path.display()),
+        )
+        .unwrap();
+        let mut staged = Staged::default();
+        rewrite_namelist(
+            &nml,
+            &run.run_case,
+            "/server/case",
+            &[],
+            false,
+            &staging,
+            &mut staged,
+            false,
+            Some(source),
+        )
+        .unwrap();
+        assert_eq!(staged.unmapped, vec![path]);
+        assert_eq!(staged.bytes, 0);
+        assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 1);
+    }
+    assert_eq!(
+        std::fs::read(outside.join("site.nc")).unwrap(),
+        b"external-data"
+    );
+}
+
+#[test]
+fn explicitly_uploaded_inputs_reject_same_name_with_different_content() {
+    let (fixture, _) = PendingFixture::new("uploaded-input-conflict");
+    let case = fixture.0.join("case");
+    let first = fixture.0.join("one");
+    let second = fixture.0.join("two");
+    for path in [&case, &first, &second] {
+        std::fs::create_dir(path).unwrap();
+    }
+    std::fs::write(first.join("site.nc"), b"first").unwrap();
+    std::fs::write(second.join("site.nc"), b"second").unwrap();
+    let first_path = colm_kernel::manifest::plain(first.join("site.nc"))
+        .to_string_lossy()
+        .replace('\\', "/");
+    let second_path = colm_kernel::manifest::plain(second.join("site.nc"))
+        .to_string_lossy()
+        .replace('\\', "/");
+    std::fs::write(
+        case.join("case.nml"),
+        format!("&nl_colm\n SITE_fsitedata='{first_path}'\n DEF_file_mesh='{second_path}'\n/\n"),
+    )
+    .unwrap();
+    let error = stage_case(&case, &fixture.0.join("stage"), "/server/case", &[], true).unwrap_err();
+    assert!(error.to_string().contains("conflicting staged input"));
+}
+
 #[cfg(unix)]
 #[test]
 fn server_inputs_ignore_local_existence_and_user_maps() {

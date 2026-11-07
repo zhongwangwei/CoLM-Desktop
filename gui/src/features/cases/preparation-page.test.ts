@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { preparedDatasetDestinations } from './case-model';
 import { EMPTY_PREP_FORM } from './preparation-draft';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
@@ -635,6 +636,7 @@ test('site generation retries an existing destination only after overwrite confi
       form,
       mode: 'site',
       preparation: { mode: 'igbp', crop: false },
+      effectiveSiteMode: 'igbp',
       num: () => 1,
       optional: () => null,
       work: (fn: () => unknown) => fn(),
@@ -760,3 +762,45 @@ test('short-gap and min-overlap must be whole numbers before submit', () => {
   form.min_overlap = '2000000';
   assert.throws(() => num('min_overlap'), /须在 0 到 1000000 之间/);
 });
+
+for (const picked of ['/dataset-B', null]) {
+  test(`dataset installation reopens the picker and ${picked ? 'uses the new destination' : 'cancels without writing'}`, async () => {
+    const calls: { name: string; args: Record<string, unknown> }[] = [];
+    const produced = { site: '/output/test_site.nc', met: '/output/test_Met.nc' };
+    let scan: unknown = null;
+    const install = pageCallback('installToDataset', {
+      datasetRoot: '/dataset-A',
+      produced,
+      setDatasetRoot: () => {},
+      preparedDatasetDestinations,
+      notify: () => {},
+      t: (_zh: string, en: string) => en,
+      setDatasetScan: (value: unknown) => {
+        scan = value;
+      },
+      invoke: async (name: string, args: Record<string, unknown>) => {
+        calls.push({ name, args });
+        if (name === 'pick_folder') return picked;
+        if (name === 'scan_sites') return { sites: [{ name: 'test' }] };
+      },
+    });
+    await install();
+    assert.equal(calls[0]?.name, 'pick_folder');
+    assert.deepEqual(calls[0]?.args, { key: 'prep-dataset' });
+    if (!picked) {
+      assert.equal(calls.length, 1);
+      assert.equal(scan, null);
+    } else {
+      assert.deepEqual(
+        calls.filter((c) => c.name === 'install_prepared_file').map((c) => c.args.destination),
+        ['/dataset-B/Sitedata/test_site.nc', '/dataset-B/Forcing/test_Met.nc'],
+      );
+      assert.deepEqual(calls.find((c) => c.name === 'scan_sites')?.args, {
+        dir: '/dataset-B/Sitedata',
+        forcingDir: '/dataset-B/Forcing',
+        quick: true,
+      });
+    }
+    assert.deepEqual(produced, { site: '/output/test_site.nc', met: '/output/test_Met.nc' });
+  });
+}

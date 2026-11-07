@@ -1458,57 +1458,31 @@ fn publish_site_product<T>(
     result
 }
 
-/// 禁止覆盖发布站点产物。硬链接不可用的文件系统（exFAT/FAT、部分 SMB/NFS）以前会让整个
-/// `site-new` 失败；这里回退到"独占发布锁 + 同目录 rename"，与 observation-table 的发布策略
-/// 同思路（GUI 审查 F-D-05）。锁只由创建者删除，崩溃留下的锁会一直挡路并给出人工删除提示，
-/// 宁可让用户确认一次，也不引入会覆盖产物的竞态。
+/// 发布锁约束不了外部写入者，禁止覆盖模式必须使用原子的硬链接发布。
 fn install_site_output_no_clobber(staged: &Path, out: &Path) -> Result<()> {
+    install_site_output_with_link(staged, out, |source, destination| {
+        std::fs::hard_link(source, destination)
+    })
+}
+
+fn install_site_output_with_link(
+    staged: &Path,
+    out: &Path,
+    link: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> Result<()> {
     use std::io::ErrorKind;
-    match std::fs::hard_link(staged, out) {
-        Ok(()) => return Ok(()),
+    match link(staged, out) {
+        Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
             anyhow::bail!("产物已存在，未覆盖：{}", out.display())
         }
-        Err(_) => {}
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "无法安全发布 {}，未覆盖目标文件；请使用支持硬链接的文件系统，或明确授权覆盖 / Cannot publish without risking an overwrite at {}; choose a filesystem supporting hard links or explicitly authorize overwrite",
+                out.display(), out.display()
+            )
+        }),
     }
-    install_site_output_with_lock(staged, out)
-}
-
-/// 硬链接不可用时的回退发布；单独成函数便于测试锁与已有文件语义。
-fn install_site_output_with_lock(staged: &Path, out: &Path) -> Result<()> {
-    use std::io::ErrorKind;
-    let name = out
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "site.nc".into());
-    let lock = out.with_file_name(format!(".{name}.publish.lock"));
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&lock)
-    {
-        Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => anyhow::bail!(
-            "目标文件正在被另一个建站任务写入：{}；若确认上次已异常退出，删除锁文件 {} 后重试 / another site creation is publishing {}; if it crashed, remove {} and retry",
-            out.display(),
-            lock.display(),
-            out.display(),
-            lock.display()
-        ),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("无法创建发布锁 {}", lock.display()));
-        }
-    }
-    let result = (|| {
-        if out.symlink_metadata().is_ok() {
-            anyhow::bail!("产物已存在，未覆盖：{}", out.display());
-        }
-        std::fs::rename(staged, out)
-            .with_context(|| format!("无法发布 {} 到 {}", staged.display(), out.display()))
-    })();
-    let _ = std::fs::remove_file(&lock);
-    result
 }
 
 /// `colm-cli site-new`：从站点身份与经纬度建立标准命名的 site.nc。

@@ -2873,6 +2873,39 @@ run=other|r9|running|sha9|2026-01-04T00:00:00Z|||
 }
 
 #[test]
+fn download_lists_fold_nested_paths_so_tar_does_not_self_hardlink() {
+    // 报告文件与其父目录同时进 tar 清单时，macOS tar 会报 "hardlink pointing to itself"
+    // 并以非零退出码结束（F-C-01 真实服务器验收）。下载清单只保留父目录。
+    let entries = vec![
+        "run-in.json".to_string(),
+        "output/cmp/reports/evaluation_report_standalone.html".to_string(),
+        "output/cmp/reports".to_string(),
+        "output/cmp/metrics".to_string(),
+    ];
+    assert_eq!(
+        super::nested_entries(&entries),
+        vec![
+            "run-in.json".to_string(),
+            "output/cmp/reports".to_string(),
+            "output/cmp/metrics".to_string()
+        ]
+    );
+    // 无嵌套时保持顺序，重复路径只留一次。
+    assert_eq!(
+        super::nested_entries(&["b".to_string(), "a".to_string(), "b".to_string()]),
+        vec!["b".to_string(), "a".to_string()]
+    );
+    assert_eq!(
+        super::nested_entries(&[
+            "reports".to_string(),
+            "reports/report.html".to_string(),
+            "reports-old/report.html".to_string(),
+        ]),
+        vec!["reports".to_string(), "reports-old/report.html".to_string()]
+    );
+}
+
+#[test]
 fn remote_history_runs_keep_only_the_newest_twenty() {
     let mut text = String::new();
     for index in 1..=25 {

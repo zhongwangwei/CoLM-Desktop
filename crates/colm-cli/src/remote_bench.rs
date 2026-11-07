@@ -2292,7 +2292,7 @@ pub(super) fn fetch(opts: &Opts) -> Result<()> {
             let listing = ssh.run_ok(&legacy_listing_script(&project))?;
             let entries = clean_entries(&listing);
             require_report(&entries)?;
-            ssh.download(&project, &entries, &out)?;
+            ssh.download(&project, &nested_entries(&entries), &out)?;
             println!(
                 "{}",
                 json!({
@@ -2320,7 +2320,7 @@ pub(super) fn fetch(opts: &Opts) -> Result<()> {
             );
             let entries = clean_entries(&listing);
             require_recorded_report(&entries, report.as_deref())?;
-            ssh.download(&dir, &entries, &out)?;
+            ssh.download(&dir, &nested_entries(&entries), &out)?;
             println!(
                 "{}",
                 json!({
@@ -2483,6 +2483,31 @@ fn clean_entries(listing: &str) -> Vec<String> {
         .filter(|line| !line.is_empty() && !line.contains("..") && !line.starts_with('/'))
         .map(str::to_owned)
         .collect()
+}
+
+/// tar 清单去重：同时列了目录和目录内文件时，GNU tar 会把第二个路径存成"指向自身的硬链接"，
+/// macOS bsdtar 解包时会报 `Skipping hardlink pointing to itself` 并以非零退出码结束 ——
+/// 文件虽然解出来了，但取回命令被当成失败（F-C-01 真实服务器验收发现的 P2）。
+/// 只对**下载**用去重后的清单；报告存在性检查仍用完整清单。
+fn nested_entries(entries: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries {
+        if out.iter().any(|kept| {
+            entry == kept
+                || entry
+                    .strip_prefix(kept)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        }) {
+            continue;
+        }
+        out.retain(|kept| {
+            !kept
+                .strip_prefix(entry)
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        out.push(entry.clone());
+    }
+    out
 }
 
 /// 报告是这个命令唯一要给人看的东西：没有 `reports/` 目录时明确拒绝，而不是装一份只有指标的镜像
