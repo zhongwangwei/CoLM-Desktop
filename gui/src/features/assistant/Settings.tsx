@@ -30,8 +30,6 @@ import {
   EXTERNAL_LLM_CONFIRM_ZH,
   LLM_ENDPOINT_CONFIRM_EN,
   LLM_ENDPOINT_CONFIRM_ZH,
-  LLM_SCOPE_NOTE_EN,
-  LLM_SCOPE_NOTE_ZH,
   TIANHE_LLM_POLICY_EN,
   TIANHE_LLM_POLICY_ZH,
   type AgentEvent,
@@ -712,6 +710,12 @@ export default function AssistantSettings({
   const endpointBlocked = endpointGuard?.verdict === 'blocked';
   const endpointConfirmRequired = endpointDecision.verdict === 'needs_confirmation';
   const externalBackend = draft.backend !== 'builtin';
+  const showEndpointCheck =
+    externalBackend ||
+    !!endpointGuardError ||
+    !endpointGuard ||
+    endpointBlocked ||
+    endpointConfirmRequired;
   const externalAcknowledged = draft.external_llm_ack === true;
   const customProvider = builtin && providerId(draft) === 'custom';
   const presetBase = API_PROVIDERS.find((provider) => provider.id === providerId(draft))?.base_url;
@@ -890,13 +894,11 @@ export default function AssistantSettings({
               'Messages go to the service and model above; changes below take effect after saving.',
             )}
       </p>
-      {/* 天河 LLM 底线：blocked 禁止且不提供绕过；自定义端点必须确认；外部后端确认其模型服务不在天河。 */}
-      {hasBackend() && (
+      {hasBackend() && showEndpointCheck && (
         <section
-          aria-label={t('模型服务端点底线', 'Model service endpoint policy')}
+          aria-label={t('模型端点检查', 'Model endpoint check')}
           className="space-y-1 rounded border p-2"
         >
-          <strong>{t('模型服务端点（天河底线）', 'Model service endpoint (Tianhe policy)')}</strong>
           {externalBackend ? (
             <>
               <p className="text-xs text-muted-foreground">
@@ -962,16 +964,7 @@ export default function AssistantSettings({
                 {t(LLM_ENDPOINT_CONFIRM_ZH, LLM_ENDPOINT_CONFIRM_EN)}
               </label>
             </Notice>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              {t(
-                '官方云服务：不需要额外确认。',
-                'Official cloud service: no extra confirmation needed.',
-              )}
-              {endpointGuard.host ? ` · ${endpointGuard.host}` : ''}
-            </p>
-          )}
-          <p className="text-xs text-muted-foreground">{t(LLM_SCOPE_NOTE_ZH, LLM_SCOPE_NOTE_EN)}</p>
+          ) : null}
         </section>
       )}
       <fieldset disabled={disabled || busy || !hasBackend()} className="space-y-3">

@@ -787,3 +787,71 @@ test('the degraded project home offers a model loading retry', async () => {
   await page.click('project-retry-startup');
   assert.deepEqual(page.routes, ['retry-startup']);
 });
+
+test('project force deletion accepts selected revisions and sends only confirmed targets', async () => {
+  const { confirmForceDelete } = await import('../../lib/model-tidy');
+  const { setConfirmHost } = await import('../../lib/confirm');
+  const target = { id: 'soil', revision: 2 };
+  let pending: unknown = null;
+  const ask = expression('askDelete', {
+    selectedId: 'soil',
+    revisionsOf: () => [target],
+    setDeleteReport: () => {},
+    setPendingDelete: (value: unknown) => {
+      pending = value;
+    },
+  });
+  ask({ version: target, name: 'Selected soil' });
+  assert.ok(pending, 'selected custom models reach the confirmation area');
+  const calls: unknown[] = [];
+  const run = expression('deleteVersions', {
+    pendingDelete: pending,
+    confirmForceDelete,
+    t: (_zh: string, en: string) => en,
+    work: async (fn: () => Promise<unknown>) => fn(),
+    active: { current: true },
+    invokeJson: async (cmd: string, args: unknown) => {
+      calls.push([cmd, args]);
+      return { deleted: [target], failed: [], removed: [] };
+    },
+    refreshVersions: async () => {
+      calls.push('refresh');
+    },
+    setPendingDelete: () => {},
+    setDeleteReport: () => {},
+  });
+  try {
+    setConfirmHost((request) => request.resolve(false));
+    await run(true);
+    assert.deepEqual(calls, []);
+    setConfirmHost((request) => request.resolve(true));
+    await run(true);
+    assert.deepEqual(calls, [
+      ['model_delete', { versions: [target], keepHistory: true, force: true }],
+      'refresh',
+    ]);
+  } finally {
+    setConfirmHost(null);
+  }
+});
+
+test('normal official cleanup still keeps the selected old revision', async () => {
+  const versions = [1, 2].map((revision) => ({ id: 'official', revision }));
+  const calls: unknown[] = [];
+  const run = expression('deleteVersions', {
+    pendingDelete: { title: 'Old official', versions },
+    selectedId: 'official',
+    state: { versionRef: versions[0] },
+    work: async (fn: () => Promise<unknown>) => fn(),
+    active: { current: true },
+    invokeJson: async (command: string, args: unknown) => {
+      calls.push([command, args]);
+      return { deleted: [], failed: [], removed: [] };
+    },
+    refreshVersions: async () => {},
+    setPendingDelete: () => {},
+    setDeleteReport: () => {},
+  });
+  await run();
+  assert.deepEqual(calls, [['model_delete', { versions: [versions[1]] }]]);
+});

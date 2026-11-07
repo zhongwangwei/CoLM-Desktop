@@ -1131,6 +1131,10 @@ export const commandContract = {
     "keepHistory": {
       "required": false,
       "rust_type": "Option<bool>"
+    },
+    "force": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "model_delete_draft": {

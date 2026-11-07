@@ -184,11 +184,25 @@ impl Registry {
         Ok(removal_blocker(&self.list()?, &self.drafts()?, version))
     }
     pub fn remove(&self, version: &VersionRef) -> Result<Vec<PathBuf>> {
+        self.remove_checked(version, false)
+    }
+    /// Explicitly discard one revision despite references; the current official baseline stays.
+    /// Callers must obtain confirmation and exclude active runs before using this operation.
+    pub fn force_remove(&self, version: &VersionRef) -> Result<Vec<PathBuf>> {
+        self.remove_checked(version, true)
+    }
+    fn remove_checked(&self, version: &VersionRef, force: bool) -> Result<Vec<PathBuf>> {
         let _lock = self.lock()?;
         let dir = self.revision_dir(version)?;
         let frozen = self.get(version)?;
         let all = self.list()?;
-        if let Some(reason) = removal_blocker(&all, &self.drafts()?, version) {
+        let drafts = self.drafts()?;
+        let blocker = if force {
+            baseline_removal_blocker(&all, version)
+        } else {
+            removal_blocker(&all, &drafts, version)
+        };
+        if let Some(reason) = blocker {
             anyhow::bail!(reason);
         }
         self.discard_revision(&dir)?;
@@ -196,6 +210,7 @@ impl Registry {
         if !all
             .iter()
             .any(|r| r.version != *version && r.code == frozen.code)
+            && !drafts.iter().any(|draft| draft.code == frozen.code)
         {
             let source = self.source_dir(&frozen.code)?;
             if source.is_dir() {
@@ -291,19 +306,26 @@ impl Registry {
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .context("invalid draft filename")?;
-                drafts.push(self.draft(id)?);
+                drafts.push(self.draft_metadata(id)?);
             }
         }
         drafts.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(drafts)
     }
     pub fn draft(&self, id: &str) -> Result<ModelDraft> {
+        let draft = self.draft_metadata(id)?;
+        self.get(&draft.parent)?;
+        Ok(draft)
+    }
+    /// List/delete metadata without resolving a parent that may have been explicitly removed.
+    /// Opening, saving and freezing continue to use `draft` and require the parent revision.
+    pub fn draft_metadata(&self, id: &str) -> Result<ModelDraft> {
         validation::identifier(id)?;
         let mut draft: ModelDraft =
             read_json(&self.root.join("drafts").join(format!("{id}.json")))?;
         draft.overlay = model_overlay(&draft.overlay);
         ensure!(draft.id == id, "draft identity mismatch");
-        self.validate_draft(&draft)?;
+        Self::validate_draft_metadata(&draft)?;
         Ok(draft)
     }
     pub fn create_draft(&self, mut draft: ModelDraft) -> Result<ModelDraft> {
@@ -404,6 +426,11 @@ impl Registry {
         Ok(draft)
     }
     fn validate_draft(&self, draft: &ModelDraft) -> Result<()> {
+        Self::validate_draft_metadata(draft)?;
+        self.get(&draft.parent)?;
+        Ok(())
+    }
+    fn validate_draft_metadata(draft: &ModelDraft) -> Result<()> {
         validation::identifier(&draft.id)?;
         ensure!(draft.id != "official", "official model is read-only");
         ensure!(
@@ -420,7 +447,8 @@ impl Registry {
             draft.parent.id != draft.id,
             "model cannot derive from itself"
         );
-        self.get(&draft.parent)?;
+        validation::identifier(&draft.parent.id)?;
+        ensure!(draft.parent.revision > 0, "revision must be positive");
         validation::code(&draft.code)?;
         validation::applicability(&draft.applicability)?;
         validate_overlay(&draft.overlay)
@@ -569,6 +597,21 @@ fn removal_blocker(
     drafts: &[ModelDraft],
     version: &VersionRef,
 ) -> Option<String> {
+    if let Some(reason) = baseline_removal_blocker(all, version) {
+        return Some(reason);
+    }
+    if let Some(child) = all.iter().find(|r| r.parent.as_ref() == Some(version)) {
+        return Some(format!(
+            "revision {}#{} is derived from it; delete that revision first",
+            child.version.id, child.version.revision
+        ));
+    }
+    drafts
+        .iter()
+        .find(|d| d.parent == *version)
+        .map(|draft| format!("draft {} is based on it; delete that draft first", draft.id))
+}
+fn baseline_removal_blocker(all: &[FrozenRevision], version: &VersionRef) -> Option<String> {
     if version.id == "official"
         && all
             .iter()
@@ -581,16 +624,7 @@ fn removal_blocker(
             "the latest official revision is the bundled baseline and cannot be deleted".into(),
         );
     }
-    if let Some(child) = all.iter().find(|r| r.parent.as_ref() == Some(version)) {
-        return Some(format!(
-            "revision {}#{} is derived from it; delete that revision first",
-            child.version.id, child.version.revision
-        ));
-    }
-    drafts
-        .iter()
-        .find(|d| d.parent == *version)
-        .map(|draft| format!("draft {} is based on it; delete that draft first", draft.id))
+    None
 }
 /// Bytes under `path`, not following links.
 fn tree_size(path: &Path) -> Result<u64> {

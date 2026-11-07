@@ -313,14 +313,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [notify, update]);
   const refreshVersions = useCallback(async () => {
     const versions = await invokeJson<FrozenRevision[]>('model_list');
-    const ref = current.current.versionRef;
-    const version =
-      versions.find((v) => v.version.id === ref.id && v.version.revision === ref.revision) ??
-      versions
-        .filter((v) => v.version.id === 'official')
-        .sort((a, b) => b.version.revision - a.version.revision)[0] ??
-      null;
-    update({ versions, version, ...(version ? { versionRef: version.version } : {}) });
+    update((old) => {
+      const version = selectionAfterPrune(versions, [], old.versionRef);
+      const chosenVersion =
+        old.chosenVersion &&
+        versions.some(
+          (v) =>
+            v.version.id === old.chosenVersion?.id &&
+            v.version.revision === old.chosenVersion?.revision,
+        )
+          ? old.chosenVersion
+          : null;
+      return {
+        versions,
+        version,
+        ...(version ? { versionRef: version.version } : {}),
+        chosenVersion,
+      };
+    });
   }, [update]);
   const openCase = useCallback(
     async (dir: string, tab: AppState['caseTab'] = 'settings') => {

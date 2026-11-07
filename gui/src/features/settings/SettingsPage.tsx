@@ -3,22 +3,26 @@ import { useApp } from '../../lib/app-state';
 import { usePageContract } from '../../lib/guide';
 import { invokeJson } from '../../lib/ipc';
 import {
+  confirmForceDelete,
   formatBytes,
   selectionAfterPrune,
   withoutRevisions,
   type PruneReport,
 } from '../../lib/model-tidy';
+import type { VersionRef } from '../../lib/types';
 import { Button, Card, Field, Select } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
 
 /** Check how much the old official revisions take, and tidy them on request. */
 function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
-  const { state, update } = useApp();
+  const { state, update, refreshVersions } = useApp();
   const [report, setReport] = useState<PruneReport | null>(null);
   const [busy, setBusy] = useState(false);
   // 结果文案按当前语言在渲染时生成；错误原文切换语言后清掉，避免中英混排（F-A-06）。
   const [message, setMessage] = useState<
-    { kind: 'tidied'; removed: number; bytes: number } | { kind: 'error'; text: string } | null
+    | { kind: 'tidied'; removed: number; bytes: number }
+    | { kind: 'error' | 'forced'; text: string }
+    | null
   >(null);
   useEffect(() => {
     setMessage((current) => (current?.kind === 'error' ? null : current));
@@ -51,13 +55,45 @@ function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
       setBusy(false);
     }
   };
+  const officials = state.versions.filter((v) => v.version.id === 'official');
+  const latest = Math.max(...officials.map((v) => v.version.revision));
+  const forceTargets = officials.filter((v) => v.version.revision !== latest).map((v) => v.version);
+  const forceCleanup = async () => {
+    if (busy) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const result = await confirmForceDelete(forceTargets, t, (args) =>
+        invokeJson<{ deleted: VersionRef[]; failed: { version: VersionRef; reason: string }[] }>(
+          'model_delete',
+          args,
+        ),
+      );
+      if (!result) return;
+      await refreshVersions();
+      setReport(null);
+      setMessage({
+        kind: 'forced',
+        text:
+          t(
+            `已强制清理 ${result.deleted.length} 个版本；保留 ${result.failed.length} 个。`,
+            `Force deleted ${result.deleted.length} revisions; kept ${result.failed.length}.`,
+          ) +
+          result.failed.map((f) => `\n${f.version.id}#${f.version.revision}: ${f.reason}`).join(''),
+      });
+    } catch (error) {
+      setMessage({ kind: 'error', text: String(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
   const removable = report?.dry_run ? report.removed.length : 0;
   return (
     <Card
       title={t('模型缓存', 'Model cache')}
       description={t(
-        '每次软件更新都会登记一个新的官方修订和约 126 MB 的源码快照。启动时会自动整理没有算例、研究或历史记录使用的旧官方修订；最新修订、被派生或草稿依赖的修订始终保留。',
-        'Each software update registers a new official revision with a ~126 MB source snapshot. Old official revisions no case, study or history record uses are tidied at start; the latest one and any a version or draft builds on always stay.',
+        '每次软件更新都会登记一个新的官方修订和约 126 MB 的源码快照。启动时会自动整理没有算例、研究或历史记录使用的旧官方修订；自动整理会保留最新修订和被派生或草稿依赖的修订。强制清理仍保留最新官方修订。',
+        'Each software update registers a new official revision with a ~126 MB source snapshot. Old official revisions no case, study or history record uses are tidied at start; automatic tidying keeps the latest one and any a version or draft builds on. Force tidying still keeps the latest official revision.',
       )}
     >
       {report?.dry_run && (
@@ -96,6 +132,13 @@ function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
         {/* 整理模型缓存会删文件，按 D 级规则只在界面上做，不登记给助手。 */}
         <Button disabled={busy || !removable} onClick={() => void run(false)}>
           {t('整理模型缓存', 'Tidy model cache')}
+        </Button>
+        <Button
+          variant="danger"
+          disabled={busy || !forceTargets.length}
+          onClick={() => void forceCleanup()}
+        >
+          {t('强制清理旧官方版本', 'Force tidy old official revisions')}
         </Button>
       </div>
     </Card>

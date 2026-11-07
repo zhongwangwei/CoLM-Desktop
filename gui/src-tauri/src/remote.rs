@@ -1115,7 +1115,15 @@ async fn ssh_cli_json_untracked(
     }
     // 远程子进程也要自成一个进程组：关窗/退出时按组终止，SSH 与远端提交一起停。
     colm_kernel::run::top_level_sidecar(&mut command);
+    // The worker owns this lease: dropping the async caller does not stop spawn_blocking.
+    let model_activity = matches!(
+        args.first().map(String::as_str),
+        Some("remote-run" | "remote-study-run" | "remote-kernel")
+    )
+    .then(crate::model::BindingChange::begin)
+    .transpose()?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _model_activity = model_activity;
         let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1825,6 +1833,7 @@ async fn submit_run(
     record_input_fingerprints: Option<bool>,
     pack: Option<bool>,
 ) -> Result<Value, String> {
+    let _model_activity = crate::model::BindingChange::begin()?;
     if let Some(run_id) = &run_id {
         crate::sidecar::validate_run_id(run_id)?;
     }
@@ -1936,6 +1945,7 @@ pub async fn remote_preview(
     preprocessors: Option<String>,
     record_input_fingerprints: Option<bool>,
 ) -> Result<Value, String> {
+    let _model_activity = crate::model::BindingChange::begin()?;
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
     let server = run_server_overrides(server_for(app.clone(), &host)?, threads, cpus, scheduler)?;
@@ -2726,6 +2736,7 @@ pub async fn remote_study_run(
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
 ) -> Result<Value, String> {
+    let _model_activity = crate::model::BindingChange::begin()?;
     absolute_study(&study_dir)?;
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);

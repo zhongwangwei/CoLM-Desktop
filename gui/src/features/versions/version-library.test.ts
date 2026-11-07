@@ -140,3 +140,41 @@ test('version and draft rows register their buttons while deletion stays manual'
   assert.ok(html.includes('>Delete<'), '草稿的删除按钮在界面上');
   assert.doesNotMatch(html, /data-action="[^"]*(delete|remove|cleanup)/i);
 });
+
+test('force deletion is available with unknown usage and for the selected version, except latest official', async () => {
+  const { createElement } = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { default: VersionLibrary } = await import('./VersionLibrary');
+  const revision = (id: string, r: number) =>
+    ({
+      version: { id, revision: r },
+      name: `${id}-${r}`,
+      parent: null,
+      code: { kind: 'official', workspace: null, commit: null },
+      overlay: { parameters: [], physics: {}, process_files: [], hybrid: null },
+      created_unix: 0,
+      note: '',
+    }) as unknown as import('../../lib/types').FrozenRevision;
+  const latest = revision('official', 2),
+    old = revision('official', 1),
+    used = revision('soil', 1);
+  const html = renderToStaticMarkup(
+    createElement(VersionLibrary, {
+      versions: [latest, old, used],
+      drafts: [],
+      inUse: used,
+      disabled: false,
+      en: true,
+      onOpen: () => {},
+      onUse: () => {},
+      onOpenDraft: () => {},
+      onDeleted: async () => {},
+      onDraftDeleted: async () => {},
+    }),
+  );
+  const rows = html.split('<tr');
+  assert.ok(rows.find((row) => row.includes('version-open-soil-1'))?.includes('Force delete'));
+  assert.ok(rows.find((row) => row.includes('version-open-official-1'))?.includes('Force delete'));
+  assert.ok(!rows.find((row) => row.includes('version-open-official-2'))?.includes('Force delete'));
+  assert.doesNotMatch(html, /data-action="[^"]*(force|delete|remove)/i);
+});

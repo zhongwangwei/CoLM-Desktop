@@ -49,7 +49,7 @@ pub(crate) fn options(args: &mut Vec<String>, version: Option<&VersionRef>) -> R
 }
 pub(crate) async fn cli(mut args: Vec<String>) -> Result<Value, String> {
     options(&mut args, None)?;
-    let output = crate::sidecar::capture_async(args).await?;
+    let output = with_model_activity(move || crate::sidecar::capture(&args)).await?;
     serde_json::from_str(output.trim()).map_err(|e| format!("invalid model CLI response: {e}"))
 }
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
@@ -183,13 +183,22 @@ fn delete_revisions(
     bound: &Uses,
     keep_history: bool,
 ) -> DeleteReport {
+    collect_deletions(versions, |version| {
+        delete_revision(registry, ledger, version, bound, keep_history)
+    })
+}
+
+fn collect_deletions(
+    versions: Vec<VersionRef>,
+    mut remove: impl FnMut(&VersionRef) -> Result<Vec<String>, String>,
+) -> DeleteReport {
     let mut report = DeleteReport {
         deleted: Vec::new(),
         failed: Vec::new(),
         removed: Vec::new(),
     };
     for version in versions {
-        match delete_revision(registry, ledger, &version, bound, keep_history) {
+        match remove(&version) {
             Ok(removed) => {
                 report.removed.extend(removed);
                 report.deleted.push(version);
@@ -200,11 +209,35 @@ fn delete_revisions(
     report
 }
 
-/// Delete saved model revisions and the source snapshots only they used. Each revision is
-/// checked on its own; the report says which stayed and why.
-///
-/// 有现存的算例或研究绑定就不删。`keep_history`：提到它的历史记录留着（不能再按它重放）；
-/// 不给时还要求没有历史记录提到它。
+/// 强删只跳过引用检查；运行、建例及绑定变更仍必须停止，避免删除正在使用的代码。
+fn delete_requested_revisions(
+    registry: &Registry,
+    processes: &crate::sidecar::RunProcesses,
+    creations: &crate::sidecar::CaseCreations,
+    versions: Vec<VersionRef>,
+    force: bool,
+    checked_delete: impl FnOnce(Vec<VersionRef>) -> Result<DeleteReport, String>,
+) -> Result<DeleteReport, String> {
+    while_idle(processes, creations, || {
+        let _delete_guard = BindingDeleteGuard::begin()?;
+        if force {
+            return Ok(collect_deletions(versions, |version| {
+                registry
+                    .force_remove(version)
+                    .map(|removed| {
+                        removed
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect()
+                    })
+                    .map_err(|error| error.to_string())
+            }));
+        }
+        checked_delete(versions)
+    })
+}
+
+/// 默认检查项目和历史引用；显式 force 仅删除确认的修订，保留项目、研究和历史文件。
 #[tauri::command]
 pub async fn model_delete(
     app: tauri::AppHandle,
@@ -212,38 +245,41 @@ pub async fn model_delete(
     creations: tauri::State<'_, crate::sidecar::CaseCreations>,
     versions: Vec<VersionRef>,
     keep_history: Option<bool>,
+    force: Option<bool>,
 ) -> Result<DeleteReport, String> {
     use tauri::Manager;
     let keep_history = keep_history == Some(true);
-    let roots = known_project_roots(
-        &crate::recent::load_recent_strict(&app)?,
-        &app.path().app_data_dir().map_err(|e| e.to_string())?,
-    )?;
     let processes = processes.inner().clone();
     let creations = creations.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
-        let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
-        while_idle(&processes, &creations, || {
-            // 扫描绑定到删除结束期间独占绑定活动：算例迁移/缓存整理看到它会按"忙"退出，
-            // 不会出现"扫描时看不到、删除前刚绑上"的窗口（GUI 审查 F-V-06）。
-            let _delete_guard = BindingDeleteGuard::begin()?;
-            // 项目目录不可读时绑定扫描会静默漏报（同条故障注入：chmod 000 后 cases 2→0）。
-            // 先 fail-closed 地确认"每个已知项目根都能核对"，再在空闲锁里重新数绑定。
-            let scan_roots = roots.clone();
-            let bound = bounded_scan(PRUNE_SCAN_TIMEOUT, DELETE_SCAN_CONTEXT, move || {
-                let scan_ledger =
-                    colm_history::History::open_default().map_err(|e| e.to_string())?;
-                uses_checked(&scan_ledger, &scan_roots, true)
-            })?;
-            Ok(delete_revisions(
-                &registry,
-                &ledger,
-                versions,
-                &bound,
-                keep_history,
-            ))
-        })
+        delete_requested_revisions(
+            &registry,
+            &processes,
+            &creations,
+            versions,
+            force == Some(true),
+            |versions| {
+                // 旧目录和历史数据库只在普通删除时读取；强删不应被无法核查的引用阻塞。
+                let roots = known_project_roots(
+                    &crate::recent::load_recent_strict(&app)?,
+                    &app.path().app_data_dir().map_err(|e| e.to_string())?,
+                )?;
+                let bound = bounded_scan(PRUNE_SCAN_TIMEOUT, DELETE_SCAN_CONTEXT, move || {
+                    let scan_ledger =
+                        colm_history::History::open_default().map_err(|e| e.to_string())?;
+                    uses_checked(&scan_ledger, &roots, true)
+                })?;
+                let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
+                Ok(delete_revisions(
+                    &registry,
+                    &ledger,
+                    versions,
+                    &bound,
+                    keep_history,
+                ))
+            },
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -263,12 +299,11 @@ pub async fn model_delete_draft(
     let workspace = tauri::async_runtime::spawn_blocking(move || {
         let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
         while_idle(&processes, &creations, || {
-            let draft = registry.draft(&id).map_err(|e| e.to_string())?;
+            let draft = registry.draft_metadata(&id).map_err(|e| e.to_string())?;
+            let all = registry.drafts().map_err(|e| e.to_string())?;
             let shared = draft.code.workspace.as_ref().is_some_and(|name| {
-                registry.drafts().is_ok_and(|all| {
-                    all.iter()
-                        .any(|other| other.id != id && other.code.workspace.as_ref() == Some(name))
-                })
+                all.iter()
+                    .any(|other| other.id != id && other.code.workspace.as_ref() == Some(name))
             });
             registry.delete_draft(&id).map_err(|e| e.to_string())?;
             Ok(draft.code.workspace.filter(|_| !shared))
@@ -582,11 +617,11 @@ static BINDING_ACTIVITY: std::sync::Mutex<BindingActivity> =
         deleting: false,
     });
 
-const DELETE_BUSY: &str = "有算例正在变更模型版本或正在整理模型缓存，稍后再清理版本 / A case is changing model versions or the model cache is being tidied; retry the cleanup later";
+const DELETE_BUSY: &str = "有算例正在变更模型版本、远程任务正在准备或上传，或正在整理模型缓存；任务结束后重试 / A case is changing model versions, a remote task is preparing or uploading, or the model cache is being tidied; retry after the task finishes";
 
-struct BindingChange;
+pub(crate) struct BindingChange;
 impl BindingChange {
-    fn begin() -> Result<Self, String> {
+    pub(crate) fn begin() -> Result<Self, String> {
         let mut state = BINDING_ACTIVITY
             .lock()
             .map_err(|_| "绑定活动状态不可用 / Binding activity state is unavailable")?;
@@ -608,6 +643,19 @@ impl Drop for BindingChange {
             state.active -= 1;
         }
     }
+}
+
+/// Keep model files pinned until the owned operation finishes, even if its caller is cancelled.
+pub(crate) async fn with_model_activity<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let activity = BindingChange::begin()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
+        work()
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// 版本清理期间独占绑定活动：算例迁移（`model_migrate_case`）与缓存整理（`model_prune`）
@@ -643,7 +691,7 @@ const PRUNE_SCAN_CONTEXT: &str = "未清理模型缓存 / Model cache was not cl
 const DELETE_SCAN_CONTEXT: &str = "模型版本未删除 / Revisions were not deleted";
 
 /// 缺失或空的已知项目根可能是离线卷；删除和自动整理共用严格扫描，拒绝猜测绑定已消失。
-/// 真正删掉或清空项目后，需要用户移除对应最近项目记录才能恢复清理。
+/// 普通清理仍拒绝未知引用；可恢复项目、移除对应最近记录，或人工强制删除选定版本。
 fn ensure_project_roots_known(roots: &[PathBuf]) -> Result<(), String> {
     for path in roots {
         let available = std::fs::read_dir(path).and_then(|mut entries| match entries.next() {
@@ -655,7 +703,7 @@ fn ensure_project_roots_known(roots: &[PathBuf]) -> Result<(), String> {
         });
         if let Err(error) = available {
             return Err(format!(
-                "无法确认项目目录 {}：{error}。目录缺失、为空或不可读，磁盘或网络卷可能未挂载；清理已取消。请恢复项目或移除对应的最近项目记录后重试 / Cannot verify project folder {}: {error}. It is missing, empty or unreadable; a volume may be offline. Cleanup was cancelled; restore the project or remove its recent project entry before retrying",
+                "无法确认项目目录 {}：{error}。目录缺失、为空或不可读，磁盘或网络卷可能未挂载；清理已取消。请恢复项目或移除对应的最近项目记录后重试，或使用强制删除 / Cannot verify project folder {}: {error}. It is missing, empty or unreadable; a volume may be offline. Cleanup was cancelled; restore the project or remove its recent project entry before retrying, or use force deletion",
                 path.display(), path.display()
             ));
         }
@@ -1681,6 +1729,162 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn force_delete_skips_reference_reads_but_preserves_files_and_activity_guards() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-force-delete-{}",
+            colm_history::Event::start("test").operation_id
+        ));
+        let registry = Registry::open(root.join("models")).unwrap();
+        let code = |sha: char| colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: sha.to_string().repeat(64),
+        };
+        let old = registry.install_official(code('a')).unwrap().version;
+        let latest = registry.install_official(code('b')).unwrap().version;
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let binding = project.join(colm_model::BINDING_FILE);
+        let binding_bytes = json!({"schema":1,"version":old}).to_string();
+        std::fs::write(&binding, &binding_bytes).unwrap();
+        let history_path = root.join("history.sqlite3");
+        let ledger = colm_history::History::open(&history_path).unwrap();
+        let mut event = colm_history::Event::start("run");
+        event.version_id = Some(old.id.clone());
+        event.revision = Some(old.revision.to_string());
+        ledger.append(&event).unwrap();
+        let bound = uses(&ledger, std::slice::from_ref(&project)).unwrap();
+        assert!(delete_revision(&registry, &ledger, &old, &bound, true).is_err());
+        assert!(delete_revision(&registry, &ledger, &old, &Uses::default(), false).is_err());
+        drop(ledger);
+        let history_bytes = std::fs::read(&history_path).unwrap();
+        let runs = crate::sidecar::RunProcesses::default();
+        let creations = crate::sidecar::CaseCreations::default();
+        let offline = root.join("offline-project");
+        assert!(delete_requested_revisions(
+            &registry,
+            &runs,
+            &creations,
+            vec![old.clone()],
+            false,
+            |_| {
+                ensure_project_roots_known(&[offline])?;
+                panic!("missing root must reject ordinary deletion")
+            },
+        )
+        .is_err());
+        assert!(registry.get(&old).is_ok());
+        let creation = crate::sidecar::CaseCreation::begin(
+            &creations,
+            root.join("creating").to_str().unwrap(),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(delete_requested_revisions(
+            &registry,
+            &runs,
+            &creations,
+            vec![old.clone()],
+            true,
+            |_| panic!("force must never read references"),
+        )
+        .is_err());
+        creation.finish(Ok(String::new())).unwrap();
+        drop(creation);
+        let change = BindingChange::begin().unwrap();
+        assert!(delete_requested_revisions(
+            &registry,
+            &runs,
+            &creations,
+            vec![old.clone()],
+            true,
+            |_| panic!("force must never read references"),
+        )
+        .is_err());
+        drop(change);
+        let report = delete_requested_revisions(
+            &registry,
+            &runs,
+            &creations,
+            vec![old.clone(), latest.clone()],
+            true,
+            |_| panic!("force must never read roots or history"),
+        )
+        .unwrap();
+        assert_eq!(report.deleted, vec![old.clone()]);
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(report.failed[0].version, latest);
+        assert!(registry.get(&old).is_err());
+        assert!(registry.get(&latest).is_ok());
+        assert_eq!(std::fs::read_to_string(binding).unwrap(), binding_bytes);
+        assert_eq!(std::fs::read(&history_path).unwrap(), history_bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_worker_lease_survives_cancellation_and_releases_after_failure() {
+        use std::future::Future;
+        use std::sync::{mpsc, Arc};
+        use std::task::{Context, Poll, Wake, Waker};
+        use std::time::Duration;
+        struct NoopWake;
+        impl Wake for NoopWake {
+            fn wake(self: Arc<Self>) {}
+        }
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        let deleting = BindingDeleteGuard::begin().unwrap();
+        let denied =
+            tauri::async_runtime::block_on(with_model_activity(|| -> Result<(), String> {
+                panic!("deletion must reject before a worker starts")
+            }));
+        assert!(denied.is_err());
+        drop(deleting);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let future = with_model_activity(move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok::<(), String>(())
+        });
+        let mut future = Box::pin(async move {
+            future.await?;
+            finished_tx.send(()).unwrap();
+            Ok::<(), String>(())
+        });
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(BindingDeleteGuard::begin().is_err());
+        drop(future);
+        assert!(
+            BindingDeleteGuard::begin().is_err(),
+            "worker still reads model files"
+        );
+        release_tx.send(()).unwrap();
+        // Wait for the actual worker lease to drop, not for the cancelled caller.
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            if let Ok(deleting) = BindingDeleteGuard::begin() {
+                drop(deleting);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(
+            finished_rx.try_recv().is_err(),
+            "cancelled preflight must not submit later"
+        );
+        assert!(
+            tauri::async_runtime::block_on(with_model_activity(|| Err::<(), _>("failed".into())))
+                .is_err()
+        );
+        drop(BindingDeleteGuard::begin().unwrap());
     }
 
     #[test]

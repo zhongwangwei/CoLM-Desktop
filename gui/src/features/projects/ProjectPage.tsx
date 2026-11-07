@@ -1,3 +1,4 @@
+import { confirmForceDelete } from '../../lib/model-tidy';
 import { bilingual } from '../../lib/bilingual';
 import { choosableVersions, latestOfficial } from '../versions/version-tree';
 import { useEffect, useRef, useState } from 'react';
@@ -183,8 +184,7 @@ export default function ProjectPage() {
     .filter(
       (version) =>
         version.version.id === 'official' &&
-        version.version.revision !== official?.version.revision &&
-        versionKey(version) !== JSON.stringify(state.versionRef),
+        version.version.revision !== official?.version.revision,
     )
     .map((version) => version.version);
   const revisionsOf = (id: string) =>
@@ -193,7 +193,7 @@ export default function ProjectPage() {
       .map((version) => version.version)
       .sort((a, b) => b.revision - a.revision);
   function askDelete(version: FrozenRevision) {
-    if (version.version.id === 'official' || version.version.id === selectedId) return;
+    if (version.version.id === 'official') return;
     setDeleteReport(null);
     setPendingDelete({ title: version.name, versions: revisionsOf(version.version.id) });
   }
@@ -205,13 +205,24 @@ export default function ProjectPage() {
       versions: oldOfficial,
     });
   }
-  async function deleteVersions() {
+  async function deleteVersions(force = false) {
     if (!pendingDelete) return;
     const target = pendingDelete;
+    const versions = force
+      ? target.versions
+      : target.versions.filter(
+          (v) =>
+            v.id !== selectedId ||
+            (v.id === 'official' && v.revision !== state.versionRef.revision),
+        );
+    if (!versions.length) return;
     return work(async () => {
-      const report = await invokeJson<VersionDeleteReport>('model_delete', {
-        versions: target.versions,
-      });
+      const report = force
+        ? await confirmForceDelete(versions, t, (args) =>
+            invokeJson<VersionDeleteReport>('model_delete', args),
+          )
+        : await invokeJson<VersionDeleteReport>('model_delete', { versions });
+      if (!report) return;
       await refreshVersions();
       if (!active.current) return report;
       setPendingDelete(null);
@@ -569,8 +580,8 @@ export default function ProjectPage() {
           <div className="project-version-delete">
             <Notice tone="warning">
               {t(
-                `将永久删除“${pendingDelete.title}”的 ${pendingDelete.versions.length} 个版本修订，以及只被它们使用的源码快照。使用这些版本的历史记录仍在时不会删除，算例下次打开会改用最新官方版。`,
-                `Permanently delete ${pendingDelete.versions.length} revisions of “${pendingDelete.title}” and source snapshots only they use. Revisions still named by history records are kept; cases using them open with the latest official model.`,
+                `将永久删除“${pendingDelete.title}”的 ${pendingDelete.versions.length} 个版本修订，以及只被它们使用的源码快照。普通删除保留仍被引用的版本。项目与历史文件保留；强制删除后，引用它们的项目、研究、派生版本和草稿可能需要更换模型版本才能继续。`,
+                `Permanently delete ${pendingDelete.versions.length} revisions of “${pendingDelete.title}” and source snapshots only they use. Normal deletion keeps referenced revisions. Project and history files stay; after force deletion, referencing projects, studies, derived versions and drafts may need another model version to continue.`,
               )}
             </Notice>
             <div className="button-row">
@@ -579,10 +590,26 @@ export default function ProjectPage() {
               </Button>
               <Button
                 variant="danger"
-                disabled={!versionEnabled}
+                disabled={
+                  !versionEnabled ||
+                  pendingDelete.versions.every(
+                    (v) =>
+                      v.id === selectedId &&
+                      (v.id !== 'official' || v.revision === state.versionRef.revision),
+                  )
+                }
                 onClick={() => void deleteVersions().catch(() => {})}
               >
                 {busy ? t('正在删除…', 'Deleting…') : t('确认删除', 'Confirm deletion')}
+              </Button>
+              <Button
+                variant="danger"
+                disabled={!versionEnabled}
+                onClick={() => void deleteVersions(true).catch(() => {})}
+              >
+                {pendingDelete.versions.every((v) => v.id === 'official')
+                  ? t('强制清理', 'Force tidy')
+                  : t('强制删除', 'Force delete')}
               </Button>
             </div>
           </div>
@@ -642,12 +669,7 @@ export default function ProjectPage() {
                       <Button
                         variant="ghost"
                         className="project-version-delete-button"
-                        disabled={!versionEnabled || version.version.id === selectedId}
-                        title={
-                          version.version.id === selectedId
-                            ? t('先选择其他版本再删除', 'Choose another version before deleting')
-                            : undefined
-                        }
+                        disabled={!versionEnabled}
                         aria-label={`${t('删除版本', 'Delete version')} ${version.name}`}
                         onClick={() => askDelete(version)}
                       >

@@ -1929,3 +1929,64 @@ fn forcing_edits_resolve_remote_cache_header_without_rewriting_server_data() {
         "30.0"
     );
 }
+
+#[test]
+fn force_remove_keeps_baseline_and_sources_used_by_remaining_drafts_and_revisions() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let first = reg.install_official(code()).unwrap();
+    let mut newer = code();
+    newer.source_sha256 = "b".repeat(64);
+    let latest = reg.install_official(newer).unwrap();
+    let source = reg
+        .root()
+        .join("sources")
+        .join(source_cache_name(&code()).unwrap());
+    fs::create_dir_all(&source).unwrap();
+    fs::write(source.join("code.json"), "shared source").unwrap();
+    let mut spec = draft(first.version.clone());
+    spec.overlay
+        .physics
+        .insert("DEF_TUNING_CSOILC".into(), "0.006".into());
+    let draft = reg.create_draft(spec).unwrap();
+    let child = reg.freeze_keeping(&draft.id, &tmp.0, true).unwrap();
+    let draft_path = reg.root().join("drafts").join(format!("{}.json", draft.id));
+    let draft_before = fs::read(&draft_path).unwrap();
+    assert!(reg.remove(&first.version).is_err());
+    assert!(reg.force_remove(&latest.version).is_err());
+    let removed = reg.force_remove(&first.version).unwrap();
+    assert_eq!(removed.len(), 1);
+    assert!(reg.get(&first.version).is_err());
+    assert!(reg.get(&child.version).is_ok());
+    assert_eq!(fs::read(&draft_path).unwrap(), draft_before);
+    assert!(
+        source.exists(),
+        "remaining child and draft still need the source"
+    );
+    assert_eq!(
+        reg.drafts().unwrap().len(),
+        1,
+        "orphan metadata remains listable"
+    );
+    assert!(
+        reg.draft(&draft.id).is_err(),
+        "opening still requires its parent"
+    );
+    assert!(
+        reg.freeze(&draft.id, &tmp.0).is_err(),
+        "freezing still requires its parent"
+    );
+    reg.remove(&child.version).unwrap();
+    assert!(
+        source.exists(),
+        "the remaining draft alone must retain its source"
+    );
+    assert!(reg.get(&latest.version).is_ok());
+    assert_eq!(fs::read(&draft_path).unwrap(), draft_before);
+    reg.delete_draft(&draft.id).unwrap();
+    assert!(reg.drafts().unwrap().is_empty());
+    assert!(
+        source.exists(),
+        "draft deletion leaves code workspace cleanup to callers"
+    );
+}

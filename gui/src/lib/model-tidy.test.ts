@@ -28,3 +28,42 @@ test('removed revisions leave the version list and sizes read naturally', () => 
   assert.equal(formatBytes(126 * 1024 ** 2), '126 MB');
   assert.equal(formatBytes(10), '1 KB');
 });
+
+test('force deletion requires confirmation and preserves the exact confirmed snapshot', async () => {
+  const { confirmForceDelete } = await import('./model-tidy');
+  const { setConfirmHost } = await import('./confirm');
+  const targets = [{ id: 'soil', revision: 1 }];
+  const calls: unknown[] = [];
+  const remove = async (args: unknown) => {
+    calls.push(args);
+    return 'removed';
+  };
+  try {
+    setConfirmHost((request) => request.resolve(false));
+    assert.equal(await confirmForceDelete(targets, (_zh, en) => en, remove), null);
+    assert.deepEqual(calls, []);
+    setConfirmHost((request) => {
+      assert.match(request.message, /soil#1/);
+      assert.match(request.message, /cannot be undone/);
+      targets.push({ id: 'new', revision: 2 });
+      targets[0].revision = 99;
+      request.resolve(true);
+    });
+    assert.equal(await confirmForceDelete(targets, (_zh, en) => en, remove), 'removed');
+    assert.deepEqual(calls, [
+      { versions: [{ id: 'soil', revision: 1 }], keepHistory: true, force: true },
+    ]);
+  } finally {
+    setConfirmHost(null);
+  }
+});
+
+test('automatic tidying never requests forced deletion', async () => {
+  const { tidyModelsAfterStartup } = await import('./model-tidy');
+  const calls: unknown[] = [];
+  await tidyModelsAfterStartup(async <T>(command: string, args: unknown) => {
+    calls.push([command, args]);
+    return { removed: [] } as T;
+  });
+  assert.deepEqual(calls, [['model_prune', { dryRun: false }]]);
+});

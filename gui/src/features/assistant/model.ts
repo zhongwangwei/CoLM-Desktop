@@ -2400,10 +2400,6 @@ export const EXTERNAL_LLM_CONFIRM_ZH =
   '我确认该外部后端实际使用的模型服务不在天河上运行 DeepSeek 等 LLM';
 export const EXTERNAL_LLM_CONFIRM_EN =
   'I confirm the model service actually used by this external backend does not run DeepSeek or other LLMs on Tianhe';
-export const LLM_SCOPE_NOTE_ZH = '只限制 LLM 模型请求端点，不影响普通远程模拟。';
-export const LLM_SCOPE_NOTE_EN =
-  'Only LLM model request endpoints are restricted; ordinary remote simulations are not affected.';
-
 /**
  * 端点确认的规范化形式，必须与后端 `llm_guard::normalize_endpoint` 同形：scheme/host 小写、
  * 忽略默认端口、去掉路径末尾斜杠，丢弃 query/fragment。ack 只对精确地址有效，保存时

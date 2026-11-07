@@ -299,14 +299,11 @@ test('old settings missing the new ack fields default to unconfirmed', () => {
   assert.notEqual(legacy.external_llm_ack, true);
 });
 
-test('the settings panel renders the endpoint policy area in both languages', () => {
+test('the settings panel renders actionable endpoint checks in both languages', () => {
   assert.match(settingsSource, /assistant_llm_endpoint_guard/);
   assert.match(settingsSource, /TIANHE_LLM_POLICY_ZH/, 'blocked 红线文案');
   assert.match(settingsSource, /LLM_ENDPOINT_CONFIRM_ZH/, '自定义端点必选确认');
   assert.match(settingsSource, /EXTERNAL_LLM_CONFIRM_ZH/, '外部后端必选确认');
-  assert.match(settingsSource, /LLM_SCOPE_NOTE_ZH/, '只限制 LLM 端点、不影响远程模拟的说明');
-  assert.match(settingsSource, /模型服务端点（天河底线）/);
-  assert.match(settingsSource, /官方云服务：不需要额外确认/);
   assert.match(settingsSource, /正在检查模型端点/);
   assert.match(settingsSource, /endpointGuardError/, 'guard 失败原样显示');
   assert.match(settingsSource, /external_llm_ack/, '外部后端确认写进设置');

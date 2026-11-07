@@ -153,3 +153,95 @@ test('local OpenBench task and operation guards produce one close warning in eit
     assert.deepEqual(closeReasons([appGuard, operationGuard], {}, String), [appGuard()]);
   }
 });
+
+test('refreshing versions clears a deleted explicit choice without rebinding a case', async () => {
+  const ast = source('./app-state.tsx');
+  const code = expression(
+    ast,
+    (node) =>
+      ts.isCallExpression(node) &&
+      ts.isVariableDeclaration(node.parent) &&
+      node.parent.name.getText(ast) === 'refreshVersions',
+  );
+  const removed = { id: 'soil', revision: 2 };
+  const official = { version: { id: 'official', revision: 3 } };
+  let state = {
+    versions: [official, { version: removed }],
+    versionRef: removed,
+    chosenVersion: removed as typeof removed | null,
+  };
+  const calls: unknown[] = [];
+  const run = evaluate<() => Promise<void>>(code, {
+    useCallback: (fn: unknown) => fn,
+    selectionAfterPrune,
+    invokeJson: async (command: string) => {
+      calls.push(command);
+      return [official];
+    },
+    update: (patch: (old: typeof state) => Partial<typeof state>) => {
+      state = { ...state, ...patch(state) };
+    },
+  });
+  await run();
+  assert.equal(state.chosenVersion, null);
+  assert.deepEqual(state.versionRef, official.version);
+  assert.deepEqual(calls, ['model_list'], 'refresh never rewrites an existing case binding');
+});
+
+test('settings force cleanup confirms only old official snapshot and cancellation sends no IPC', async () => {
+  const { confirmForceDelete } = await import('./model-tidy');
+  const { setConfirmHost } = await import('./confirm');
+  const ast = source('../features/settings/SettingsPage.tsx');
+  const get = (name: string) =>
+    expression(ast, (node) => ts.isVariableDeclaration(node) && node.name.getText(ast) === name);
+  const initializer = (name: string, context: Record<string, unknown>) =>
+    evaluate(get(name).slice(get(name).indexOf('=') + 1), context);
+  const state = {
+    versions: [
+      { id: 'official', revision: 1 },
+      { id: 'official', revision: 2 },
+      { id: 'soil', revision: 1 },
+    ].map((version) => ({ version })),
+  };
+  const officials = initializer('officials', { state });
+  const latest = initializer('latest', { officials });
+  const forceTargets = initializer('forceTargets', { officials, latest });
+  const calls: unknown[] = [];
+  const run = initializer('forceCleanup', {
+    busy: false,
+    forceTargets,
+    confirmForceDelete,
+    t: (_zh: string, en: string) => en,
+    setBusy: () => {},
+    setMessage: () => {},
+    setReport: () => {},
+    refreshVersions: async () => {
+      calls.push('refresh');
+    },
+    invokeJson: async (cmd: string, args: unknown) => {
+      calls.push([cmd, args]);
+      return { deleted: [], failed: [] };
+    },
+  }) as () => Promise<void>;
+  try {
+    setConfirmHost((request) => request.resolve(false));
+    await run();
+    assert.deepEqual(calls, []);
+    setConfirmHost((request) => {
+      assert.match(request.message, /official#1/);
+      assert.doesNotMatch(request.message, /official#2|soil#1/);
+      state.versions.push({ version: { id: 'official', revision: 4 } });
+      request.resolve(true);
+    });
+    await run();
+    assert.deepEqual(calls, [
+      [
+        'model_delete',
+        { versions: [{ id: 'official', revision: 1 }], keepHistory: true, force: true },
+      ],
+      'refresh',
+    ]);
+  } finally {
+    setConfirmHost(null);
+  }
+});

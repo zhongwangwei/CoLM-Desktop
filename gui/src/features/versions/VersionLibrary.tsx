@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { invokeJson } from '../../lib/ipc';
+import { confirmForceDelete } from '../../lib/model-tidy';
 import { askConfirm } from '../../lib/confirm';
 import { useRenderedAction } from '../../lib/guide';
 import type { FrozenRevision, ModelDraft, Overlay, VersionRef } from '../../lib/types';
-import { Card, Notice } from '../../components/ui';
+import { Button, Card, Notice } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
 import { versionDepth } from './model';
 import { appLocale } from '../history/history';
@@ -147,11 +148,12 @@ export default function VersionLibrary({
   };
   const date = (unix: number) =>
     unix > 0 ? new Date(unix * 1000).toLocaleDateString(appLocale(en)) : '—';
-  async function remove(targets: FrozenRevision[]) {
+  async function remove(targets: FrozenRevision[], force = false) {
     if (busy || disabled || targets.length === 0) return;
     const records = targets.reduce((sum, v) => sum + (of(v)?.history ?? 0), 0);
     const names = targets.map((v) => `${v.name} · r${v.version.revision}`).join(t('、', ', '));
     if (
+      !force &&
       !(await askConfirm(
         t(
           `删除 ${names}？${records > 0 ? `提到它们的 ${records} 条历史记录会保留，但不能再按原版本重放。` : ''}删除后不能恢复。`,
@@ -169,11 +171,19 @@ export default function VersionLibrary({
       const ordered = [...targets].sort(
         (a, b) => versionDepth(b, versions) - versionDepth(a, versions),
       );
-      const report = await invokeJson<DeleteReport>('model_delete', {
-        versions: ordered.map((v) => v.version),
-        keepHistory: true,
-      });
+      const report = force
+        ? await confirmForceDelete(
+            ordered.map((v) => v.version),
+            t,
+            (args) => invokeJson<DeleteReport>('model_delete', args),
+          )
+        : await invokeJson<DeleteReport>('model_delete', {
+            versions: ordered.map((v) => v.version),
+            keepHistory: true,
+          });
+      if (!report) return;
       await onDeleted();
+      setTick((n) => n + 1);
       setNotice(
         t(`已删除 ${report.deleted.length} 个版本`, `Deleted ${report.deleted.length} versions`),
       );
@@ -185,7 +195,6 @@ export default function VersionLibrary({
       setError(String(e));
     } finally {
       setBusy(false);
-      setTick((n) => n + 1);
     }
   }
   async function removeDraft(d: ModelDraft) {
@@ -321,6 +330,11 @@ export default function VersionLibrary({
               () => onUse(v),
             )}
           {removable(use, chosen) && action(t('删除', 'Delete'), () => void remove([v]), true)}
+          {!same(v.version, latest?.version) && (
+            <Button variant="danger" disabled={lock} onClick={() => void remove([v], true)}>
+              {t('强制删除', 'Force delete')}
+            </Button>
+          )}
         </td>
       </tr>
     );

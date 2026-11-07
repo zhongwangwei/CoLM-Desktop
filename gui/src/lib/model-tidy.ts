@@ -82,3 +82,25 @@ export function rebindQuestion(
 
 /** Ask before rebinding; a separate function so tests can answer for the user. */
 export const askToRebind = (question: string) => askConfirm(question);
+
+/** Manual-only deletion: freeze the exact targets before asking, never include later revisions. */
+export async function confirmForceDelete<T>(
+  versions: VersionRef[],
+  t: (zh: string, en: string) => string,
+  remove: (args: { versions: VersionRef[]; keepHistory: true; force: true }) => Promise<T>,
+): Promise<T | null> {
+  const targets = versions.map((version) => ({ ...version }));
+  if (!targets.length) return null;
+  const names = targets.map(versionLabel).join(', ');
+  if (
+    !(await askConfirm(
+      t(
+        `强制删除以下模型版本？\n${names}\n\n版本删除不可恢复。项目与历史文件保留；引用这些版本的项目、研究、派生版本和草稿可能需要更换模型版本才能继续。`,
+        `Force delete these model revisions?\n${names}\n\nThis cannot be undone. Project and history files stay; projects, studies, derived versions and drafts referencing them may need another model version to continue.`,
+      ),
+      { confirmLabel: t('强制删除', 'Force delete'), danger: true },
+    ))
+  )
+    return null;
+  return remove({ versions: targets, keepHistory: true, force: true });
+}
