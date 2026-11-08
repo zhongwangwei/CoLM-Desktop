@@ -5964,3 +5964,41 @@ fn saving_the_rust_crop_runtime_marker_writes_case_namelist() {
         Some(&colm_namelist::Value::Bool(true))
     );
 }
+
+#[test]
+fn startup_history_import_does_not_block_or_repeat() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let (duplicate_tx, duplicate_rx) = mpsc::channel();
+    let (returned_tx, returned_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let started = std::sync::Once::new();
+        super::start_history_import(&started, move || {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv();
+            let _ = finished_tx.send(());
+        });
+        super::start_history_import(&started, move || {
+            let _ = duplicate_tx.send(());
+        });
+        let _ = returned_tx.send(());
+    });
+
+    let entered = entered_rx.recv_timeout(Duration::from_secs(5));
+    let returned = returned_rx.recv_timeout(Duration::from_secs(1));
+    // 断言前放行模拟的慢目录读取，失败时也不能把测试线程留在等待状态。
+    let _ = release_tx.send(());
+    worker.join().unwrap();
+    let finished = finished_rx.recv_timeout(Duration::from_secs(5));
+    assert!(entered.is_ok(), "the background import did not start");
+    assert!(returned.is_ok(), "startup waited for the history import");
+    assert!(finished.is_ok(), "the background import did not finish");
+    assert_eq!(
+        duplicate_rx.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    );
+}

@@ -3968,6 +3968,10 @@ pub(crate) fn study_member_revision(case: &std::path::Path) -> Result<Option<Ver
 }
 
 #[cfg(test)]
+#[path = "model_version_cache_tests.rs"]
+mod model_version_cache_tests;
+
+#[cfg(test)]
 mod verified_cache_tests {
     use super::*;
     // 校验过的代码缓存不再重算哈希，但程序文件一旦被改（大小或修改时间变了），仍要被拒。

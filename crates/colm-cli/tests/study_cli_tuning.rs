@@ -834,7 +834,7 @@ fn study_run_defaults_to_rust_preprocessors_and_reuses_rust_stage_fingerprints()
         ],
     ))
     .unwrap();
-    assert_eq!(second["status"], "completed");
+    assert_eq!(second["status"], "completed", "{second:#}");
     assert_eq!(
         marker_lines(&call_log).len(),
         call_count,

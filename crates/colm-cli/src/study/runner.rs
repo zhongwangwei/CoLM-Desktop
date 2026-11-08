@@ -2855,8 +2855,41 @@ fn study_task_is_current(
     task: &super::state::TaskState,
     kernel_id: &str,
     rust_identities: &crate::RustPreprocessorIdentities,
+    kernel: &colm_kernel::Kernel,
+    engine: crate::ModelEngine,
 ) -> bool {
-    crate::case_is_current(Path::new(&task.case_dir), kernel_id, rust_identities).unwrap_or(false)
+    let case = Path::new(&task.case_dir);
+    let current = (|| -> Result<bool> {
+        let crop_case =
+            engine == crate::ModelEngine::Rust && crate::rust_case_is_crop(&case.join("case.nml"))?;
+        // 前处理参数取决于每个成员的 namelist，必须与 run_case 写入指纹时一致。
+        let identity = |stage| -> Result<String> {
+            let arguments = crate::rust_preprocessor_arguments_with_crop(
+                stage,
+                &case.join("case.nml"),
+                kernel,
+                None,
+                None,
+                crop_case,
+            )?;
+            crate::rust_preprocessor_stage_identity(case, stage, &arguments)
+        };
+        let identities = crate::RustPreprocessorIdentities {
+            surface: rust_identities
+                .surface
+                .as_ref()
+                .map(|_| identity(crate::Stage::MkSrfData))
+                .transpose()?,
+            initial: rust_identities
+                .initial
+                .as_ref()
+                .map(|_| identity(crate::Stage::MkIniData))
+                .transpose()?,
+            model: rust_identities.model.clone(),
+        };
+        crate::case_is_current(case, kernel_id, &identities)
+    })();
+    current.unwrap_or(false)
         && (!Path::new(&manifest.root)
             .join(super::model::IDENTITY_FILE)
             .is_file()
@@ -2885,6 +2918,7 @@ fn run_members(
     retry_failed: bool,
     generation: Option<usize>,
 ) -> Result<()> {
+    let kernel = colm_kernel::Kernel::open_manifest(kernel_dir)?;
     let members = super::generation::load_members(manifest)?;
     let members_by_id = if manifest.spec.kind == StudyKind::Tuning
         && manifest.spec.method == StudyMethod::DifferentialEvolution
@@ -2911,7 +2945,14 @@ fn run_members(
     {
         for task in state.tasks.values_mut() {
             let stale_success = task.status == TaskStatus::Succeeded
-                && !study_task_is_current(manifest, task, kernel_id, rust_identities);
+                && !study_task_is_current(
+                    manifest,
+                    task,
+                    kernel_id,
+                    rust_identities,
+                    &kernel,
+                    engine,
+                );
             if stale_success
                 && !retryable_task(
                     manifest,
@@ -2940,7 +2981,7 @@ fn run_members(
             continue;
         }
         let stale_success = task.status == TaskStatus::Succeeded
-            && !study_task_is_current(manifest, task, kernel_id, rust_identities);
+            && !study_task_is_current(manifest, task, kernel_id, rust_identities, &kernel, engine);
         let waiting_for_tuning_baseline = manifest.spec.kind == StudyKind::Tuning
             && !baseline_tasks_succeeded(manifest, state)
             && task.member != "m000000";

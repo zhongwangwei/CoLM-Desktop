@@ -32,9 +32,13 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
 /// `Contents/MacOS/`，而当时的代码找的是 `Contents/Resources/`。
 #[tauri::command]
 pub async fn backend_ready(app: tauri::AppHandle) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || crate::history::bootstrap(&app))
-        .await
-        .map_err(|e| e.to_string())??;
+    // 上次项目的目录读取可能挂起，历史补录不能挡住内核和版本加载，启动重试也不能重复排队。
+    static HISTORY_IMPORT: std::sync::Once = std::sync::Once::new();
+    start_history_import(&HISTORY_IMPORT, move || {
+        if let Err(error) = crate::history::bootstrap(&app) {
+            eprintln!("startup history import failed: {error}");
+        }
+    });
     let msg = format!(
         "backend reachable — {} configuration fields known",
         colm_schema::all().len()
@@ -45,6 +49,12 @@ pub async fn backend_ready(app: tauri::AppHandle) -> Result<String, String> {
         cli.display()
     );
     Ok(msg)
+}
+
+fn start_history_import(started: &std::sync::Once, import: impl FnOnce() + Send + 'static) {
+    started.call_once(|| {
+        tauri::async_runtime::spawn_blocking(import);
+    });
 }
 
 /// 前端把话说到 stderr。**这是这台机器上 GUI 唯一可靠的观察通道** ——
