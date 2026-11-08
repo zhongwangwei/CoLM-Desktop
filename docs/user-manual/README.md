@@ -285,7 +285,7 @@ CoLM Execution Completed.
 
 ![图 10 模型结构与方案](images/10-case-step4.jpg)
 
-**图 10 标注：** ① 土壤水力方案（同屏可见 Campbell/van Genuchten 选项与变饱和流开关；河湖汇流等在下方继续）。
+**图 10 标注：** ① 地表覆盖方案（USGS 已标记“已退休 · 未全面测试”，不建议新研究使用；土壤水力方案在同页下方继续）。
 
 - **土壤水力方案**：Campbell 或 van Genuchten；van Genuchten 必须开启变饱和流。
 - **过程开关**：变饱和流、河湖汇流、土地覆盖变化、BGC、城市、作物、材料过程等。是否可用取决于当前内核编译宏与算例尺度（例如 SinglePoint 不支持土地覆盖变化）。
