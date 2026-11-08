@@ -22,6 +22,15 @@
       "binaries/colm-build-source.json": "colm-build-source.json",
       "binaries/xerj-release.json": "xerj-release.json",
       "binaries/xerj-LICENSE": "xerj-LICENSE"
+    },
+    "windows": {
+      "wix": {
+        "language": {
+          "en-US": {
+            "localePath": "wix/en-US.wxl"
+          }
+        }
+      }
     }
   }
 }

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX 3 needs a database code page that covers the shipped Chinese manual filenames. -->
+<WixLocalization Culture="en-us" Codepage="936" xmlns="http://schemas.microsoft.com/wix/2006/localization">
+  <String Id="TauriCodepage">936</String>
+</WixLocalization>
