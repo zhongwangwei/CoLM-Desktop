@@ -159,38 +159,11 @@ fn pack_engine_source(root: &Path, cli: &Path) -> Result<()> {
 
 /// Read docs from the completed archive so later checkout edits cannot mix source and docs.
 fn stage_snapshot_docs(archive: &Path) -> Result<()> {
-    let listing = Command::new("tar").arg("-tzf").arg(archive).output()?;
-    if !listing.status.success() {
-        bail!("cannot list source snapshot");
-    }
     let parent = archive.parent().context("source snapshot has no parent")?;
     let stage = parent.join(format!(".docs-stage-{}", std::process::id()));
     std::fs::create_dir(&stage).context("cannot reserve docs staging directory")?;
     let result = (|| -> Result<()> {
-        for name in std::str::from_utf8(&listing.stdout)?.lines() {
-            if !name.starts_with("docs/") || name.ends_with('/') {
-                continue;
-            }
-            if name.contains('\\')
-                || Path::new(name)
-                    .components()
-                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
-            {
-                bail!("invalid snapshot document path: {name}");
-            }
-            // Extract to stdout, never let archive links or paths write into the filesystem.
-            let file = Command::new("tar")
-                .arg("-xOzf")
-                .arg(archive)
-                .arg(name)
-                .output()?;
-            if !file.status.success() {
-                bail!("cannot read snapshot document: {name}");
-            }
-            let destination = stage.join(name);
-            std::fs::create_dir_all(destination.parent().context("document has no parent")?)?;
-            std::fs::write(destination, file.stdout)?;
-        }
+        colm_remote::engine::unpack_docs(archive, &stage)?;
         for required in [
             "design-ai-assistant.md",
             "colm-process-knowledge.md",
@@ -306,6 +279,7 @@ mod tests {
         ] {
             std::fs::write(checkout.join("docs").join(name), "snapshot").unwrap();
         }
+        std::fs::write(checkout.join("docs/用户手册.md"), "snapshot 中文").unwrap();
         let archive = root.join("engine/colm-src.tar.gz");
         assert!(Command::new("tar")
             .arg("-czf")
@@ -321,7 +295,12 @@ mod tests {
             "new checkout",
         )
         .unwrap();
+        std::fs::write(checkout.join("docs/用户手册.md"), "new checkout").unwrap();
         stage_snapshot_docs(&archive).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("engine/docs/用户手册.md")).unwrap(),
+            "snapshot 中文"
+        );
         assert_eq!(
             std::fs::read_to_string(root.join("engine/docs/colm-process-knowledge.md")).unwrap(),
             "snapshot"

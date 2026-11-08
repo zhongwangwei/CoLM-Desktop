@@ -545,6 +545,32 @@ fn docs_stay_out_of_the_snapshot_id_but_ship_in_the_source_pack() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn staged_docs_reject_archive_links() {
+    let root = std::env::temp_dir().join(format!("colm-doc-links-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let source = root.join("source.tar.gz");
+    let encoder = flate2::write::GzEncoder::new(
+        std::fs::File::create(&source).unwrap(),
+        flate2::Compression::default(),
+    );
+    let mut archive = tar::Builder::new(encoder);
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    archive
+        .append_link(&mut header, "docs/guide.md", "../../outside")
+        .unwrap();
+    archive.into_inner().unwrap().finish().unwrap();
+    let stage = root.join("stage");
+    assert!(unpack_docs(&source, &stage)
+        .unwrap_err()
+        .to_string()
+        .contains("regular file"));
+    assert!(!stage.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// Run `ensure_script` with a `cargo` that records its arguments, and return them.
 #[cfg(unix)]
 fn cargo_arguments_of_a_build(root: &Path, vendor: bool) -> String {

@@ -1022,6 +1022,34 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Extract regular documentation files without interpreting archive links or platform command output.
+pub fn unpack_docs(source: &Path, destination: &Path) -> Result<()> {
+    let file = std::fs::File::open(source)?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let name = std::str::from_utf8(&entry.path_bytes())?.to_owned();
+        if !name.starts_with("docs/") || name.ends_with('/') {
+            continue;
+        }
+        ensure!(
+            !name.contains('\\')
+                && Path::new(&name)
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "invalid snapshot document path: {name}"
+        );
+        ensure!(
+            entry.header().entry_type().is_file(),
+            "snapshot document must be a regular file: {name}"
+        );
+        let path = destination.join(&name);
+        std::fs::create_dir_all(path.parent().context("document has no parent")?)?;
+        std::io::copy(&mut entry, &mut std::fs::File::create(path)?)?;
+    }
+    Ok(())
+}
+
 /// 服务器上这个预编包已经在不在。
 pub fn prebuilt_present(ssh: &Ssh, root: &str, id: &str) -> Result<bool> {
     let exe = quote(&format!("{}/bin/colm-rs", engine_dir(root, id)));
