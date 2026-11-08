@@ -35,7 +35,7 @@ fn frozen_revision_fixture(label: &str) -> (PathBuf, Opts, colm_model::FrozenRev
 
 #[test]
 fn official_revision_uses_its_cached_cli() {
-    let (root, opts, frozen) = frozen_revision_fixture("review-official-cache-cli");
+    let (root, opts, frozen) = frozen_revision_fixture("oc");
     let expected = cached_official_cli(&opts, &frozen.code).unwrap();
     let selected = execution_cli(&opts, Some(&frozen)).unwrap();
     assert_eq!(selected, expected);
@@ -45,7 +45,7 @@ fn official_revision_uses_its_cached_cli() {
 
 #[test]
 fn workspace_revision_survives_absent_live_directory() {
-    let (root, opts, mut frozen) = frozen_revision_fixture("review-workspace-cache-cli");
+    let (root, opts, mut frozen) = frozen_revision_fixture("wc");
     frozen.code = CodeRef {
         kind: CodeKind::Workspace,
         workspace: Some("soil".into()),
@@ -77,6 +77,7 @@ fn workspace_revision_survives_absent_live_directory() {
         ],
     ] {
         assert!(std::process::Command::new("git")
+            .args(["-c", "core.longpaths=true"])
             .args(args)
             .current_dir(&source)
             .status()

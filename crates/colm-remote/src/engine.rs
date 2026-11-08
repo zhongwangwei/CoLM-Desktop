@@ -1006,29 +1006,17 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // One list per call: two packs in the same process (two engines prepared at once) must not
-    // read each other's file list.
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let list = std::env::temp_dir().join(format!(
-        "colm-pack-{}-{}.txt",
-        std::process::id(),
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    std::fs::write(&list, files.join("\n") + "\n")?;
-    let status = Command::new("tar")
-        .env("COPYFILE_DISABLE", "1")
-        .arg("-czf")
-        .arg(out)
-        .arg("-C")
-        .arg(repo)
-        .arg("-T")
-        .arg(&list)
-        .status()
-        .context("cannot run tar")?;
-    let _ = std::fs::remove_file(&list);
-    if !status.success() {
-        bail!("tar failed while packing the engine sources");
+    // 直接处理 UTF-8 路径，避免 Windows tar 的文件列表按系统代码页解释中文文件名。
+    let file = std::fs::File::create(out)?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    archive.follow_symlinks(false);
+    for path in files {
+        archive
+            .append_path_with_name(repo.join(&path), &path)
+            .with_context(|| format!("cannot pack source file {path}"))?;
     }
+    archive.into_inner()?.finish()?;
     Ok(())
 }
 

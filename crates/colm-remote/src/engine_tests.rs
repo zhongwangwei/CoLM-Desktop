@@ -463,6 +463,7 @@ fn docs_stay_out_of_the_snapshot_id_but_ship_in_the_source_pack() {
         ("Cargo.lock", "lock"),
         ("crates/colm-cli/src/main.rs", "fn main() {}"),
         ("docs/guide.md", "first"),
+        ("docs/用户手册.md", "使用说明"),
     ] {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -501,13 +502,21 @@ fn docs_stay_out_of_the_snapshot_id_but_ship_in_the_source_pack() {
     let pack = dir.join("pack.tar.gz");
     let checkout = snapshot(&source).unwrap();
     pack_source(&checkout, &pack).unwrap();
-    let listing = Command::new("tar").arg("-tzf").arg(&pack).output().unwrap();
-    let listing = String::from_utf8_lossy(&listing.stdout);
-    assert!(listing.lines().any(|l| l == "docs/guide.md"), "{listing}");
-    assert!(
-        listing.lines().any(|l| l == "crates/colm-cli/src/main.rs"),
-        "{listing}"
-    );
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(
+        std::fs::File::open(&pack).unwrap(),
+    ));
+    let mut shipped = std::collections::BTreeMap::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let path = entry.path().unwrap().to_string_lossy().replace('\\', "/");
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        shipped.insert(path, bytes);
+    }
+    drop(archive);
+    assert_eq!(shipped["docs/guide.md"], b"second");
+    assert_eq!(shipped["docs/用户手册.md"], "使用说明".as_bytes());
+    assert!(shipped.contains_key("crates/colm-cli/src/main.rs"));
     // 安装版（读源码包）与开发版（读仓库）对同一份源码给出同一个标识。
     let installed = |path: &Path| snapshot(&Source::Tarball(path.to_path_buf())).unwrap().id;
     assert_eq!(installed(&pack), checkout.id);
