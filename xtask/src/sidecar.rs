@@ -281,15 +281,18 @@ mod tests {
         }
         std::fs::write(checkout.join("docs/用户手册.md"), "snapshot 中文").unwrap();
         let archive = root.join("engine/colm-src.tar.gz");
-        assert!(Command::new("tar")
-            .arg("-czf")
-            .arg(&archive)
-            .arg("-C")
+        assert!(Command::new("git")
+            .args(["init", "-q"])
             .arg(&checkout)
-            .arg("docs")
             .status()
             .unwrap()
             .success());
+        let snapshot = colm_remote::engine::Snapshot {
+            id: String::new(),
+            source: colm_remote::engine::Source::Checkout(checkout.clone()),
+            files: Vec::new(),
+        };
+        colm_remote::engine::pack_source(&snapshot, &archive).unwrap();
         std::fs::write(
             checkout.join("docs/colm-process-knowledge.md"),
             "new checkout",
@@ -306,15 +309,7 @@ mod tests {
             "snapshot"
         );
         std::fs::remove_file(checkout.join("docs/knowledge-sources.json")).unwrap();
-        assert!(Command::new("tar")
-            .arg("-czf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&checkout)
-            .arg("docs")
-            .status()
-            .unwrap()
-            .success());
+        colm_remote::engine::pack_source(&snapshot, &archive).unwrap();
         assert!(stage_snapshot_docs(&archive).is_err());
         assert_eq!(
             std::fs::read_to_string(root.join("engine/docs/colm-process-knowledge.md")).unwrap(),
