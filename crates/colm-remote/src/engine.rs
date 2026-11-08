@@ -1011,6 +1011,8 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut archive = tar::Builder::new(encoder);
     archive.follow_symlinks(false);
+    // 源码读取器接受普通文件和符号链接，稀疏输入也必须写成普通文件条目。
+    archive.sparse(false);
     for path in files {
         archive
             .append_path_with_name(repo.join(&path), &path)

@@ -469,6 +469,10 @@ fn docs_stay_out_of_the_snapshot_id_but_ship_in_the_source_pack() {
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, body).unwrap();
     }
+    std::fs::File::create(dir.join("docs/sparse.bin"))
+        .unwrap()
+        .set_len(16384)
+        .unwrap();
     let git = |args: &[&str]| {
         assert!(Command::new("git")
             .arg("-C")
@@ -508,6 +512,7 @@ fn docs_stay_out_of_the_snapshot_id_but_ship_in_the_source_pack() {
     let mut shipped = std::collections::BTreeMap::new();
     for entry in archive.entries().unwrap() {
         let mut entry = entry.unwrap();
+        assert!(entry.header().entry_type().is_file());
         let path = entry.path().unwrap().to_string_lossy().replace('\\', "/");
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).unwrap();
@@ -516,6 +521,7 @@ fn docs_stay_out_of_the_snapshot_id_but_ship_in_the_source_pack() {
     drop(archive);
     assert_eq!(shipped["docs/guide.md"], b"second");
     assert_eq!(shipped["docs/用户手册.md"], "使用说明".as_bytes());
+    assert_eq!(shipped["docs/sparse.bin"], vec![0; 16384]);
     assert!(shipped.contains_key("crates/colm-cli/src/main.rs"));
     // 安装版（读源码包）与开发版（读仓库）对同一份源码给出同一个标识。
     let installed = |path: &Path| snapshot(&Source::Tarball(path.to_path_buf())).unwrap().id;
