@@ -211,6 +211,9 @@ export default function RunPanel({
       error?: string;
     }>({}),
     [loadBusy, setLoadBusy] = useState(false);
+  // “更多选项与说明”是补充说明与指纹开关，默认收起；即使设置里开了“默认展开专家设置”
+  // 也不该把这一块顶到运行按钮前面（用户 2026-11-08 反馈）。
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   // 当前选的是本机、算例全是单点：线程框不显示、固定 1 线程。
   const localSiteNow = siteCasesOnly && !host;
   // "同时运行站点数"跟着选择走：批量页先读到混选（默认 1），取消格点算例后仍是 1，提示却说
@@ -255,7 +258,7 @@ export default function RunPanel({
       (profile) =>
         !!compatibleKernel(
           state.kernels.filter((k) => k.dir === kernel),
-          { ...profile, grid: profile.grid ?? undefined },
+          { ...profile, grid: profile.grid ?? undefined, engine },
           effectiveModelFields(state.version?.overlay),
         ),
     );
@@ -545,12 +548,12 @@ export default function RunPanel({
       effectiveProfile
         ? (compatibleKernel(
             state.kernels,
-            effectiveProfile,
+            { ...effectiveProfile, engine },
             effectiveModelFields(state.version?.overlay),
           )?.dir ?? '')
         : '',
     );
-  }, [state.kernels, effectiveProfile, state.version]);
+  }, [state.kernels, effectiveProfile, state.version, engine]);
   useEffect(() => {
     setHost(typeof restoredHost === 'string' ? restoredHost : (initialHost ?? savedHost));
   }, [casePath, savedHost, initialHost, restoredHost]);
@@ -2180,7 +2183,11 @@ export default function RunPanel({
           </div>
         </section>
       )}
-      <Advanced title={t('更多选项与说明', 'More options and notes')}>
+      <Advanced
+        title={t('更多选项与说明', 'More options and notes')}
+        open={advancedOpen}
+        onOpenChange={setAdvancedOpen}
+      >
         {render(fields.find((field) => field.id === 'run-input-fingerprints')!)}
         <p className="muted">
           {t(

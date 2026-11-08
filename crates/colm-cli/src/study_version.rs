@@ -1834,7 +1834,11 @@ pub(crate) fn validate_pinned(
     } else {
         &pinned.kernel
     };
-    crate::model_version::check_kernel(revision, &colm_kernel::Kernel::open_manifest(kernel)?)?;
+    crate::model_version::check_kernel_for_engine(
+        revision,
+        &colm_kernel::Kernel::open_manifest(kernel)?,
+        engine == "rust" && crate::model_version::supports_runtime_crop(&pinned.cli),
+    )?;
     let used = if let Some(name) = &revision.code.workspace {
         let cached = crate::model_version::cached_options(&options, &revision.code)?
             .context("missing frozen workspace")?;

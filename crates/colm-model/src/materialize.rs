@@ -913,7 +913,13 @@ fn land_cover_index(doc: &Document, key: &str) -> Result<Option<u8>> {
 }
 
 fn external_group(key: &str) -> Option<&'static str> {
-    colm_schema::find(key.split('(').next().unwrap_or(key)).and_then(|field| field.group)
+    let name = key.split('(').next().unwrap_or(key);
+    // DEF_USE_CROP 在 schema 里是派生字段（上游是 CROP 宏的只读映射，没有分组）。
+    // Rust 合并后它成为可写的运行时标记；GUI 的 case_data_save 需要物化层接受它。
+    if name.eq_ignore_ascii_case("DEF_USE_CROP") {
+        return Some("nl_colm");
+    }
+    colm_schema::find(name).and_then(|field| field.group)
 }
 
 fn cached_config_path<'a>(raw: &'a str, server_root: Option<&Path>) -> &'a Path {
@@ -1187,4 +1193,14 @@ fn server_data_paths_do_not_follow_local_symlinks() {
         Some(&Value::Str(format!("{}/out/", destination.display())))
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(test)]
+mod crop_marker_tests {
+    use super::external_group;
+
+    #[test]
+    fn crop_runtime_marker_is_writable_case_data() {
+        assert_eq!(external_group("DEF_USE_CROP"), Some("nl_colm"));
+    }
 }

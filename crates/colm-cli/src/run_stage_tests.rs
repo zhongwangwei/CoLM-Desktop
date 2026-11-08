@@ -569,7 +569,7 @@ fn rust_kernel_arguments_keep_grid_classification_and_crop_independent() {
                 if let Some(flag) = grid_flag {
                     expected.push(flag);
                 }
-                assert_eq!(rust_model_crop_arguments(&kernel), expected);
+                assert_eq!(rust_model_crop_arguments(&kernel, false), expected);
             }
         }
     }
@@ -810,5 +810,75 @@ fn native_path_limits_follow_the_stages_that_will_actually_run() {
                 assert_eq!(runs_native_stage(engine, preprocessors, stage), expected);
             }
         }
+    }
+}
+
+#[test]
+fn rust_crop_detection_uses_effective_site_landtype() {
+    let dir = test_directory("rust-crop-effective-landtype");
+    std::fs::create_dir_all(&dir).unwrap();
+    let site = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc");
+    let case = dir.join("case.nml");
+    std::fs::write(
+        &case,
+        format!("&nl_colm\nSITE_fsitedata = '{}'\n/\n", site.display()),
+    )
+    .unwrap();
+    assert!(rust_case_is_crop(&case).unwrap());
+}
+
+#[test]
+fn a_default_zero_planting_day_does_not_enable_rust_crop() {
+    let dir = test_directory("rust-crop-zero-planting");
+    std::fs::create_dir_all(&dir).unwrap();
+    let case = dir.join("case.nml");
+    std::fs::write(&case, "&nl_colm\nDEF_TUNING_CROP_PLANTING_DAY = 0.0\n/\n").unwrap();
+    assert!(!rust_case_is_crop(&case).unwrap());
+}
+
+#[test]
+fn a_negative_site_landtype_still_reads_the_crop_site_classification() {
+    let dir = test_directory("rust-crop-negative-landtype");
+    std::fs::create_dir_all(&dir).unwrap();
+    let site = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc");
+    let case = dir.join("case.nml");
+    std::fs::write(
+        &case,
+        format!(
+            "&nl_colm\nSITE_fsitedata = '{}'\nSITE_landtype = -1\n/\n",
+            site.display()
+        ),
+    )
+    .unwrap();
+    assert!(rust_case_is_crop(&case).unwrap());
+}
+
+#[test]
+fn default_crop_side_switches_do_not_enable_rust_crop() {
+    let dir = test_directory("rust-crop-side-switches");
+    std::fs::create_dir_all(&dir).unwrap();
+    let case = dir.join("case.nml");
+    std::fs::write(
+        &case,
+        "&nl_colm\nDEF_USE_FERT = .true.\nDEF_USE_CNSOYFIXN = .true.\n/\n",
+    )
+    .unwrap();
+    assert!(!rust_case_is_crop(&case).unwrap());
+}
+
+#[test]
+fn crop_planting_day_accepts_fortran_real_spellings() {
+    let dir = test_directory("rust-crop-planting-spellings");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, value) in [("int", "120"), ("real", "120.0"), ("double", "1.2D2")] {
+        let case = dir.join(format!("case-{name}.nml"));
+        std::fs::write(
+            &case,
+            format!("&nl_colm\nDEF_TUNING_CROP_PLANTING_DAY = {value}\n/\n"),
+        )
+        .unwrap();
+        assert!(rust_case_is_crop(&case).unwrap(), "{name} should be crop");
     }
 }

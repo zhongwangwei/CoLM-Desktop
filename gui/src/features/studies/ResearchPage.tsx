@@ -7,7 +7,7 @@ import { withCatalogLabels } from '../../lib/param-presentation';
 import { useApp, useCloseGuard, useNavigationGuard } from '../../lib/app-state';
 import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
 import { ActionButton } from '../../components/ActionButton';
-import { Button, Card, Field, Input, Select, Notice, Advanced } from '../../components/ui';
+import { Button, Card, Field, Input, Select, Notice, Advanced, Dialog } from '../../components/ui';
 import {
   budgetAdvice,
   calibrationWindows,
@@ -63,7 +63,13 @@ import {
   type RemoteStudyRecord,
   type RemoteStudyReply,
 } from './remote-study';
-import type { CaseProfile, ModelDraft, VersionRef } from '../../lib/types';
+import type {
+  CaseEntry,
+  CaseProfile,
+  HistoryOperation,
+  ModelDraft,
+  VersionRef,
+} from '../../lib/types';
 import StudyImportDialog, {
   type StudyPreview,
   type StudyNetworkSummary,
@@ -77,6 +83,7 @@ import {
   resultFileLabel,
   shownResultFiles,
 } from './research-home';
+import { emptyFilter, historyFilter, projectSummary, statusCountsLabel } from '../history/history';
 import { homeResearchEntry, hubMethods } from '../versions/hub-methods';
 import { IGBP, PFT, USGS } from '../versions/scope-labels';
 import './research-home.css';
@@ -277,8 +284,23 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const revision = studyBaseline.revision;
   const [workbench, setWorkbench] = useState(false);
   const [tab, setTab] = useState('tuning');
-  const [engine, setEngine] = useState('rust');
-  const [preprocessors, setPreprocessors] = useState('rust');
+  const [projectPickerOpen, setProjectPickerOpen] = useState(false);
+  const [projectPickerBusy, setProjectPickerBusy] = useState(false);
+  const [projectPickerError, setProjectPickerError] = useState('');
+  const [historyProjects, setHistoryProjects] = useState<
+    {
+      path: string;
+      name: string;
+      cases: number;
+      studies: number;
+      counts: Record<string, number>;
+      at: number | null;
+    }[]
+  >([]);
+  // 研究只支持 Rust 引擎：这里不再给选项，旧研究仍用其冻结的 run_options。
+  const engine = 'rust';
+  // 研究只支持 Rust 前处理；旧研究仍用其冻结的 run_options。
+  const preprocessors = 'rust';
   const [host, setHost] = useState('');
   const [servers, setServers] = useState<string[]>([]);
   // 各服务器设置里的分区：服务器状况面板高亮它。和 servers 同时写入，借 setServers 的重绘显示。
@@ -288,8 +310,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // 格点算例（流域、区域、全球）也能做研究（2026-10-21 用户要求）。一次研究里只有一种算例，编译配置跟着换：
   // 单点用带 SinglePoint 的，格点用格点配置。
   const spatialStudy = sites.some((d) => state.cases.find((c) => c.dir === d)?.spatial);
+  // bgc/urban 是 default 的历史别名（oracle/scripts/build_kernel.sh），三者实际编译出同一套
+  // IGBP 单点宏；真正的城市/BGC 过程由算例开关决定。研究页若把别名列出来，用户会以为在选
+  // “BGC 内核/城市内核”，反而不知道选哪个（2026-11-08 用户反馈），所以只保留有区别的配置。
+  const legacySinglePointAliases = new Set(['bgc', 'urban']);
   const studyKernels = state.kernels.filter(
-    (k) => k.macros.includes('SinglePoint') !== spatialStudy,
+    (k) =>
+      k.macros.includes('SinglePoint') !== spatialStudy &&
+      !legacySinglePointAliases.has(k.preset) &&
+      // Rust 研究已合并 CROP：单点不再需要 crop 内核，按算例数据自动识别。
+      !(!spatialStudy && k.preset === 'crop'),
   );
   // 站点内容键。换版本时 `setSites([dir])` 会造一个新数组，用内容键当依赖才不会把“换站点”
   // 的 effect 误触发一次（那会把刚发起的参数读取又清掉、重复读一遍）。用 JSON 而不是分隔符
@@ -567,6 +597,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // 用数组引用会把这里再触发一次，把刚发起的参数读取清掉、同一身份读两遍。
   useEffect(() => {
     epoch.current++;
+    // 已有研究恢复冻结内核时，kernel 变化的是“恢复”而不是换设计；effect 比自动选核
+    // effect 先跑，不能靠一次性标记，直接在渲染值上判断这份研究是否已冻结。
+    const restoringOpenedStudy = !!envelope && !!studyDir && typeof frozenKernel === 'string';
     setContexts([]);
     setParameters({});
     const selected = new Set(
@@ -588,7 +621,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     setTypeChoices(null);
     setTypes([]);
     setPreflight('');
-    if (!runLock.current && !remotePermissions.exists) {
+    if (!restoringOpenedStudy && !runLock.current && !remotePermissions.exists) {
       setEnvelope(null);
       setRemoteReply(null);
       setStudyDir('');
@@ -820,7 +853,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           clearParameterContextMarker(loadedFor, key);
         };
         if (!identity.sites.length || !identity.kernel)
-          throw new Error(tr('请先选算例和编译配置', 'Select cases and a build configuration'));
+          throw new Error(
+            tr(
+              '请先选算例，并等待模型内核自动匹配',
+              'Select cases; the model kernel will be matched automatically',
+            ),
+          );
         const effective = [];
         for (const path of identity.sites) {
           effective.push(await effectiveCase(path, identity.version, previews));
@@ -907,7 +945,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // 原来两个按钮都卡在这个勾上，没勾时预检是灰的，看不出为什么。只有创建研究要它。
   function spec(forCreate: boolean) {
     if (!sites.length || !kernel)
-      throw new Error(tr('请先选算例和编译配置', 'Select cases and a build configuration'));
+      throw new Error(
+        tr(
+          '请先选算例，并等待模型内核自动匹配',
+          'Select cases; the model kernel will be matched automatically',
+        ),
+      );
     if (forCreate && !confirmed)
       throw new Error(
         tr(
@@ -1192,7 +1235,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     if (!studyDir || !kernel || !envelope || !confirmed)
       throw new Error(
         tr(
-          '请先打开研究、选好编译配置，并勾选"我已核对冻结的范围和预算"',
+          '请先打开研究、确认自动匹配的模型内核，并勾选"我已核对冻结的范围和预算"',
           'Open a study, choose a build configuration and confirm the frozen ranges and budget',
         ),
       );
@@ -2199,41 +2242,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       ]),
       disabled: busy || launching || remotePermissions.exists,
     },
-    ...(!ai
-      ? [
-          {
-            ...field(
-              'research-engine',
-              tr('执行引擎', 'Engine'),
-              envelope?.run_options?.engine ?? engine,
-              setEngine,
-              'choice',
-              [
-                { value: 'rust', label: 'Rust' },
-                { value: 'fortran', label: 'Fortran' },
-              ],
-            ),
-            disabled: busy || launching || unresolvedRemote || !!envelope?.run_options,
-          },
-        ]
-      : []),
     field('research-tab', tr('研究类型', 'Research type'), tab, chooseMethod, 'choice', [
       { value: 'tuning', label: tr('参数率定', 'Calibration') },
       { value: 'uncertainty', label: tr('不确定性', 'Uncertainty') },
       { value: 'parameters', label: tr('AI 参数学习', 'AI parameter learning') },
       { value: 'process', label: tr('AI 过程替代', 'AI process replacement') },
     ]),
-    field(
-      'research-kernel',
-      tr('编译配置目录', 'Build configuration directory'),
-      kernel,
-      setKernel,
-      'choice',
-      [
-        { value: '', label: tr('请选择可用的编译配置', 'Select an available build configuration') },
-        ...studyKernels.map((k) => ({ value: k.dir, label: k.dir })),
-      ],
-    ),
     ...state.cases.map((c) =>
       field(
         `research-case-${c.dir}`,
@@ -2465,25 +2479,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           : []),
       ]
     : [];
-  const remoteFields =
-    advanced && host
-      ? [
-          {
-            ...field(
-              'research-preprocessors',
-              tr('服务器前处理引擎', 'Server preprocessors'),
-              envelope?.run_options?.preprocessors ?? preprocessors,
-              setPreprocessors,
-              'choice',
-              [
-                { value: 'rust', label: 'Rust' },
-                { value: 'fortran', label: 'Fortran' },
-              ],
-            ),
-            disabled: busy || launching || unresolvedRemote || !!envelope?.run_options,
-          },
-        ]
-      : [];
+  const remoteFields: UiField[] = [];
   const action = (
     id: string,
     label: string,
@@ -2873,20 +2869,40 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const currentState = remotePermissions.exists ? remoteStatus : launching ? 'Running' : status;
   const methodTitle = researchMethods.find((item) => item.id === tab)!;
   const currentMethod = researchMethods.find((item) => item.id === methodFromStudy(frozenSpec))!;
-  // 编译配置：没选、或选的与算例种类不配时重挑。单点挑 default；格点按第一个算例的网格与分类挑
-  // （与项目页运行时同一个 compatibleKernel）。界面上只显示配置名。
+  // 编译配置不在界面上选：按算例自动匹配，且引擎固定 Rust。
+  // - 已有研究：沿用研究冻结的 kernel_dir，避免把研究换成另一个内核；
+  // - 新研究：选中算例后读取 profile，单点按地类选 default/usgs（CROP 由 Rust 自动识别），
+  //   格点按网格/分类/CROP 选兼容配置；
+  // - 没选算例：先放 default，等选完再自动切。
+  const autoKernelKey = useRef('');
   useEffect(() => {
-    // 没有与算例种类相配的编译配置（比如只有单点配置却选了格点算例）：清掉旧的选择，后面的步骤
-    // 才会真的拦住，原来沿用单点配置还能一路点下去（GUI 审查 R11）。
+    // 打开已有研究是“恢复”，不是修改设计：即使当前过滤后的 studyKernels 里
+    // 没有这个冻结内核（例如内核被隐藏/移除），也不能自动换核触发设计重置。
+    // 这一条必须排在没有内核列表的清理之前，否则内核全被过滤时仍会清空研究。
+    if (envelope && typeof frozenKernel === 'string') {
+      if (kernel !== frozenKernel) setKernel(frozenKernel);
+      return;
+    }
     if (!studyKernels.length) {
+      autoKernelKey.current = '';
       if (kernel) setKernel('');
       return;
     }
-    if (studyKernels.some((k) => k.dir === kernel)) return;
-    if (!spatialStudy) {
-      setKernel((studyKernels.find((k) => k.preset === 'default') ?? studyKernels[0]!).dir);
+    if (!sites.length) {
+      const fallback = studyKernels.find((k) => k.preset === 'default') ?? studyKernels[0]!;
+      if (kernel !== fallback.dir) setKernel(fallback.dir);
       return;
     }
+    // 单点只有 default 可选时不需要读算例 profile：没有 usgs 内核就没有第二种分类。
+    // 只有装了 USGS 内核才需要确认所选算例是不是 USGS。
+    if (!spatialStudy && !studyKernels.some((k) => k.macros.includes('LULC_USGS'))) {
+      const fallback = studyKernels.find((k) => k.preset === 'default') ?? studyKernels[0]!;
+      if (kernel !== fallback.dir) setKernel(fallback.dir);
+      return;
+    }
+    const key = JSON.stringify([sites, spatialStudy, studyModel, frozenKernel ?? '']);
+    if (autoKernelKey.current === key && studyKernels.some((k) => k.dir === kernel)) return;
+    autoKernelKey.current = key;
     let current = true;
     invoke<{ profile: Parameters<typeof compatibleKernel>[1]; preview_token?: string }>(
       'model_case_context',
@@ -2897,8 +2913,23 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     )
       .then(async (context) => {
         try {
-          if (current)
-            setKernel((compatibleKernel(studyKernels, context.profile) ?? studyKernels[0]!).dir);
+          if (!current) return;
+          // Rust 的 CROP（单点和空间）已由 CLI 按算例数据自动识别，选内核时不要求 CROP 宏。
+          const profile = { ...context.profile, crop: false };
+          const matched = compatibleKernel(studyKernels, profile);
+          if (!matched) {
+            // 单点/格点都一样：没有匹配内核时不能静默回落，否则可能用错地类表。
+            setError(
+              tr(
+                '没有匹配当前算例的模型内核；请到“计算资源”编译对应内核，或检查算例的地类/网格设置。',
+                'No model kernel matches the selected cases; build the matching kernel under Compute resources or check the land-cover/grid settings.',
+              ),
+            );
+            if (kernel) setKernel('');
+            return;
+          }
+          const desired = matched;
+          if (kernel !== desired.dir) setKernel(desired.dir);
         } finally {
           if (context.preview_token)
             await invoke('model_case_context_release', { token: context.preview_token }).catch(
@@ -2907,13 +2938,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         }
       })
       .catch(() => {
-        if (current) setKernel(studyKernels[0]!.dir);
+        if (current) {
+          const fallback = studyKernels[0]!;
+          if (kernel !== fallback.dir) setKernel(fallback.dir);
+        }
       });
     return () => {
       current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.kernels, kernel, spatialStudy, sites]);
+  }, [state.kernels, kernel, spatialStudy, sites, envelope, frozenKernel]);
   // 项目里只有一个单点算例时直接勾上（没有别的可选）。换版本会清空所选算例，所以不是只勾一次；
   // 用户自己动过勾选就不再替他勾。
   const sitesTouched = useRef(false);
@@ -3279,6 +3313,106 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       );
     });
   // 没有算例时给出能点的下一步，而不是只写一句"先去项目里"（GUI 审查 C-09）。
+  // 研究有活动任务时不能切项目：后台运行还在继续，切走会丢暂停/取消和结果入口。
+  const projectSwitchBlocked =
+    launching ||
+    busy ||
+    (!!studyDir && (remotePermissions.exists ? !remotePermissions.terminal : status === 'Running'));
+  const projectSwitchBlockedText = tr(
+    '当前研究还在运行，先停止或等它结束再切换项目。',
+    'The study is still running; stop it or wait for it to finish before switching projects.',
+  );
+  // 历史项目选择器：其他项目先读历史记录，再按项目路径聚合；只有历史里没有时才走磁盘。
+  const openProjectHistory = async () => {
+    if (projectSwitchBlocked) {
+      notify(projectSwitchBlockedText, true);
+      return;
+    }
+    setProjectPickerOpen(true);
+    setProjectPickerBusy(true);
+    setProjectPickerError('');
+    try {
+      const page = await invokeJson<{ items: HistoryOperation[] }>('history_list', {
+        filter: historyFilter({ ...emptyFilter, includeRoutine: false }, 0, 200),
+      });
+      const byPath = new Map<
+        string,
+        {
+          path: string;
+          name: string;
+          cases: number;
+          studies: number;
+          counts: Record<string, number>;
+          at: number | null;
+        }
+      >();
+      for (const item of page.items) {
+        const group = item.project_group;
+        if (!group) continue;
+        const summary = projectSummary(group);
+        const at = Math.max(...group.members.map((member) => member.time_ms ?? 0), 0) || null;
+        const previous = byPath.get(group.path);
+        if (!previous || (at ?? 0) > (previous.at ?? 0)) {
+          byPath.set(group.path, {
+            path: group.path,
+            name: group.name,
+            cases: summary.cases,
+            studies: summary.studies,
+            counts: summary.counts as unknown as Record<string, number>,
+            at,
+          });
+        }
+      }
+      setHistoryProjects([...byPath.values()].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)));
+    } catch (error) {
+      setProjectPickerError(String(error));
+    } finally {
+      setProjectPickerBusy(false);
+    }
+  };
+  const selectProject = async (path: string) => {
+    if (projectSwitchBlocked) {
+      setProjectPickerError(projectSwitchBlockedText);
+      return;
+    }
+    setProjectPickerBusy(true);
+    setProjectPickerError('');
+    try {
+      const cases = await invoke<CaseEntry[]>('list_cases', { root: path });
+      await invoke('save_recent', { key: 'root', value: path }).catch(() => {});
+      update({
+        root: path,
+        cases,
+        selectedCase: null,
+        projectCasesOpen: false,
+        projectView: { root: path, page: 'cases' },
+      });
+      // 换项目等于换研究上下文：旧算例、旧内核和旧研究结果不能带过来。
+      sitesTouched.current = false;
+      setSites([]);
+      setKernel('');
+      setStudyDir('');
+      setEnvelope(null);
+      setRemoteReply(null);
+      setResult('');
+      setConfirmed(false);
+      setProjectPickerOpen(false);
+      notify(tr(`已切换到项目：${path}`, `Switched to project: ${path}`));
+    } catch (error) {
+      setProjectPickerError(String(error));
+    } finally {
+      setProjectPickerBusy(false);
+    }
+  };
+  const chooseProjectFromDisk = async () => {
+    try {
+      const root = await invoke<string | null>('pick_folder', { key: 'project-open' });
+      if (root) await selectProject(root);
+    } catch (error) {
+      setProjectPickerError(String(error));
+    }
+  };
+
   const noCasesActions = (
     <div className="button-row">
       <ActionButton
@@ -3493,7 +3627,6 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         </section>
       </div>
     );
-  const kernelEntry = state.kernels.find((k) => k.dir === kernel);
   const siteName = (path: string) =>
     path
       .replace(/[/\\]+$/, '')
@@ -3905,7 +4038,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       ? !confirmed
         ? tr('先勾选上面的"我已核对……"才能运行。', 'Tick the review box above to run.')
         : !runKernel
-          ? tr('没有可用的编译配置。', 'No build configuration is available.')
+          ? tr('没有匹配当前算例的模型内核。', 'No model kernel matches the selected cases.')
           : launching
             ? tr('研究正在运行。', 'The study is running.')
             : busy
@@ -4250,6 +4383,22 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             'The study runs the model repeatedly on these cases, all of one kind: single-point (several sites share the parameters) or gridded (basin, region or globe).',
           )}
         >
+          <div className="study-project-scope">
+            <span className="muted">
+              {tr(
+                `当前项目：${state.root ? state.root.split(/[/\\]/).pop() : '未打开'}`,
+                `Current project: ${state.root ? state.root.split(/[/\\]/).pop() : 'none'}`,
+              )}
+            </span>
+            <Button
+              variant="ghost"
+              onClick={() => void openProjectHistory()}
+              disabled={projectSwitchBlocked}
+              title={projectSwitchBlocked ? projectSwitchBlockedText : undefined}
+            >
+              {tr('其他项目…', 'Other projects…')}
+            </Button>
+          </div>
           {state.cases.length === 0 ? (
             <div className="versions-empty">
               <p>
@@ -4315,46 +4464,19 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 ))}
               </Select>
             </Field>
-            {!ai && (
-              <Field label={tr('计算引擎', 'Engine')}>
-                <Select
-                  value={envelope?.run_options?.engine ?? engine}
-                  disabled={busy || launching || !!envelope?.run_options}
-                  title={
-                    envelope?.run_options
-                      ? tr(
-                          '这个研究第一次运行时已定下引擎，之后不能换；要换引擎就新建研究。',
-                          'This study fixed its engine at the first run; create a new study to use another.',
-                        )
-                      : undefined
-                  }
-                  onChange={(e) => setEngine(e.target.value)}
-                >
-                  <option value="rust">Rust</option>
-                  <option value="fortran">Fortran</option>
-                </Select>
-              </Field>
-            )}
-            <Field label={tr('编译配置', 'Build configuration')}>
-              <Select
-                value={kernel}
-                disabled={busy || launching}
-                onChange={(e) => setKernel(e.target.value)}
-              >
-                <option value="">{tr('请选择', 'Choose one')}</option>
-                {studyKernels.map((k) => (
-                  <option key={k.dir} value={k.dir}>
-                    {k.preset}
-                  </option>
-                ))}
-              </Select>
-            </Field>
           </div>
-          {kernelEntry && (
-            <p className="muted study-hint">
-              {kernelEntry.macros.join(' · ')} · {kernelEntry.platform}
-            </p>
-          )}
+          <p className="muted study-hint">
+            {tr(
+              '研究只支持 Rust 引擎，计算引擎不再提供选项。旧研究如果记录的是 Fortran，运行时会沿用旧引擎；需要 Rust 请新建研究。',
+              'Research only supports the Rust engine; the engine is no longer selectable. Studies created earlier with Fortran keep their recorded engine; create a new study to use Rust.',
+            )}
+          </p>
+          <p className="muted study-hint">
+            {tr(
+              '模型内核按所选算例自动匹配：区域/流域/全球自动用对应格点内核，USGS 自动用 usgs；普通单点用 default，CROP 已由 Rust 引擎按算例自动识别。',
+              'The model kernel follows the selected cases: gridded cases use their grid kernel, USGS uses usgs, ordinary single points use default, and CROP is detected automatically by the Rust engine.',
+            )}
+          </p>
           {host && servers.includes(host) && (
             <LiveServerLoad host={host} partition={serverPartitions.current[host]} en={en} />
           )}
@@ -4908,24 +5030,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 </Field>
               )}
               {host && (
-                <Field label={tr('服务器前处理引擎', 'Server preprocessors')}>
-                  <Select
-                    value={envelope?.run_options?.preprocessors ?? preprocessors}
-                    disabled={!!envelope?.run_options}
-                    title={
-                      envelope?.run_options
-                        ? tr(
-                            '这个研究第一次运行时已定下前处理，之后不能换；要换就新建研究。',
-                            'This study fixed its preprocessors at the first run; create a new study to change them.',
-                          )
-                        : undefined
-                    }
-                    onChange={(e) => setPreprocessors(e.target.value)}
-                  >
-                    <option value="rust">Rust</option>
-                    <option value="fortran">Fortran</option>
-                  </Select>
-                </Field>
+                <p className="muted study-hint">
+                  {tr(
+                    '服务器前处理固定为 Rust；旧研究沿用其记录的前处理引擎。',
+                    'Server preprocessing is fixed to Rust; existing studies use their recorded preprocessor.',
+                  )}
+                </p>
               )}
             </div>
           </Advanced>
@@ -5807,6 +5917,69 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           </Advanced>
           {!studyDir && footer(true)}
         </>
+      )}
+      {projectPickerOpen && (
+        <Dialog
+          open={projectPickerOpen}
+          title={tr('从历史记录打开项目', 'Open a project from history')}
+          description={tr(
+            '默认列出历史记录里做过的项目；历史里没有的目录再用“从磁盘选择…”。',
+            'Projects from the history are listed first; use “Choose from disk…” only for folders that are not in history.',
+          )}
+          onOpenChange={(open) => {
+            if (!open && !projectPickerBusy) setProjectPickerOpen(false);
+          }}
+          closeAction="research-other-project-close"
+        >
+          {projectPickerError && <Notice tone="error">{projectPickerError}</Notice>}
+          {projectPickerBusy ? (
+            <p className="muted">{tr('正在读取历史项目…', 'Loading projects from history…')}</p>
+          ) : historyProjects.length ? (
+            <div className="study-project-history">
+              {historyProjects.map((project) => (
+                <button
+                  key={project.path}
+                  type="button"
+                  className="study-project-history-row"
+                  onClick={() => void selectProject(project.path)}
+                >
+                  <span>
+                    <strong>{project.name}</strong>
+                    <small>{project.path}</small>
+                  </span>
+                  <span className="muted">
+                    {project.cases} {tr('个算例', 'cases')}
+                    {project.studies ? ` · ${project.studies} ${tr('个研究', 'studies')}` : ''}
+                    {statusCountsLabel(project.counts as never, en)
+                      ? ` · ${statusCountsLabel(project.counts as never, en)}`
+                      : ''}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">
+              {tr(
+                '历史记录里还没有项目；可以直接从磁盘选择目录。',
+                'No projects in history yet; choose a folder from disk.',
+              )}
+            </p>
+          )}
+          <div className="button-row">
+            <ActionButton
+              action="research-other-project-disk"
+              label={tr('从磁盘选择…', 'Choose from disk…')}
+              run={chooseProjectFromDisk}
+              disabled={projectPickerBusy}
+            />
+            <ActionButton
+              action="research-other-project-cancel"
+              label={tr('取消', 'Cancel')}
+              run={() => setProjectPickerOpen(false)}
+              disabled={projectPickerBusy}
+            />
+          </div>
+        </Dialog>
       )}
       {writing && (
         <StudyImportDialog

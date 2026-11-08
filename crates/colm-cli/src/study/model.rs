@@ -230,7 +230,9 @@ pub(crate) fn prepare_create(
     if let Some(path) = &spec.kernel_dir {
         let path = source.join(path);
         let kernel = colm_kernel::Kernel::open_manifest(&path)?;
-        crate::model_version::check_kernel(&revision, &kernel)?;
+        let rust_crop_merged = opts.get("--engine").as_deref().unwrap_or("rust") == "rust"
+            && crate::model_version::supports_runtime_crop(&std::env::current_exe()?);
+        crate::model_version::check_kernel_for_engine(&revision, &kernel, rust_crop_merged)?;
         spec.kernel_dir = Some(
             colm_kernel::manifest::absolute(&path)?
                 .to_string_lossy()
@@ -417,7 +419,11 @@ pub(crate) fn verify_frozen_hybrid(destination: &Path) -> Result<()> {
 }
 
 /// The server compiles this revision's source snapshot and receives its verified assets separately.
-pub(crate) fn adopt_remote(manifest: &Manifest, revision_file: &Path) -> Result<()> {
+pub(crate) fn adopt_remote(
+    manifest: &Manifest,
+    revision_file: &Path,
+    rust_crop_merged: bool,
+) -> Result<()> {
     let frozen: FrozenRevision = serde_json::from_slice(&std::fs::read(revision_file)?)?;
     let registry_root = revision_file
         .parent()
@@ -434,10 +440,11 @@ pub(crate) fn adopt_remote(manifest: &Manifest, revision_file: &Path) -> Result<
             .as_deref()
             .context("remote Study kernel missing")?,
     );
-    crate::remote_cmd::check_remote_kernel_manifest(
+    crate::remote_cmd::check_remote_kernel_manifest_for_engine(
         &std::fs::read_to_string(kernel.join("manifest.json"))?,
         &kernel.to_string_lossy(),
         &frozen,
+        rust_crop_merged,
     )?;
     let pin = crate::study_version::Pinned {
         name: frozen
@@ -783,14 +790,14 @@ mod tests {
         ] {
             metadata["macros"] = macros;
             std::fs::write(kernel.join("manifest.json"), metadata.to_string()).unwrap();
-            assert!(adopt_remote(&manifest, &revision_file).is_err());
+            assert!(adopt_remote(&manifest, &revision_file, false).is_err());
             assert!(!Path::new(&manifest.root)
                 .join(crate::study_version::FILE)
                 .exists());
         }
         metadata["macros"] = serde_json::json!(["SinglePoint", "LULC_IGBP"]);
         std::fs::write(kernel.join("manifest.json"), metadata.to_string()).unwrap();
-        adopt_remote(&manifest, &revision_file).unwrap();
+        adopt_remote(&manifest, &revision_file, false).unwrap();
         assert_eq!(
             crate::study_version::pinned(Path::new(&manifest.root))
                 .unwrap()

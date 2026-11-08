@@ -1106,13 +1106,17 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     } else {
         format!("{root}/kernels/{preset}-{}", short_hash(&manifest_text))
     };
-    if let Some(revision) =
-        crate::study_version::pinned(&study_dir)?.and_then(|pin| pin.model_revision)
-    {
+    let pinned_revision =
+        crate::study_version::pinned(&study_dir)?.and_then(|pin| pin.model_revision);
+    if let Some(revision) = &pinned_revision {
         if fortran {
-            crate::remote_cmd::check_selected_remote_kernel(&ssh, &remote_kernel, &revision)?;
+            crate::remote_cmd::check_selected_remote_kernel(&ssh, &remote_kernel, revision, false)?;
         } else {
-            crate::model_version::check_kernel(&revision, &local_kernel)?;
+            crate::model_version::check_kernel_for_engine(
+                revision,
+                &local_kernel,
+                crate::model_version::supports_runtime_crop(&std::env::current_exe()?),
+            )?;
         }
     }
     spec["kernel_dir"] = json!(remote_kernel);
@@ -1205,6 +1209,18 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
                 &remote_kernel,
                 &manifest_text,
             ))?;
+            // 本地放行不算数：旧服务器 sidecar 可能还不认识运行时 CROP。
+            if let Some(revision) = &pinned_revision {
+                if let Some(remote_crop) =
+                    crate::remote_cmd::remote_cli_supports_runtime_crop(&ssh, &root, engine.id())
+                {
+                    crate::model_version::check_kernel_for_engine(
+                        revision,
+                        &local_kernel,
+                        remote_crop,
+                    )?;
+                }
+            }
         }
         // 服务器上已有的旧项目目录先清掉：研究要从头按这份设定建。
         ssh.run_ok(&format!("rm -rf {}", quote(&remote_project)))?;

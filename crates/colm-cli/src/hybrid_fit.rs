@@ -306,7 +306,7 @@ fn tap(
         .arg(spec)
         .arg("--hybrid-tap")
         .arg(&out)
-        .args(rust_model_crop_arguments(kernel))
+        .args(rust_model_crop_arguments(kernel, false))
         .output()
         .with_context(|| format!("cannot start {}", executable.display()))?;
     if !output.status.success() {

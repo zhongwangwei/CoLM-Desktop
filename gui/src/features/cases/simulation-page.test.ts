@@ -1737,7 +1737,7 @@ test('case urban switch controls station compatibility and urban creation mode w
   assert.equal(sent.filter((f) => f.path === 'DEF_TUNING_CSOILC').length, 1);
   assert.deepEqual(p.state.version.overlay.physics, { DEF_TUNING_CSOILC: '0.7' });
 });
-test('case crop planting selects the crop kernel and station; clearing it returns to the default kernel', async () => {
+test('case crop planting keeps the Rust default kernel and station; clearing it keeps default', async () => {
   const crop = { ...site, name: 'crop', crop: true };
   const p = page(
     'NewCasePage',
@@ -1753,7 +1753,8 @@ test('case crop planting selects the crop kernel and station; clearing it return
     DEF_TUNING_CROP_PLANTING_DAY: '120',
   });
   p.render();
-  assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).dir, '/kernel/crop');
+  // Rust CROP 已合并：作物设置保留，但内核仍是 default；Fortran 才需要 crop 内核。
+  assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).dir, '/kernel/default');
   await p.click('new-previous');
   const c = p.render();
   assert.equal(c.actions.find((a) => a.id === 'new-select-crop')!.enabled, true);
@@ -2010,7 +2011,7 @@ test('selecting an urban station configures its case automatically and keeps ord
   assert.ok(!p.calls.some((c) => c.command === 'model_create'));
 });
 
-test('selecting a crop example uses backend defaults and matches PFT BGC and a CROP kernel', async () => {
+test('selecting a crop example uses backend defaults and keeps the Rust default kernel', async () => {
   const crop = {
     ...site,
     name: 'US-Ne3',
@@ -2031,7 +2032,7 @@ test('selecting a crop example uses backend defaults and matches PFT BGC and a C
   await p.click('new-next');
   const setup = p.element('ModelSettings').props;
   assert.equal(setup.mode, 'PFT');
-  assert.equal((setup.kernel as KernelChoice).dir, '/kernel/crop');
+  assert.equal((setup.kernel as KernelChoice).dir, '/kernel/default');
   const fields = (setup.setupEnvironment as { caseValues: Record<string, string> }).caseValues;
   assert.equal(fields.DEF_USE_BGC, '.true.');
   assert.equal(fields.DEF_URBAN_RUN, '.false.');

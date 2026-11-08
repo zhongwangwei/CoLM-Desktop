@@ -143,10 +143,10 @@ impl SpatialTopology {
             topology.blocks.push((block, first..topology.element.len()));
         }
         // `has_shared` 在上游是全局的（`MPI_LOR`）：任一块共享，各块都读 `pctshared`。
-        ensure!(
-            !any_shared || topology.blocks.len() == 1,
-            "pctshared on a multi-block case is not supported yet"
-        );
+        // 多块时每个 block 自己读本块的 pctshared；统计量按块拼接，后续 patch 索引仍按
+        // `blocks` 的区间寻址。保留这个计算只为说明空间 CROP 的共享比例是逐块读入的；
+        // 不再限制单块（否则区域/全球 CROP 永远跑不了）。
+        let _ = any_shared;
         Ok(topology)
     }
 

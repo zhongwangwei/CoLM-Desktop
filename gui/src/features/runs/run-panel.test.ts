@@ -407,6 +407,15 @@ test('leaving the page does not stop the stations still to be submitted', async 
   for (const dir of targets) assert.equal(p.state.running[dir].status, 'succeeded');
 });
 
+test('automatic kernel selection uses the current engine, not the profile snapshot', () => {
+  const source = readFileSync(new URL('./RunPanel.tsx', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /compatibleKernel\(\s*state\.kernels,\s*\{\s*\.\.\.effectiveProfile,\s*engine\s*\}/,
+    'automatic kernel matching must spread the current engine into the profile',
+  );
+});
+
 test('batch kernel check validates every selected profile', () => {
   const source = ts.createSourceFile(
     'RunPanel.tsx',
@@ -430,6 +439,7 @@ test('batch kernel check validates every selected profile', () => {
     'batchProfiles',
     'state',
     'kernel',
+    'engine',
     'compatibleKernel',
     'effectiveModelFields',
     `${javascript}; return result;`,
@@ -444,13 +454,22 @@ test('batch kernel check validates every selected profile', () => {
       { a: profile, b: { ...profile, crop: true } },
       state,
       '/kernel',
+      'fortran',
       compatibleKernel,
       () => ({}),
     ),
     false,
   );
   assert.equal(
-    evaluate(profile, { a: profile, b: profile }, state, '/kernel', compatibleKernel, () => ({})),
+    evaluate(
+      profile,
+      { a: profile, b: profile },
+      state,
+      '/kernel',
+      'fortran',
+      compatibleKernel,
+      () => ({}),
+    ),
     true,
   );
 });

@@ -459,6 +459,8 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
     }
     match cmd {
         "help" | "-h" | "--help" => print!("{USAGE}"),
+        // 旧冻结 CLI 没有这个子命令；新程序用它证明“运行时 CROP 能力”，而不是靠版本猜测。
+        "capabilities" => println!(r#"{{"crop_runtime":true}}"#),
         "energy-summary" => {
             let case = opts.positional_case()?;
             let from = opts
@@ -776,7 +778,12 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                     }
                 }
                 let identity = if let Some(path) = opts.get("--frozen-study-model") {
-                    study::model::adopt_remote(&manifest, Path::new(&path))
+                    study::model::adopt_remote(
+                        &manifest,
+                        Path::new(&path),
+                        opts.get("--engine").as_deref().unwrap_or("rust") == "rust"
+                            && model_version::supports_runtime_crop(&std::env::current_exe()?),
+                    )
                 } else if prepared.is_none() {
                     study::model::capture_inputs(&manifest)
                 } else {
@@ -2656,10 +2663,61 @@ fn rust_model_land_cover(kernel: &Kernel) -> Result<&'static str> {
 /// 所以要像 `--land-cover` 一样由内核告诉 `colm-rs`，否则作物算例会被当成非作物 BGC 静默跑完。
 /// 内核宏里 `colm-rs` 要知道、namelist 里又没有的：`CROP`（`DEF_USE_CROP` 的只读映射）、
 /// `UNSTRUCTURED`（决定 `DEF_HISTORY_IN_VECTOR` 是否生效）与 `CATCHMENT`（`CatchLateralFlow`）。
-fn rust_model_crop_arguments(kernel: &Kernel) -> Vec<String> {
+/// Rust 引擎的 CROP 合并：CROP 内核宏过去是唯一让 CLI 传 `--crop` 的开关；
+/// 现在单点算例可以直接从站点文件判定（`croptyp`/`pctcrop`），所以默认内核也能跑。
+/// 空间算例从 DEF_USE_CROP / 作物设置判断；预处理仍按 rawdata 的作物份额建 patch。
+fn rust_case_is_crop(case_nml: &Path) -> Result<bool> {
+    let text = std::fs::read_to_string(case_nml)
+        .with_context(|| format!("cannot read {}", case_nml.display()))?;
+    let document = colm_namelist::parse(&text)
+        .with_context(|| format!("cannot parse {}", case_nml.display()))?;
+    let crop_field =
+        |name: &str| matches!(document.get(name), Some(colm_namelist::Value::Bool(true)));
+    // 播种日只有显式大于 0 才代表作物；普通算例里 0.0 的默认值不能触发 CROP。
+    // 用 as_f64 而不是自己解析 Real text：120（Int）、120.0、1.2D2 都是合法 Fortran 实数。
+    let positive_planting_day = document
+        .get("DEF_TUNING_CROP_PLANTING_DAY")
+        .and_then(colm_namelist::Value::as_f64)
+        .is_some_and(|value| value > 0.0);
+    // DEF_USE_FERT / DEF_USE_CNSOYFIXN 的 schema 默认值就是 true，不能证明算例启用了作物。
+    // 只认 CROP 的显式开关和灌溉；空间作物通常还会带正的播种日。
+    if crop_field("DEF_USE_CROP") || crop_field("DEF_USE_IRRIGATION") || positive_planting_day {
+        return Ok(true);
+    }
+    let Some(colm_namelist::Value::Str(site)) = document.get("SITE_fsitedata") else {
+        return Ok(false);
+    };
+    if site.trim().is_empty() {
+        return Ok(false);
+    }
+    let case_dir = case_nml
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let site = PathBuf::from(site);
+    let site = if site.is_absolute() {
+        site
+    } else {
+        case_dir.join(site)
+    };
+    // SITE_landtype 不是唯一来源：站点文件自带 IGBP_classification，旧算例可以不写
+    // SITE_landtype。先读 namelist，再回落到站点文件的有效地类，否则农田站点会被判成非作物。
+    let landtype = match document.get("SITE_landtype") {
+        // 预处理器的约定是负值表示“没写/未覆盖”，不能把 -1 当成有效地类。
+        Some(colm_namelist::Value::Int(value)) if *value >= 0 => Some(i32::try_from(*value)?),
+        _ => None,
+    };
+    let landtype = match landtype {
+        Some(value) => Some(value),
+        None => colm_srfdata::site::landtype_for_mode(&site, colm_srfdata::site::SiteMode::Igbp)?,
+    };
+    colm_srfdata::site::crop_site(&site, landtype)
+}
+
+fn rust_model_crop_arguments(kernel: &Kernel, crop_case: bool) -> Vec<String> {
     let has = |name: &str| kernel.manifest.macros.iter().any(|item| item == name);
     let mut arguments = Vec::new();
-    if has("CROP") {
+    if has("CROP") || crop_case {
         arguments.push("--crop".to_owned());
     }
     if has("UNSTRUCTURED") {
@@ -2834,7 +2892,10 @@ fn preflight_rust_model(case_nml: &Path, kernel: &Kernel, ranks: usize) -> Resul
         .current_dir(case_dir)
         .arg(case_nml)
         .args(["--land-cover", land_cover, "--preflight"])
-        .args(rust_model_crop_arguments(kernel))
+        .args(rust_model_crop_arguments(
+            kernel,
+            rust_case_is_crop(case_nml)?,
+        ))
         .args(rust_model_hybrid_arguments(case_nml))
         .output()
         .with_context(|| format!("cannot start {}", executable.display()))?;
@@ -2873,12 +2934,32 @@ fn rust_preprocessor_executable(stage: Stage) -> Result<PathBuf> {
     Ok(executable)
 }
 
+#[cfg(test)]
 fn rust_preprocessor_arguments(
     stage: Stage,
     namelist: &Path,
     kernel: &Kernel,
     highres_params: Option<&Path>,
     soil_hyper_albedo_dir: Option<&Path>,
+) -> Result<Vec<String>> {
+    rust_preprocessor_arguments_with_crop(
+        stage,
+        namelist,
+        kernel,
+        highres_params,
+        soil_hyper_albedo_dir,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rust_preprocessor_arguments_with_crop(
+    stage: Stage,
+    namelist: &Path,
+    kernel: &Kernel,
+    highres_params: Option<&Path>,
+    soil_hyper_albedo_dir: Option<&Path>,
+    crop_case: bool,
 ) -> Result<Vec<String>> {
     if stage == Stage::Colm {
         return Ok(Vec::new());
@@ -2955,11 +3036,12 @@ fn rust_preprocessor_arguments(
     // 单点 mkinidata 从地表文件里有无作物份额自行判断；空间 mkinidata 要它决定 `map_patch_to_pft`
     // 的农田 patch 规则（`DEF_USE_CROP` 是宏的只读映射，namelist 里没有）。
     if !lct
-        && kernel
-            .manifest
-            .macros
-            .iter()
-            .any(|macro_name| macro_name == "CROP")
+        && (crop_case
+            || kernel
+                .manifest
+                .macros
+                .iter()
+                .any(|macro_name| macro_name == "CROP"))
     {
         arguments.push("--crop".to_owned());
     }
@@ -3246,11 +3328,10 @@ fn rust_preprocessor_stage_identity(
         fingerprint::sha256_file(&executable)?
     );
     let inputs = rust_preprocessor_input_identity(case, arguments)?;
-    Ok(if inputs.is_empty() {
-        binary
-    } else {
-        format!("{binary};{inputs}")
-    })
+    // 参数本身也进入阶段指纹：--crop / --land-cover / --blocks 等会改变预处理产物。
+    // 只哈希文件输入会让“切换主引擎后检测到的 CROP 模式”复用旧缓存。
+    let arguments = arguments.join("\u{1f}");
+    Ok(format!("{binary};args={arguments};{inputs}"))
 }
 
 fn stage_kernel_identity(
@@ -3882,6 +3963,22 @@ fn run_case(
             path.display()
         );
     }
+    let rust_crop_case = if engine == ModelEngine::Rust {
+        rust_case_is_crop(&layout.case_nml())?
+    } else {
+        false
+    };
+    // Rust CROP 已经把 CROP 从编译期改成运行时；Fortran 前处理器仍按 CROP 宏决定
+    // 是否生成作物 patch。两者混用时，没有 CROP 宏会让 Fortran 生成非作物地表再交给
+    // Rust 作物主循环，属于静默错配，必须拒绝。
+    if rust_crop_case
+        && preprocessors == PreprocessorMode::Fortran
+        && !kernel.manifest.macros.iter().any(|name| name == "CROP")
+    {
+        bail!(
+            "this is a Rust CROP case but preprocessing is set to Fortran without a CROP kernel;              use --preprocessors rust or select a CROP kernel"
+        );
+    }
     let rust_model_land_cover = if engine == ModelEngine::Rust && runs_model {
         preflight_rust_model(&layout.case_nml(), &kernel, ranks)?;
         Some(rust_model_land_cover(&kernel)?)
@@ -3920,24 +4017,26 @@ fn run_case(
     let rust_mksrfdata_arguments = (preprocessors == PreprocessorMode::Rust
         && only_stage.is_none_or(|stage| stage == Stage::MkSrfData))
     .then(|| {
-        rust_preprocessor_arguments(
+        rust_preprocessor_arguments_with_crop(
             Stage::MkSrfData,
             &layout.case_nml(),
             &kernel,
             highres_params,
             soil_hyper_albedo_dir,
+            rust_crop_case,
         )
     })
     .transpose()?;
     let rust_mkinidata_arguments = (preprocessors == PreprocessorMode::Rust
         && only_stage.is_none_or(|stage| stage == Stage::MkIniData))
     .then(|| {
-        rust_preprocessor_arguments(
+        rust_preprocessor_arguments_with_crop(
             Stage::MkIniData,
             &layout.case_nml(),
             &kernel,
             highres_params,
             soil_hyper_albedo_dir,
+            rust_crop_case,
         )
     })
     .transpose()?;
@@ -4084,7 +4183,7 @@ fn run_case(
                     land_cover.to_owned(),
                     "--case-outputs".to_owned(),
                 ],
-                rust_model_crop_arguments(&kernel),
+                rust_model_crop_arguments(&kernel, rust_crop_case),
                 rust_model_hybrid_arguments(&layout.case_nml()),
             ]
             .concat();

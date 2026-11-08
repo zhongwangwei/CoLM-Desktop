@@ -808,6 +808,7 @@ function researchPage(
       Fragment: 'Fragment',
     },
     ActionButton: 'ActionButton',
+    Dialog: 'Dialog',
     Advanced: 'Advanced',
     Button: 'Button',
     Card: 'Card',
@@ -2592,13 +2593,6 @@ for (const [name, change] of [
     },
   ],
   [
-    'kernel',
-    (page: ReturnType<typeof researchPage>) => {
-      const fields = page.contract().fields as { id: string; set: (value: string) => void }[];
-      fields.find((field) => field.id === 'research-kernel')!.set('/kernels/other');
-    },
-  ],
-  [
     'sites',
     (page: ReturnType<typeof researchPage>) => {
       const fields = page.contract().fields as { id: string; set: (value: string) => void }[];
@@ -2996,6 +2990,49 @@ it('starting a method from the research home clears the previous target, seed an
 // P2 复现：研究基线（soil@3）与当前运行版本（official@1）不同时，侧栏"研究"原先把 researchBaseline
 // 清成 null，模型身份 effect 随即清掉 studyDir/envelope/remoteReply，首页"查看进度"和远程追踪入口
 // 一起消失。侧栏回首页只是展示已打开研究，不是新建研究；清场由 startHomeMethod/chooseMethod 负责。
+it('opening a study frozen to another kernel keeps its design', async () => {
+  const page = researchPage({
+    kernelDir: '/kernels/default',
+    kernels: [
+      {
+        dir: '/kernels/default',
+        preset: 'default',
+        platform: 'macos',
+        macros: ['SinglePoint', 'LULC_IGBP'],
+      },
+      {
+        dir: '/kernels/usgs',
+        preset: 'usgs',
+        platform: 'macos',
+        macros: ['SinglePoint', 'LULC_USGS'],
+      },
+    ],
+  });
+  page.render();
+  page.press('study-browse');
+  assert.equal(page.requests.at(-1)!.command, 'pick_folder');
+  page.requests.at(-1)!.resolve('/p/.colm/studies/s-usgs');
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_status');
+  page.requests.at(-1)!.resolve({
+    manifest: {
+      id: 's-usgs',
+      spec: { kind: 'tuning', kernel_dir: '/kernels/usgs', parameters: [] },
+    },
+    state: { status: 'Ready', candidates: {} },
+    results: [],
+    model_version: { model_revision: { version: { id: 'official', revision: 1 } } },
+  });
+  await page.settle();
+  page.press('research-home');
+  await page.settle();
+  assert.ok(
+    page.actions().some((action) => action.id === 'research-current'),
+    'restoring a frozen usgs study must not clear studyDir/envelope',
+  );
+  assert.match(pageText(page), /s-usgs/);
+});
+
 it('the sidebar research entry keeps an open study and its remote tracking', async () => {
   const page = researchPage({
     versionRef: { id: 'official', revision: 1 },

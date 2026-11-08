@@ -4089,3 +4089,18 @@ table input {
   display: flex;
   gap: 4px;
 }
+
+/* 地表覆盖与植被方案：USGS 已退休，不全面测试。 */
+.scheme-retired-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--warning, #b7791f);
+  border-radius: 999px;
+  color: var(--warning, #b7791f);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.5;
+  vertical-align: middle;
+  white-space: nowrap;
+}

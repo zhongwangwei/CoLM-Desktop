@@ -2085,7 +2085,14 @@ fn expert_tuning_runtime_state(
     {
         return Some(hidden("需要 CROP 农田并启用灌溉"));
     }
-    if name == "DEF_TUNING_CROP_PLANTING_DAY" && !(c.single && c.crop && c.cropland()) {
+    // Rust 把 CROP 运行时化后，空间 PFT/PC + BGC 算例也可以有正的播种日；
+    // 一旦写入了正播种日，这个字段就不能再藏起来，否则用户保存后无法查看或关闭作物过程。
+    let rust_spatial_crop =
+        !c.single && (c.pft || c.pc) && c.bgc && real(c.doc, "DEF_TUNING_CROP_PLANTING_DAY") > 0.0;
+    if name == "DEF_TUNING_CROP_PLANTING_DAY"
+        && !(c.single && c.crop && c.cropland())
+        && !rust_spatial_crop
+    {
         return Some(hidden("仅单点 CROP 农田使用"));
     }
     if one_of(&["DEF_TUNING_SMPMAX_HR", "DEF_TUNING_SMPMIN_HR"]) && !c.bgc {
@@ -2176,7 +2183,14 @@ fn field_runtime_state(
         return state;
     }
 
-    if !field_is_relevant(field, c.have) {
+    // Rust 把 CROP 运行时化：空间 PFT/PC + BGC 算例一旦写入正播种日，字段就应可见；
+    // 但它 schema 里带 requires=["CROP"]，默认内核会被编译期过滤掉，这里放行。
+    let rust_spatial_planting = name == "DEF_TUNING_CROP_PLANTING_DAY"
+        && !c.single
+        && (c.pft || c.pc)
+        && c.bgc
+        && real(c.doc, "DEF_TUNING_CROP_PLANTING_DAY") > 0.0;
+    if !field_is_relevant(field, c.have) && !rust_spatial_planting {
         return hidden("当前内核未编入这个功能");
     }
 
@@ -2689,6 +2703,10 @@ fn field_runtime_state(
         return hidden("当前内核未启用 CROP");
     }
     if name == "DEF_USE_CROP" && !c.crop {
+        // Rust 空间 CROP 的运行时标记：没有 CROP 宏时也要让保存后的算例看到它。
+        if !c.single && (c.pft || c.pc) && c.bgc && logical(c.doc, "DEF_USE_CROP") {
+            return (FieldMode::Editable, None, vec![".true.", ".false."]);
+        }
         return hidden("当前内核未启用 CROP");
     }
     if c.single
@@ -4943,7 +4961,13 @@ fn put(
                 .flatten()
         })
         .and_then(|f| f.group)
-    {
+        // DEF_USE_CROP 的 schema 分组为空（上游是 CROP 宏的只读投影），Rust 合并后
+        // 作为运行时标记写进 nl_colm；否则只改不插会报“no such field”。
+        .or_else(|| {
+            schema_name(path)
+                .eq_ignore_ascii_case("DEF_USE_CROP")
+                .then_some("nl_colm")
+        }) {
         Some(g) => {
             // 上游把材料拆到 `&nl_colm_material` 等新组后，建例只写 `&nl_colm`，
             // 老算例更没有这些组。缺组时补一个空组再插，否则向导打开第一个 family

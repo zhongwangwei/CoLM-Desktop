@@ -46005,3 +46005,27 @@ DeepSeek 初版曾对真实 official@183/tianhe 执行 `--dry-run`。当时修�
 整合验证实测完成。T7920 任务 `codex-d3fa9946b802497bb26e6665b2478c5f` 终态 succeeded，全部 13 个检查退出码为 0。workspace 2079 通过/6 ignored，CLI 877/877，init 239 通过/9 ignored，srfdata 357 通过/1 ignored，研究 CLI 集成 24/24，namelist roundtrip 5/5，histmap 5/5，四张 drift 表全部通过，remote Python 34/34，根 all-targets Clippy 与 fmt 通过。输入为当前代码的独立、校验过的 112 MB 快照，只携带入库夹具，源数据和产物使用服务器私有目录。`colm-workspace` 运行时测试需要嵌套 bubblewrap 用户命名空间，T7920 隔离环境不支持，由后续 GitHub 原生 CI 补验，该 crate 仍参加 all-targets Clippy。结果保存在 `/tmp/colm-beta7-final-verification-d3fa9946/results/`。
 
 完整测试前已完成 beta.7 原生构建，并通过完整应用路径启动、确认首页内核和操作入口就绪。最终整合源码快照 `df426a19c14dde5d` 再次构建并重启，准备输入数据页正常加载。实际 app 内携带的源码包逐字节匹配当前 `remote_cmd.rs`、`remote_study.rs`、`main.rs` 与根 `Cargo.toml`。当前版本未重复提交真实集群任务。
+
+
+### 2026-11-08 空间 CROP 默认内核端到端实测（修正记录）
+
+第一次记录使用的是过期 `target/debug/colm-cli`，当时没有真正传 `--crop`，表面成功但实际按非作物模式运行；且 `DEF_TUNING_CROP_PLANTING_DAY=120` 会被 Rust 空间执行器拒绝。现已改为运行时标记 `DEF_USE_CROP=.true.`、播种日保持 0，并重建 CLI 后重跑。
+
+测试算例：`tmp/spatial-crop-test`（由 `region-heihe` 复制，空间 PFT + BGC，`DEF_USE_CROP=.true.`，`DEF_TUNING_CROP_PLANTING_DAY=0`），内核为**没有 CROP 宏的 `kernels/latlon`**，数据来自 `/Volumes/Data/CoLMrawdata` 与 `/Volumes/Data/CoLMruntime`：
+
+```bash
+cargo build -p colm-cli --bin colm-cli
+cargo build -p colm-runtime --bin colm-rs
+./target/debug/colm-cli run tmp/spatial-crop-test --kernel kernels/latlon \
+  --engine rust --preprocessors rust --stage mksrfdata --force 1 --stream 1
+./target/debug/colm-cli run tmp/spatial-crop-test --kernel kernels/latlon \
+  --engine rust --preprocessors rust --stage mkinidata --force 1 --stream 1
+./target/debug/colm-cli run tmp/spatial-crop-test --kernel kernels/latlon \
+  --engine rust --preprocessors rust --stage colm --force 1 --stream 1
+```
+
+mksrfdata 写出 704 个 land element、1542 个 land patch、4791 个 PFT tile；mkinidata 写出 26 个 restart 文件；colm-rs 4 个 block、1542 个 patch 跑 144 步并写 4 个 restart + 1 个 history。多 block 的 `pctshared` 原先被硬性拒绝，本轮去掉该限制并补了空间拓扑测试；这是空间 CROP 能真正跑起来的关键。
+
+同一轮复核后补了四个边界：GUI 空间作物改用 `DEF_USE_CROP=.true.`（播种日保持 0），Tauri 物化层把该派生字段视为可写 `nl_colm` 并有保存测试；`colm-cli capabilities` 输出 `{"crop_runtime":true}`，冻结的旧 CLI 没有这个子命令，因此不会被仅凭 `--engine rust` 放行；远程研究接管改用引擎感知的 kernel 检查；Rust CROP 配合 Fortran 前处理但没有 CROP 内核时直接拒绝。多 block `pctshared` 的限制也已移除，空间 CROP 的真实 4 block 算例跑通。
+
+远端旧程序的能力闭环：`remote_study` 和普通远程运行在上传引擎后，额外在服务器执行 `bin/colm-cli capabilities`；旧 sidecar 没有该子命令时，CROP 内核要求不会被本地 `--engine rust` 放掉，错误在提交作业前出现。该探测只对已上传的引擎快照执行，不改变本地已经验证的路径。

@@ -429,9 +429,13 @@ fn prepare_in_case(
         "hybrid model revisions require the Rust engine"
     );
     if let Some(path) = opts.get("--kernel") {
-        check_kernel(
+        let cli = execution_cli(opts, Some(&frozen))?;
+        let rust_crop_merged = opts.get("--engine").as_deref().unwrap_or("rust") == "rust"
+            && supports_runtime_crop(&cli);
+        check_kernel_for_engine(
             &frozen,
             &colm_kernel::Kernel::open_manifest(Path::new(&path))?,
+            rust_crop_merged,
         )?;
     }
     if let Some(path) = opts.get("--kernel") {
@@ -1691,9 +1695,66 @@ fn hash_artifacts(
     }
     Ok(())
 }
+/// 实际执行程序的 CROP 能力：旧冻结 CLI 没有 `capabilities` 子命令，不能仅凭
+/// 用户选择 Rust 就免掉 CROP 内核要求。
+pub(crate) fn supports_runtime_crop(cli: &Path) -> bool {
+    std::process::Command::new(cli)
+        .arg("capabilities")
+        .output()
+        .map(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("\"crop_runtime\":true")
+        })
+        .unwrap_or(false)
+}
+
+/// 这次真正会被执行的 CLI：优先 `--frozen-model-cli`；否则按 `--model-version`
+/// 解析工作区程序，最后才是当前进程。能力探测必须和实际执行程序一致。
+fn execution_cli(
+    opts: &Opts,
+    frozen: Option<&colm_model::FrozenRevision>,
+) -> Result<std::path::PathBuf> {
+    if let Some(cli) = opts.get("--frozen-model-cli") {
+        return Ok(std::path::PathBuf::from(cli));
+    }
+    let engine = crate::requested_engine(opts.get("--engine").as_deref())?;
+    let preprocessors = crate::requested_preprocessors(opts.get("--preprocessors").as_deref())?;
+    if let Some(name) = opts
+        .get("--model-version")
+        .filter(|name| *name != "official")
+    {
+        let kernel = opts.need("--kernel")?;
+        return Ok(crate::provenance::resolve(
+            &crate::provenance::workspace_root(opts.get("--workspace-root")),
+            &name,
+            engine.as_str(),
+            preprocessors.as_str(),
+            &kernel,
+        )?
+        .cli);
+    }
+    // --model-id/--model-revision：冻结修订的官方版用 cached_official_cli，修改版用
+    // cached_options 提供的缓存 workspace 根；不能看原工作区（可能已删除/未编译）。
+    if let Some(frozen) = frozen {
+        return Ok(crate::study_version::revision_cli(opts, frozen)?.0);
+    }
+    Ok(std::env::current_exe()?)
+}
+
+#[cfg(test)]
 pub(crate) fn check_kernel(
     frozen: &colm_model::FrozenRevision,
     kernel: &colm_kernel::Kernel,
+) -> Result<()> {
+    check_kernel_for_engine(frozen, kernel, false)
+}
+
+/// `rust_crop_merged`：Rust 引擎的 CROP 已运行时化，不再要求内核带 CROP 宏；
+/// Fortran/旧的 check_kernel 仍保留原来的编译期约束。
+pub(crate) fn check_kernel_for_engine(
+    frozen: &colm_model::FrozenRevision,
+    kernel: &colm_kernel::Kernel,
+    rust_crop_merged: bool,
 ) -> Result<()> {
     let has = |key: &str| kernel.manifest.macros.iter().any(|m| m == key);
     let overlay = colm_model::model_overlay(&frozen.overlay);
@@ -1728,7 +1789,8 @@ pub(crate) fn check_kernel(
                 parameter.parameter_id
             );
         }
-        if matches!(parameter.scope_instance.kind.as_str(), "pft" | "pc-pft")
+        if !rust_crop_merged
+            && matches!(parameter.scope_instance.kind.as_str(), "pft" | "pc-pft")
             && parameter
                 .scope_instance
                 .index
@@ -1746,7 +1808,7 @@ pub(crate) fn check_kernel(
                 meta.name.eq_ignore_ascii_case(&parameter.raw_key)
                     && meta.condition == colm_case::pft::Condition::Crop
             });
-        if parameter.raw_key.contains("CROP") || crop_parameter {
+        if !rust_crop_merged && (parameter.raw_key.contains("CROP") || crop_parameter) {
             ensure!(
                 has("CROP"),
                 "parameter {} requires a CROP kernel",
@@ -2634,7 +2696,12 @@ pub(crate) fn readiness(opts: &Opts) -> Result<serde_json::Value> {
             "hybrid model revisions require Rust"
         );
         let kernel = opts.need("--kernel")?;
-        check_kernel(&frozen, &colm_kernel::Kernel::open_manifest(&kernel)?)?;
+        check_kernel_for_engine(
+            &frozen,
+            &colm_kernel::Kernel::open_manifest(&kernel)?,
+            engine.as_str() == "rust"
+                && supports_runtime_crop(&execution_cli(opts, Some(&frozen))?),
+        )?;
         if let Some(name) = &frozen.code.workspace {
             let cached = cached_options(opts, &frozen.code)?;
             let selected = cached.as_ref().unwrap_or(opts);

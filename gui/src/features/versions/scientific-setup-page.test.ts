@@ -281,6 +281,28 @@ test('crop card enables immediately using standard case defaults and permits lat
   assert.equal(h.changes.at(-1)!.physics.DEF_TUNING_CROP_PLANTING_DAY, '125');
 });
 
+test('Rust spatial crop writes the runtime marker instead of a planting-day override', () => {
+  const environment = {
+    subgrid: 'PFT',
+    domain: 'region',
+    grid: 'latlon',
+    engine: 'rust',
+  } as setup.SetupEnvironment;
+  assert.deepEqual(setup.cropRuntimeCasePatch({ id: 'crop', value: '.true.' }, environment), {
+    DEF_USE_CROP: '.true.',
+  });
+  assert.deepEqual(setup.cropRuntimeCasePatch({ id: 'crop', value: '.false.' }, environment), {
+    DEF_USE_CROP: '.false.',
+  });
+  assert.deepEqual(
+    setup.cropRuntimeCasePatch(
+      { id: 'crop', value: '.true.' },
+      { ...environment, domain: 'single' },
+    ),
+    {},
+  );
+});
+
 test('visible river options and guide enforce the same verified methane-mode gate', async () => {
   for (const mode of ['routing', 'hybrid', 'wetwat']) {
     const h = harness();

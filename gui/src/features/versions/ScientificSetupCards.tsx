@@ -18,6 +18,7 @@ import {
 } from './configuration-options';
 import {
   applySetupRequest,
+  cropRuntimeCasePatch,
   setupChoices,
   type SetupEnvironment,
   type SetupRequest,
@@ -160,7 +161,11 @@ export default function ScientificSetupCards({
       if (onCaseChange) {
         writeLocked.current = true;
         setSaving(true);
-        return Promise.resolve(onCaseChange(caseOptionPatch(effective, next, fields)))
+        const patch = {
+          ...caseOptionPatch(effective, next, fields),
+          ...cropRuntimeCasePatch(request, choiceEnvironment),
+        };
+        return Promise.resolve(onCaseChange(patch))
           .then(() => {
             setError('');
             if (

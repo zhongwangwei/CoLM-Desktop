@@ -37,7 +37,10 @@ pub(crate) fn query(
     crate::config::migrate_legacy_material(&mut doc);
     for (key, raw) in case_values.unwrap_or_default() {
         let field = colm_schema::find(&key).ok_or_else(|| format!("unknown case field: {key}"))?;
-        if field.group.is_none() || colm_model::is_model_field(&key) {
+        // DEF_USE_CROP 是 CROP 宏的派生投影；Rust 合并后它作为运行时标记允许从
+        // 新建向导/已有算例回读，不能因为 group=None 被当成模型字段拒绝。
+        let rust_crop_marker = field.name.eq_ignore_ascii_case("DEF_USE_CROP");
+        if (field.group.is_none() && !rust_crop_marker) || colm_model::is_model_field(&key) {
             return Err(format!(
                 "caseValues cannot override model or derived field: {key}"
             ));

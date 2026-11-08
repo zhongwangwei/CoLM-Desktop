@@ -9,6 +9,7 @@ import {
   unquote,
   type ConfigurationField,
   type ConfigurationResult,
+  type CaseOptionPatch,
 } from './configuration-options';
 export type SetupContext = Pick<ConfigurationResult, 'fields' | 'process_files' | 'crop_defaults'>;
 export type SetupRequest = { id: string; value: string };
@@ -227,12 +228,19 @@ export function setupChoices(
         return bilingual('请先关闭土地覆盖变化', 'Disable land-cover change first');
       if (id === 'crop') {
         if (!on('DEF_USE_BGC')) return bilingual('请先开启 BGC', 'Enable BGC first');
-        if (!environment.cropKernel)
-          return bilingual('待核对：缺少作物编译支持', 'Pending: crop build support unavailable');
-        if (!environment.cropKernel.macros.includes('CROP'))
-          return bilingual('当前编译配置不支持作物过程', 'Build configuration lacks crop support');
-        if (!environment.domain)
-          return bilingual('待核对：请先确定模拟范围', 'Pending: choose simulation domain');
+        // Rust 引擎的 CROP 已运行时化：空间算例也不需要 CROP 编译宏，靠正的播种日
+        // 让 CLI 自动识别；Fortran 仍要求真正的 CROP 内核。
+        if (environment.engine !== 'rust') {
+          if (!environment.cropKernel)
+            return bilingual('待核对：缺少作物编译支持', 'Pending: crop build support unavailable');
+          if (!environment.cropKernel.macros.includes('CROP'))
+            return bilingual(
+              '当前编译配置不支持作物过程',
+              'Build configuration lacks crop support',
+            );
+          if (!environment.domain)
+            return bilingual('待核对：请先确定模拟范围', 'Pending: choose simulation domain');
+        }
       }
     }
     if (id === 'DEF_URBAN_RUN') {
@@ -380,6 +388,15 @@ export function setupChoices(
       choices: c.choices.map(([value, zh, en]) => ({ value, zh, en, reason: reason(c.id, value) })),
     }));
 }
+/** Rust 空间 CROP 的运行时标记：不能靠播种日（上游拒绝空间覆盖），单独写 DEF_USE_CROP。 */
+export function cropRuntimeCasePatch(
+  request: SetupRequest,
+  environment: SetupEnvironment,
+): CaseOptionPatch {
+  if (request.id !== 'crop' || isSite(environment) || environment.engine !== 'rust') return {};
+  return { DEF_USE_CROP: request.value === '.true.' ? '.true.' : '.false.' };
+}
+
 export function applySetupRequest(
   overlay: Overlay,
   fields: ModelField[],
@@ -406,6 +423,8 @@ export function applySetupRequest(
       let next = overlay;
       for (const [key, defaultValue] of Object.entries(context.crop_defaults)) {
         const current = modelSettingValue(overlay, key);
+        // 空间 CROP 由 DEF_USE_CROP 标记开启；播种日保留 0，因为 Rust 空间执行器
+        // 和上游一样拒绝空间播种日覆盖（colm-rs 会显式报错）。
         next = setModelOption(
           next,
           fields,
@@ -421,7 +440,10 @@ export function applySetupRequest(
       (!isSite(environment) && Number(request.value) !== 0)
     )
       throw new Error(
-        bilingual('单点种植日为 0–366；空间模拟只能为 0', 'Planting day: site 0–366, spatial 0'),
+        bilingual(
+          '单点种植日为 0–366；空间模拟只能为 0（Rust 空间 CROP 用 DEF_USE_CROP 标记）',
+          'Planting day: site 0–366; spatial simulations require 0 (Rust spatial CROP uses DEF_USE_CROP)',
+        ),
       );
     return setModelOption(overlay, fields, planting, request.value);
   }

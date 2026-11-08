@@ -255,7 +255,7 @@ pub(crate) fn climate(case: &Path, kernel: &Kernel) -> Result<String> {
             "--case-outputs",
             "--hybrid-climate",
         ])
-        .args(rust_model_crop_arguments(kernel))
+        .args(rust_model_crop_arguments(kernel, false))
         .output()
         .with_context(|| format!("cannot start {}", executable.display()))?;
     if !output.status.success() {
@@ -284,7 +284,7 @@ pub(crate) fn dry_run(case: &Path, config: &Path, kernel: &Kernel) -> Result<Str
             "--hybrid",
         ])
         .arg(config)
-        .args(rust_model_crop_arguments(kernel))
+        .args(rust_model_crop_arguments(kernel, false))
         .output()
         .with_context(|| format!("cannot start {}", executable.display()))?;
     if !output.status.success() {

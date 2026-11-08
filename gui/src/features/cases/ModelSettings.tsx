@@ -327,6 +327,12 @@ export default function ModelSettings({
           'IGBP / USGS use land-cover classes; PFT / PC use vegetation structures. PFT / PC also require a land-cover data classification.',
         )}
       </p>
+      <Notice tone="warning">
+        {t(
+          'USGS 分类已退休、未全面测试：保留它用于已有 USGS 算例和兼容性对照，不建议新研究使用。',
+          'USGS classification is retired and not fully tested: it is kept for existing USGS cases and compatibility checks, and is not recommended for new studies.',
+        )}
+      </Notice>
       <div className="form-grid">
         {(['IGBP', 'USGS', 'PFT', 'PC'] as const).map((value) => (
           <ActionButton
@@ -339,7 +345,14 @@ export default function ModelSettings({
             disabled={disabled || !modeAvailable(value)}
             run={() => changeMode(value)}
           >
-            <strong>{value}</strong>
+            <strong>
+              {value}
+              {value === 'USGS' && (
+                <span className="scheme-retired-tag">
+                  {t('已退休 · 未全面测试', 'Retired · not fully tested')}
+                </span>
+              )}
+            </strong>
             <span>
               {value === 'IGBP'
                 ? t('17 类地表覆盖', '17 land-cover classes')

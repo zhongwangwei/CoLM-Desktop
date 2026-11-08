@@ -105,6 +105,16 @@ describe('persistent run state', () => {
       compatibleKernel(kernels, {}, { DEF_TUNING_CROP_PLANTING_DAY: '120' })?.dir,
       '/crop',
     );
+    // Rust 引擎已运行时化 CROP：同样有作物设置时，Rust 仍用 default，Fortran 才要 crop。
+    assert.equal(
+      compatibleKernel(kernels, { engine: 'rust' }, { DEF_TUNING_CROP_PLANTING_DAY: '120' })?.dir,
+      '/default',
+    );
+    assert.equal(
+      compatibleKernel(kernels, { engine: 'fortran' }, { DEF_TUNING_CROP_PLANTING_DAY: '120' })
+        ?.dir,
+      '/crop',
+    );
   });
 });
 

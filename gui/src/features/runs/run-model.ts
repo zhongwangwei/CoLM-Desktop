@@ -109,6 +109,8 @@ export function compatibleKernel<T extends KernelChoice>(
     classification?: 'IGBP' | 'USGS';
     subgrid?: string;
     crop?: boolean;
+    /** Rust 引擎已合并 CROP：匹配内核时不再按 CROP 宏过滤。 */
+    engine?: string;
   },
   physics: Record<string, string> = {},
 ): T | undefined {
@@ -123,7 +125,7 @@ export function compatibleKernel<T extends KernelChoice>(
     (profile.classification ?? (profile.subgrid === 'USGS' ? 'USGS' : 'IGBP')) === 'USGS'
       ? 'LULC_USGS'
       : 'LULC_IGBP';
-  const crop = profile.crop ?? cropEnabled(physics);
+  const crop = profile.engine === 'rust' ? false : (profile.crop ?? cropEnabled(physics));
   const matching = kernels.filter(
     (k) => k.macros.includes(grid) && k.macros.includes(land) && k.macros.includes('CROP') === crop,
   );

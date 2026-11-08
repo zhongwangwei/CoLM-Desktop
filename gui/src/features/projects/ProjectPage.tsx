@@ -11,7 +11,7 @@ import './project-version.css';
 import ProjectBatchRun from './ProjectBatchRun';
 import NavIcon from '../../components/NavIcon';
 import type { Site } from '../cases/case-model';
-import type { CaseEntry, FrozenRevision, VersionRef } from '../../lib/types';
+import type { CaseEntry, FrozenRevision, HistoryOperation, VersionRef } from '../../lib/types';
 type VersionDeleteReport = {
   deleted: VersionRef[];
   failed: { version: VersionRef; reason: string }[];
@@ -25,6 +25,7 @@ import {
   rememberProject,
   projectName,
 } from './project-model';
+import { emptyFilter, historyFilter, projectSummary, statusCountsLabel } from '../history/history';
 
 export default function ProjectPage() {
   const { state, update, navigate, openCase, refreshVersions, retryStartup, notify } = useApp();
@@ -40,7 +41,20 @@ export default function ProjectPage() {
       title: string;
       versions: VersionRef[];
     } | null>(null),
-    [deleteReport, setDeleteReport] = useState<VersionDeleteReport | null>(null);
+    [deleteReport, setDeleteReport] = useState<VersionDeleteReport | null>(null),
+    [historyOpen, setHistoryOpen] = useState(false),
+    [historyBusy, setHistoryBusy] = useState(false),
+    [historyError, setHistoryError] = useState(''),
+    [historyProjects, setHistoryProjects] = useState<
+      {
+        path: string;
+        name: string;
+        cases: number;
+        studies: number;
+        counts: Record<string, number>;
+        at: number | null;
+      }[]
+    >([]);
   const createdBatch = !!state.projectCasesOpen && state.projectRunSettings?.root === state.root,
     savedView = state.projectView?.root === state.root ? state.projectView : undefined,
     page = state.projectCasesOpen
@@ -309,6 +323,59 @@ export default function ProjectPage() {
   };
   // Opening a project means choosing from what was already done, so it goes to the history.
   const openProjectFromHistory = () => navigate('history');
+  const openHistoryPicker = async () => {
+    setHistoryOpen(true);
+    setHistoryBusy(true);
+    setHistoryError('');
+    try {
+      const page = await invokeJson<{ items: HistoryOperation[] }>('history_list', {
+        filter: historyFilter({ ...emptyFilter, includeRoutine: false }, 0, 200),
+      });
+      const byPath = new Map<
+        string,
+        {
+          path: string;
+          name: string;
+          cases: number;
+          studies: number;
+          counts: Record<string, number>;
+          at: number | null;
+        }
+      >();
+      for (const item of page.items) {
+        const group = item.project_group;
+        if (!group) continue;
+        const summary = projectSummary(group);
+        const at = Math.max(...group.members.map((member) => member.time_ms ?? 0), 0) || null;
+        const previous = byPath.get(group.path);
+        if (!previous || (at ?? 0) > (previous.at ?? 0)) {
+          byPath.set(group.path, {
+            path: group.path,
+            name: group.name,
+            cases: summary.cases,
+            studies: summary.studies,
+            counts: summary.counts as unknown as Record<string, number>,
+            at,
+          });
+        }
+      }
+      setHistoryProjects([...byPath.values()].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)));
+    } catch (error) {
+      setHistoryError(String(error));
+    } finally {
+      setHistoryBusy(false);
+    }
+  };
+  const openHistoryProject = (path: string) =>
+    work(async () => {
+      try {
+        await loadProject(path);
+        setHistoryOpen(false);
+      } catch (error) {
+        setHistoryError(String(error));
+        throw error;
+      }
+    });
   const example = () =>
     work(async () => {
       const paths = await invoke<{
@@ -851,6 +918,13 @@ export default function ProjectPage() {
                 disabled={!enabled || !ready}
                 run={browseProject}
               />
+              <ActionButton
+                action="project-history-open"
+                label={t('从历史项目打开', 'Open from history')}
+                variant="ghost"
+                disabled={!enabled || !ready}
+                run={openHistoryPicker}
+              />
             </div>
           </div>
 
@@ -874,6 +948,58 @@ export default function ProjectPage() {
           )}
         </div>
       </section>
+      {historyOpen && (
+        <Dialog
+          open
+          title={t('从历史项目打开', 'Open from history')}
+          description={t(
+            '按项目聚合历史记录；选一个项目直接打开，历史里没有的目录仍用“选择目录”。',
+            'Projects from the history are grouped by folder; use “Select folder” below only for folders not in history.',
+          )}
+          onOpenChange={(open) => {
+            if (!open && !historyBusy) setHistoryOpen(false);
+          }}
+          closeAction="project-history-close"
+        >
+          {historyError && <Notice tone="error">{historyError}</Notice>}
+          {historyBusy ? (
+            <p className="muted">{t('正在读取历史项目…', 'Loading projects from history…')}</p>
+          ) : historyProjects.length ? (
+            <div className="project-history-list">
+              {historyProjects.map((project) => (
+                <button
+                  key={project.path}
+                  type="button"
+                  className="project-history-row"
+                  onClick={() => void openHistoryProject(project.path)}
+                >
+                  <span>
+                    <strong>{project.name}</strong>
+                    <small>{project.path}</small>
+                  </span>
+                  <span className="muted">
+                    {project.cases} {t('个算例', 'cases')}
+                    {project.studies ? ` · ${project.studies} ${t('个研究', 'studies')}` : ''}
+                    {statusCountsLabel(project.counts as never, en)
+                      ? ` · ${statusCountsLabel(project.counts as never, en)}`
+                      : ''}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">{t('历史记录里还没有项目。', 'No projects in history yet.')}</p>
+          )}
+          <div className="button-row">
+            <ActionButton
+              action="project-history-cancel"
+              label={t('取消', 'Cancel')}
+              run={() => setHistoryOpen(false)}
+              disabled={historyBusy}
+            />
+          </div>
+        </Dialog>
+      )}
     </div>
   );
 }

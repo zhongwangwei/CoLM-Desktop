@@ -5897,3 +5897,70 @@ fn case_data_save_candidate_rejects_missing_or_bad_forcing_replacements_before_c
         );
     }
 }
+
+#[test]
+fn a_positive_planting_day_keeps_spatial_crop_editable_after_save() {
+    let spatial_crop = runtime_states(
+        "&nl_colm
+ DEF_USE_PFT=.true.
+ DEF_USE_BGC=.true.
+ DEF_USE_CROP=.true.
+ DEF_TUNING_CROP_PLANTING_DAY=120.
+/
+",
+        &["GRIDBASED", "LULC_IGBP"],
+    );
+    assert_eq!(
+        mode(&spatial_crop, "DEF_TUNING_CROP_PLANTING_DAY"),
+        &FieldMode::Editable
+    );
+    assert_eq!(mode(&spatial_crop, "DEF_USE_CROP"), &FieldMode::Editable);
+    let spatial_default = runtime_states(
+        "&nl_colm
+ DEF_USE_PFT=.true.
+ DEF_USE_BGC=.true.
+ DEF_TUNING_CROP_PLANTING_DAY=0.
+/
+",
+        &["GRIDBASED", "LULC_IGBP"],
+    );
+    assert_eq!(
+        mode(&spatial_default, "DEF_TUNING_CROP_PLANTING_DAY"),
+        &FieldMode::Hidden
+    );
+}
+
+#[test]
+fn saving_the_rust_crop_runtime_marker_writes_case_namelist() {
+    let dirs = batch("crop-runtime-marker-save", &[SAMPLE]);
+    let case = std::path::Path::new(&dirs[0]);
+    let runtime = case.join("runtime");
+    std::fs::create_dir_all(runtime.join("ndep")).unwrap();
+    std::fs::write(
+        runtime.join("ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc"),
+        b"ndep",
+    )
+    .unwrap();
+    std::fs::create_dir_all(runtime.join("crop")).unwrap();
+    std::fs::write(
+        runtime.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc"),
+        b"plantdt",
+    )
+    .unwrap();
+    let fields = material_fields(&[
+        ("DEF_USE_LCT", ".false."),
+        ("DEF_USE_PFT", ".true."),
+        ("DEF_USE_BGC", ".true."),
+        ("DEF_USE_NITRIF", ".false."),
+        ("DEF_USE_FERT", ".false."),
+        ("DEF_USE_CROP", ".true."),
+        ("DEF_dir_runtime", runtime.to_string_lossy().as_ref()),
+    ]);
+    super::set_fields_with_forcing(dirs.clone(), fields, &[], None, None, None).unwrap();
+    let saved = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
+    let document = colm_namelist::parse(&saved).unwrap();
+    assert_eq!(
+        document.get("DEF_USE_CROP"),
+        Some(&colm_namelist::Value::Bool(true))
+    );
+}

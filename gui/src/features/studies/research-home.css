@@ -472,3 +472,46 @@
   gap: 8px;
   margin-top: 12px;
 }
+
+/* 研究页“其他项目…”：历史项目列表，不再把路径选择当主入口。 */
+.study-project-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 6px 0 12px;
+}
+.study-project-history {
+  display: grid;
+  gap: 6px;
+  max-height: 45vh;
+  overflow: auto;
+  margin: 8px 0 14px;
+}
+.study-project-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--card);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.study-project-history-row:hover {
+  border-color: var(--accent);
+}
+.study-project-history-row strong,
+.study-project-history-row small {
+  display: block;
+}
+.study-project-history-row small {
+  margin-top: 2px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  word-break: break-all;
+}

@@ -1623,18 +1623,29 @@ pub(super) fn check_selected_remote_kernel(
     ssh: &Ssh,
     remote_kernel: &str,
     revision: &colm_model::FrozenRevision,
+    rust_crop_merged: bool,
 ) -> Result<()> {
     let text = ssh.run_ok(&format!(
         "cat -- {}",
         quote(&format!("{remote_kernel}/manifest.json"))
     ))?;
-    check_remote_kernel_manifest(&text, remote_kernel, revision)
+    check_remote_kernel_manifest_for_engine(&text, remote_kernel, revision, rust_crop_merged)
 }
 
+#[cfg(test)]
 pub(crate) fn check_remote_kernel_manifest(
     text: &str,
     dir: &str,
     revision: &colm_model::FrozenRevision,
+) -> Result<()> {
+    check_remote_kernel_manifest_for_engine(text, dir, revision, false)
+}
+
+pub(crate) fn check_remote_kernel_manifest_for_engine(
+    text: &str,
+    dir: &str,
+    revision: &colm_model::FrozenRevision,
+    rust_crop_merged: bool,
 ) -> Result<()> {
     let manifest: colm_kernel::manifest::Manifest =
         serde_json::from_str(text).context("cannot parse actual remote kernel manifest")?;
@@ -1651,12 +1662,35 @@ pub(crate) fn check_remote_kernel_manifest(
             == 1,
         "remote kernel must declare exactly one land-cover classification"
     );
-    crate::model_version::check_kernel(
+    crate::model_version::check_kernel_for_engine(
         revision,
         &colm_kernel::Kernel {
             dir: PathBuf::from(dir),
             manifest,
         },
+        rust_crop_merged,
+    )
+}
+
+/// 远端实际 CLI 的运行时 CROP 能力；旧 sidecar 没有 capabilities 子命令。
+pub(crate) fn remote_cli_supports_runtime_crop(
+    ssh: &Ssh,
+    root: &str,
+    engine_id: &str,
+) -> Option<bool> {
+    let cli = format!("{}/bin/colm-cli", engine::engine_dir(root, engine_id));
+    if !ssh
+        .run(&format!("test -x {}", quote(&cli)))
+        .map(|output| output.success)
+        .unwrap_or(false)
+    {
+        // 首次部署：源码刚上传、程序还没编出来；不能用“文件不存在”误判为旧程序。
+        return None;
+    }
+    Some(
+        ssh.run(&format!("{} capabilities", quote(&cli)))
+            .map(|output| output.success && output.stdout.contains("\"crop_runtime\":true"))
+            .unwrap_or(false),
     )
 }
 
@@ -2374,13 +2408,13 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     } else {
         format!("{root}/kernels/{preset}-{}", short_hash(&manifest))
     };
-    if let Some(revision) =
-        materialized_revision(&case, opts.get("--model-root").as_deref().map(Path::new))?
-    {
+    let pinned_revision =
+        materialized_revision(&case, opts.get("--model-root").as_deref().map(Path::new))?;
+    if let Some(revision) = &pinned_revision {
         if fortran {
-            check_selected_remote_kernel(&ssh, &remote_kernel, &revision)?;
+            check_selected_remote_kernel(&ssh, &remote_kernel, revision, false)?;
         } else {
-            check_remote_kernel_manifest(&manifest, &remote_kernel, &revision)?;
+            check_remote_kernel_manifest_for_engine(&manifest, &remote_kernel, revision, true)?;
         }
     }
     if dry_run {
@@ -2526,6 +2560,20 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
             let engine_uploaded = engine.upload(&ssh, &root)?;
             if !fortran {
                 ssh.run_ok(&write_manifest_script(&remote_kernel, &manifest))?;
+                // 服务器上真正要跑的 CLI 可能还是旧 sidecar；提交前再探一次能力。
+                if let Some(revision) = &pinned_revision {
+                    if let Some((kernel_dir, _)) = &local_kernel {
+                        if let Some(remote_crop) =
+                            remote_cli_supports_runtime_crop(&ssh, &root, engine.id())
+                        {
+                            crate::model_version::check_kernel_for_engine(
+                                revision,
+                                &colm_kernel::Kernel::open_manifest(kernel_dir)?,
+                                remote_crop,
+                            )?;
+                        }
+                    }
+                }
             }
             let entries: Vec<String> = std::fs::read_dir(&staging)?
                 .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))

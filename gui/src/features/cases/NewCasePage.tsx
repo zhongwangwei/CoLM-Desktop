@@ -839,6 +839,7 @@ export default function NewCasePage() {
     {
       grid: form.kind === 'site' ? null : form.grid,
       classification: classification,
+      engine: form.engine,
     },
     physics,
   );
@@ -3405,6 +3406,7 @@ export default function NewCasePage() {
                 grid: form.kind === 'site' ? null : form.grid,
                 classification: classification,
                 crop: true,
+                engine: form.engine,
               },
               physics,
             ),
