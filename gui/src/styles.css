@@ -1030,17 +1030,72 @@ table input {
   font-size: 12px;
 }
 .project-case-choices {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
   margin-top: 18px;
 }
-.project-case-choices .button {
-  justify-content: flex-start;
-}
-.project-case-choices .button > span:first-child {
-  flex: 1;
+.project-case-card {
+  display: flex !important;
+  align-items: flex-start;
+  justify-content: flex-start !important;
+  gap: 12px;
+  min-height: 96px;
+  padding: 16px !important;
   text-align: left;
+  white-space: normal !important;
+  border: 1px solid var(--border) !important;
+  background: var(--surface) !important;
+  color: var(--foreground) !important;
+}
+.project-case-card:hover {
+  border-color: var(--accent) !important;
+  background: var(--accent-soft) !important;
+}
+.project-case-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.project-case-icon .nav-icon {
+  width: 20px;
+  height: 20px;
+}
+.project-case-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+.project-case-copy strong {
+  font-size: 15px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.project-case-kind {
+  color: var(--muted);
+  font-size: 12px;
+}
+.project-case-side {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.project-case-side .project-chevron {
+  margin-top: 2px;
+}
+@container (max-width:520px) {
+  .project-case-choices {
+    grid-template-columns: 1fr;
+  }
 }
 @container (max-width:720px) {
   .project-action {

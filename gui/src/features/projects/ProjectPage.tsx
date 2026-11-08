@@ -506,14 +506,30 @@ export default function ProjectPage() {
               key={entry.dir}
               action={`project-case:${entry.dir}`}
               label={entry.name}
+              variant="ghost"
+              className="project-case-card"
+              title={entry.dir}
               disabled={!enabled}
               run={() => chooseCase(entry.dir, 'settings')}
             >
-              <span>{entry.name}</span>
-              {entry.has_history && (
-                <span className="badge">{t('已有结果', 'Results available')}</span>
-              )}
-              <span className="project-chevron">›</span>
+              <span className="project-case-icon">
+                <NavIcon name="simulation" />
+              </span>
+              <span className="project-case-copy">
+                <strong>{entry.name}</strong>
+                <span className="project-case-kind">
+                  {entry.spatial ? t('空间算例', 'Spatial case') : t('站点算例', 'Site case')}
+                  {entry.run_host
+                    ? t(` · 服务器 ${entry.run_host}`, ` · Server ${entry.run_host}`)
+                    : t(' · 本机', ' · Local')}
+                </span>
+              </span>
+              <span className="project-case-side">
+                {entry.has_history && (
+                  <span className="badge">{t('已有结果', 'Results available')}</span>
+                )}
+                <span className="project-chevron">›</span>
+              </span>
             </ActionButton>
           ))}
         </div>
