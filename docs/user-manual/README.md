@@ -1,6 +1,6 @@
 # CoLM Desktop 用户手册
 
-**适用版本：** `0.3.0-beta.7`（测试版）  
+**适用版本：** `0.3.0-beta.8`（测试版）  
 **平台：** macOS（Apple Silicon / Intel）、Windows x86_64、Linux x86_64  
 **手册截图：** 2026-11-07/08 在 macOS 上由真实窗口采集；示例项目为 `~/Desktop/Github/CoLM-Desktop/tmp/manual-project`（CN-Cng 示例算例，缩到 2008-01-01 → 2008-01-03 便于演示）。  
 **附录：** [CLI 命令参考](appendices/appendix-cli.md) · [配置字段总表（964 项）](appendices/appendix-config-fields.md) · [参数库索引（1369 项）](appendices/appendix-tuning-parameters.md)
@@ -989,4 +989,4 @@ EXIT:0
 | CLI `history-catalog` | 实际执行 | 输出 48 步、变量目录 JSON |
 | 真实远程 Slurm（Rust/Fortran、pack、ranks=1） | 已在 tianhe 实测 | 见 `docs/implementation-verification.md` 2026-11-07 验收章节 |
 
-*手册生成日期：2026-11-08；软件版本 0.3.0-beta.7。*
+*手册生成日期：2026-11-10；软件版本 0.3.0-beta.8。*
