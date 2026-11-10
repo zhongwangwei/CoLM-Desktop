@@ -89,7 +89,6 @@ export default function HistoryVariablesCard({
       .filter((item) => {
         if (filterTab === 'recommended' && !item.recommended) return false;
         if (filterTab === 'enabled' && !(item.settable && isVarOn(item.name))) return false;
-        if (filterTab === 'all' && !item.settable) return false;
         if (!q) return true;
         return [item.name, item.label_zh, item.label_en, item.long_name ?? '']
           .join(' ')
@@ -107,8 +106,8 @@ export default function HistoryVariablesCard({
     <Card
       title={t('输出变量', 'Output variables')}
       description={t(
-        '选择写入历史文件（NetCDF）的变量：推荐核心量为科研常用的主要通量与状态量，全部变量为当前模型配置下可写出的 CoLM 历史场全集。',
-        'Choose variables written to history files: the recommended set covers the main fluxes and states; all variables is every CoLM history field writable with the current model configuration.',
+        '选择写入历史文件（NetCDF）的变量：推荐核心量为科研常用的主要通量与状态量，全部变量列出输出开关，未核对或不可写的项目会注明原因并禁止开启。',
+        'Choose variables written to history files: the recommended set covers the main fluxes and states; all variables lists output switches, with unverified or unavailable outputs explained and disabled.',
       )}
       className="history-variables-card"
     >
@@ -147,7 +146,7 @@ export default function HistoryVariablesCard({
           [
             ['recommended', selection.core.length],
             ['enabled', selection.selected],
-            ['all', selection.available.length],
+            ['all', catalog.length],
           ] as const
         ).map(([tab, count]) => (
           <Button
@@ -243,8 +242,8 @@ export default function HistoryVariablesCard({
       {unwritable.length > 0 && (
         <p className="field-hint">
           {t(
-            `另有 ${unwritable.length} 个变量在当前模型配置下写不出，已从“全部变量”中排除（推荐核心量里如有，会注明原因）。`,
-            `${unwritable.length} more variables cannot be written with the current model configuration and are excluded from “All variables”.`,
+            `${unwritable.length} 个变量在当前模型配置下不可写或尚未核对；在“全部变量”中可查看原因。`,
+            `${unwritable.length} variables are unavailable or unverified for this model configuration; see the reasons under “All variables”.`,
           )}
         </p>
       )}

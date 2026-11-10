@@ -59,6 +59,7 @@ function page(
   sourceValues: Record<string, string> = initialValues,
   options: {
     profile?: {
+      engine?: string;
       grid?: string;
       domain_kind?: string;
       run_host?: string;
@@ -5711,3 +5712,165 @@ test('single-site creation drops regional surface residue left by a spatial draf
     );
   }
 });
+
+test('new case output capabilities require verified writer evidence and discard a failed replacement', async () => {
+  let fail = false;
+  const p = page('NewCasePage', { form, sites: [site], step: 5 }, [site], initialValues, {
+    schema: ['fsena', 'leafc', 'unknown'].map((name) => ({
+      ...field(`DEF_hist_vars%${name}`, '输出变量', '.true.'),
+      kind: 'Logical',
+    })),
+    configuration: async () => {
+      if (fail) throw new Error('configuration unavailable');
+      return {
+        fields: [],
+        history_switches: { 'DEF_hist_vars%fsena': '.true.' },
+        history_variables: [
+          { name: 'fsena', settable: true, writable: true },
+          { name: 'leafc', settable: true, writable: false, blocked_by: '需要 DEF_USE_BGC' },
+          { name: 'unknown', settable: true, writable: null, blocked_by: '尚未核对' },
+        ],
+      };
+    },
+  });
+  await p.mount();
+  const variables = () =>
+    p.element('HistoryVariablesCard').props.variables as {
+      name: string;
+      settable: boolean;
+      reason?: string;
+    }[];
+  assert.deepEqual(
+    variables().map((v) => [v.name, v.settable]),
+    [
+      ['fsena', true],
+      ['leafc', false],
+      ['unknown', false],
+    ],
+  );
+  assert.equal(variables()[2].reason, '尚未核对');
+  fail = true;
+  p.state.versionRef = { ...p.state.versionRef, revision: 5 };
+  p.render();
+  assert.ok(
+    variables().every((v) => !v.settable),
+    'old capability never survives a request change',
+  );
+  await p.settle();
+  assert.deepEqual(p.element('HistoryVariablesCard').props.values, {});
+  assert.ok(variables().every((v) => !v.settable));
+});
+
+for (const name of ['NewCasePage', 'CasesPage'] as const)
+  test(`${name} sends the selected engine to configuration capability queries`, async () => {
+    const p = page(
+      name,
+      { form: { ...form, engine: 'fortran' }, sites: [site], step: 4 },
+      [site],
+      initialValues,
+      { profile: { engine: 'fortran' }, kernels: setupKernels },
+    );
+    await p.mount();
+    const queries = p.calls.filter((call) => call.command === 'model_configuration');
+    assert.ok(queries.length > 0);
+    for (const query of queries) assert.equal(query.args.engine, 'fortran');
+    for (const query of p.calls.filter((call) => call.command === 'hist_vars'))
+      assert.equal(query.args.engine, 'fortran');
+  });
+
+for (const name of ['NewCasePage', 'CasesPage'] as const)
+  for (const failure of [false, true])
+    test(`${name} uses only current successful process-file context for dependent methane closure (${failure})`, async () => {
+      let reject = false;
+      const active = {
+        DEF_USE_PFT: '.true.',
+        DEF_USE_LCT: '.false.',
+        DEF_USE_BGC: '.true.',
+        DEF_USE_METHANE: '.true.',
+        DEF_USE_GridRiverLakeFlow: '.true.',
+      };
+      const p = page(
+        name,
+        {
+          form: { ...form, kind: 'region', grid: 'latlon', subgrid: 'PFT' },
+          sites: [site],
+          step: 4,
+          caseValues: active,
+        },
+        [site],
+        { ...initialValues, ...active },
+        {
+          profile: { grid: 'latlon', domain_kind: 'region' },
+          schema: [
+            ...schema,
+            ...Object.entries(active).map(([key, value]) => ({
+              ...field(key, '生态与生地化', value),
+              kind: 'Logical',
+            })),
+          ],
+          configuration: async () => {
+            if (reject) throw new Error('configuration unavailable');
+            return {
+              fields: [],
+              process_files: [
+                {
+                  verified: true,
+                  active_methane_asset: true,
+                  entries: [
+                    { path: 'DEF_METHANE%inundation_mode', value: "'routing'", unset: false },
+                  ],
+                },
+              ],
+            };
+          },
+        },
+      );
+      Object.assign(p.state.version.overlay.physics, active);
+      await p.mount();
+      if (name === 'CasesPage') await p.goto('case-step-4');
+      if (failure) {
+        reject = true;
+        p.state.versionRef = { ...p.state.versionRef, revision: 5 };
+        p.state.version = { ...p.state.version, version: p.state.versionRef };
+        await p.settle();
+      }
+      await (p.element('ModelSettings').props.onCaseChange as (patch: object) => Promise<void>)({
+        DEF_USE_GridRiverLakeFlow: '.false.',
+      });
+      p.render();
+      if (name === 'CasesPage') {
+        const saved = p.calls.filter((call) => call.command === 'case_data_save').at(-1);
+        const sent = saved?.args.fields as { path: string; value: string }[];
+        assert.ok(saved);
+        assert.equal(
+          sent.find((entry) => entry.path === 'DEF_USE_METHANE')?.value,
+          failure ? undefined : '.false.',
+        );
+      } else {
+        const values = (
+          p.element('ModelSettings').props.setupEnvironment as {
+            caseValues: Record<string, string>;
+          }
+        ).caseValues;
+        assert.equal(values.DEF_USE_METHANE, failure ? '.true.' : '.false.');
+      }
+    });
+
+for (const language of ['zh', 'en'])
+  test(`local site creation explains where to configure CBL and ozone (${language})`, async () => {
+    for (const [kind, host, visible] of [
+      ['site', '', true],
+      ['site', 'cluster', false],
+      ['region', '', false],
+    ] as const) {
+      const p = page('NewCasePage', { form: { ...form, kind, host }, sites: [site], step: 3 });
+      p.state.language = language;
+      await p.mount();
+      const text = JSON.stringify(p.elements);
+      const notice =
+        language === 'zh'
+          ? '如需 CBL 或臭氧数据，请创建算例后到算例配置第 3 步选择对应文件，再开始运行。'
+          : 'For CBL or ozone data, create the case, select the corresponding files in case configuration step 3, then run it.';
+      assert.equal(text.includes(notice), visible);
+    }
+  });

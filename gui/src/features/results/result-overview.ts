@@ -116,7 +116,7 @@ export function overviewVariables(
 export function metricWarningText(value: unknown, en: boolean): string {
   const text = String(value);
   if (!en) return text;
-  return text
+  const translated = text
     .replace(
       /^读不到 (.+)（(.+)）；history 区间起点按名义边界推断$/,
       'Cannot read $1 ($2); history interval starts use nominal boundaries',
@@ -161,4 +161,7 @@ export function metricWarningText(value: unknown, en: boolean): string {
       /^观测覆盖率均值 (.+)% 偏低（<(.+)%），整段均值代表的是部分时段$/,
       'Mean observation coverage is low ($1%, below $2%); interval means represent only part of each period',
     );
+  return /[\u3400-\u9fff]/.test(translated)
+    ? `Backend warning (Chinese original): ${translated}`
+    : translated;
 }

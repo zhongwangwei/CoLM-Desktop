@@ -1,5 +1,13 @@
 use super::*;
 
+fn hist_vars(
+    text: String,
+    kernel_dir: String,
+    dir: Option<String>,
+) -> Result<Vec<HistVar>, String> {
+    super::hist_vars(text, kernel_dir, dir, None)
+}
+
 fn kernel(preset: &str) -> String {
     format!("{}/../../kernels/{preset}", env!("CARGO_MANIFEST_DIR"))
 }
@@ -345,10 +353,47 @@ fn river_switches_follow_output_mapping_and_kernel_runtime_gates() {
                 assert_eq!(var.blocked_by.is_none(), writable);
                 assert!(var.settable);
             }
+            let fortran_vars = super::hist_vars(
+                format!("&nl_colm\n DEF_USE_GridRiverLakeFlow = {logical}\n/\n"),
+                dir.to_string_lossy().into_owned(),
+                None,
+                Some("fortran".into()),
+            )
+            .unwrap();
             for name in ["volresv", "qresv_in", "qresv_out"] {
+                // 这三个开关已有 Catch 和 Grid 两路真实 writer。单点缺宏即不可写；
+                // 空间侧仍须保留不能由 logical 求值器核对的数值门禁。
+                let writers: Vec<_> = colm_hist::generated::SPATIAL_VARS
+                    .iter()
+                    .filter(|var| var.switch == Some(name))
+                    .collect();
+                assert_eq!(writers.len(), 2, "both reservoir writer paths for {name}");
+                for macro_name in ["CatchLateralFlow", "GridRiverLakeFlow"] {
+                    assert!(writers.iter().any(|var| {
+                        var.macros.iter().any(|condition| {
+                            matches!(condition, colm_hist::Cond::AnyOf(names) if *names == [macro_name])
+                        }) && var.runtime == Some("DEF_Reservoir_Method > 0")
+                    }));
+                }
                 let var = vars.iter().find(|v| v.name == name).unwrap();
-                assert_eq!(var.writable, None, "no writer mapping for {name}");
-                assert!(var.blocked_by.is_some());
+                let fortran = fortran_vars.iter().find(|v| v.name == name).unwrap();
+                if preset == "latlon" {
+                    assert_eq!(var.writable, None);
+                    assert!(var.blocked_by.as_deref().unwrap().contains("当前运行引擎"));
+                    assert_eq!(fortran.writable, None);
+                    assert_eq!(
+                        fortran.blocked_by.as_deref(),
+                        Some("条件 DEF_Reservoir_Method > 0 需要人工判断")
+                    );
+                } else {
+                    assert_eq!(var.writable, Some(false));
+                    assert_eq!(fortran.writable, Some(false));
+                    assert!(var
+                        .blocked_by
+                        .as_deref()
+                        .unwrap()
+                        .starts_with("本内核未编入"));
+                }
             }
         }
     }
@@ -399,5 +444,38 @@ fn multi_output_switches_preserve_true_unknown_and_false_gate_precedence() {
         run(&[unrelated]).0,
         None,
         "an output name is not a switch association"
+    );
+}
+
+#[test]
+fn methane_diagnostics_exclude_aliases_and_unrelated_uncontrolled_outputs() {
+    for var in colm_hist::generated::VARS {
+        if var.switch.is_some() || !var.runtime.unwrap_or("").contains("DEF_USE_METHANE") {
+            assert!(!is_methane_diagnostic(var), "{}", var.name);
+        }
+    }
+    assert!(colm_hist::generated::VARS.iter().any(is_methane_diagnostic));
+}
+
+#[test]
+fn spatial_writer_evidence_does_not_claim_rust_support() {
+    let macros = std::collections::BTreeSet::from(["CatchLateralFlow"]);
+    let truth = |_: &str| None;
+    assert_eq!(
+        configuration_writability("xsubs_bsn", &macros, &truth, Some("fortran")).0,
+        Some(true)
+    );
+    for engine in [None, Some("rust")] {
+        let (writable, reason) = configuration_writability("xsubs_bsn", &macros, &truth, engine);
+        assert_eq!(writable, None);
+        assert!(reason.unwrap().contains("Fortran"));
+    }
+    assert_eq!(
+        configuration_writability("xsubs_bsn", &Default::default(), &truth, Some("fortran")).0,
+        Some(false)
+    );
+    assert_eq!(
+        configuration_writability("not_a_writer", &macros, &truth, Some("fortran")).0,
+        None
     );
 }

@@ -84,6 +84,7 @@ export default function ScientificSetupCards({
       source: data.source,
       caseDir: data.caseDir,
       kernelDir: data.environment.kernel?.dir ?? null,
+      engine: data.environment.engine ?? null,
       pftSelection: null,
       caseValues: data.environment.caseValues ?? null,
     })

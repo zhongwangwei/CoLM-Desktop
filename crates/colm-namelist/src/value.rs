@@ -127,10 +127,26 @@ impl Value {
         match self {
             Value::Int(i) => Some(*i as f64),
             // Fortran 用 d 表示双精度指数，Rust 不认，换成 e
-            Value::Real { text } => text.replace(['d', 'D'], "e").parse().ok(),
+            Value::Real { text } => real_literal(text)?.replace(['d', 'D'], "e").parse().ok(),
             _ => None,
         }
     }
+}
+
+/// 源码 kind 后缀不能写入 namelist，兼容旧 GUI 写出的 r4/r8 并保留数值原文。
+pub fn real_literal(text: &str) -> Option<&str> {
+    let text = text.trim();
+    let literal = match text.split_once('_') {
+        Some((literal, kind))
+            if kind.eq_ignore_ascii_case("r4") || kind.eq_ignore_ascii_case("r8") =>
+        {
+            literal
+        }
+        Some(_) => return None,
+        None => text,
+    };
+    literal.replace(['d', 'D'], "e").parse::<f64>().ok()?;
+    Some(literal)
 }
 
 impl fmt::Display for Value {
@@ -139,7 +155,7 @@ impl fmt::Display for Value {
             Value::Bool(true) => write!(f, ".true."),
             Value::Bool(false) => write!(f, ".false."),
             Value::Int(i) => write!(f, "{i}"),
-            Value::Real { text } => write!(f, "{text}"),
+            Value::Real { text } => write!(f, "{}", real_literal(text).unwrap_or(text)),
             Value::Str(s) => write!(f, "'{}'", s.replace('\'', "''")),
             Value::List(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_string()).collect();

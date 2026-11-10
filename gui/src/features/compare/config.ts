@@ -32,7 +32,7 @@ export type Problem = [string, string];
 
 /**
  * OpenBench 3.0.8 的合法 tim_res（v3.0.8 `config/loader.py` 的 VALID_TIM_RES_VALUES）。
- * 比较页只直接生成常规档位，但手改/探测可能给出 6Hour/8Day/climatology-*，解析器要能接受。
+ * 比较页与手改/探测配置共用 OpenBench 支持的时间尺度值域。
  */
 export const TIM_RES_VALUES = [
   'Hour',

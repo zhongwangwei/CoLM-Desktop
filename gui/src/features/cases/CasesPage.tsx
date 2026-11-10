@@ -34,6 +34,7 @@ import {
   autoClosedText,
   configurationReason,
   exclusionPatch,
+  type ExclusionContext,
   simulationOptionField,
   caseSimulationDomain,
 } from './model-settings';
@@ -56,6 +57,10 @@ export default function CasesPage() {
     en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh),
     dir = state.selectedCase?.entry.dir;
+  const engine: string =
+    typeof state.selectedCase?.profile?.engine === 'string'
+      ? state.selectedCase.profile.engine
+      : 'rust';
   const [step, setStep] = useState<SimulationStep>(
       state.simulationReturn?.route === 'case'
         ? ((state.simulationReturn.step as SimulationStep) ?? 4)
@@ -148,6 +153,10 @@ export default function CasesPage() {
     path: string;
     error: string;
   } | null>(null);
+  const [processContext, setProcessContext] = useState<{
+    request: string;
+    files: ExclusionContext['processFiles'];
+  } | null>(null);
   const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
     [explicitValues, setExplicitValues] = useState<Record<string, string>>({}),
@@ -212,6 +221,7 @@ export default function CasesPage() {
       domain: caseSimulationDomain(effectiveProfile),
       grid: effectiveProfile?.grid ?? null,
       compiledCrop: configurationKernel?.macros.includes('CROP') === true,
+      processFiles: processContext?.request === dataRequest ? processContext.files : undefined,
     });
     await work(async () => {
       const target = dir,
@@ -296,7 +306,7 @@ export default function CasesPage() {
             settable: boolean;
             long_name?: string | null;
           }[]
-        >('hist_vars', { text, kernelDir: kernel.dir, dir: context.entry.dir })
+        >('hist_vars', { text, kernelDir: kernel.dir, dir: context.entry.dir, engine })
       : [];
     if (!request.active || epoch.current !== request) return;
     setHistoryVars(
@@ -493,7 +503,7 @@ export default function CasesPage() {
                 settable: boolean;
                 long_name?: string | null;
               }[]
-            >('hist_vars', { text, kernelDir: kernel.dir, dir: preview })
+            >('hist_vars', { text, kernelDir: kernel.dir, dir: preview, engine })
           : [];
         for (const h of histories) actual[`DEF_hist_vars%${h.name}`] = h.on ? '.true.' : '.false.';
         const fields = all
@@ -567,7 +577,7 @@ export default function CasesPage() {
     return () => {
       request.active = false;
     };
-  }, [dir, versionId, revision, state.kernels, overlay, notify, reloadCount]);
+  }, [dir, versionId, revision, state.kernels, overlay, notify, reloadCount, engine]);
   const configurationKernel = effectiveProfile
     ? compatibleKernel(state.kernels, effectiveProfile, physics)
     : undefined;
@@ -583,6 +593,7 @@ export default function CasesPage() {
     source: { kind: 'frozen', version: { id: versionId, revision } },
     caseDir: dir ?? null,
     kernelDir: configurationKernel?.dir ?? null,
+    engine: engine,
     pftSelection: null,
     caseValues: configurationCaseValues(dataPatch, schema),
   });
@@ -625,11 +636,18 @@ export default function CasesPage() {
   }
   useEffect(() => {
     let current = true;
+    setProcessContext(null);
     if (!dir || !schema.length) return;
     setOptionError('');
-    void invoke<{ fields: ConfigurationField[] }>('model_configuration', JSON.parse(dataRequest))
+    void invoke<{ fields: ConfigurationField[]; process_files?: ExclusionContext['processFiles'] }>(
+      'model_configuration',
+      JSON.parse(dataRequest),
+    )
       .then((result) => {
-        if (current) setOptionStates(result.fields);
+        if (current) {
+          setOptionStates(result.fields);
+          setProcessContext({ request: dataRequest, files: result.process_files });
+        }
       })
       .catch((e) => {
         if (current) setOptionError(String(e));
@@ -819,10 +837,6 @@ export default function CasesPage() {
     YEARLY: t('每年', 'Yearly'),
     none: t('不写历史文件', 'No history output'),
   };
-  const engine: string =
-    typeof state.selectedCase?.profile?.engine === 'string'
-      ? state.selectedCase.profile.engine
-      : 'rust';
   const visibleSchema = schema.filter(
     (field) =>
       !(forcingInput && field.name === 'DEF_forcing_namelist') &&

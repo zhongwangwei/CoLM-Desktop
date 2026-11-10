@@ -547,20 +547,10 @@ export function newCaseProblem(
   if (rangeProblem) return rangeProblem;
   if (step === 2) return null;
   if (step >= 3) {
-    if (!validDate(form.start) || !validDate(form.end) || form.end < form.start)
+    if (!validDate(form.start) || !validDate(form.end) || form.end <= form.start)
       return t(
-        '请填写有效时段，结束日期不能早于开始日期。',
-        'Choose valid dates with the end on or after the start.',
-      );
-    if (
-      !form.timestep?.trim() ||
-      !Number.isInteger(Number(form.timestep)) ||
-      Number(form.timestep) < 1 ||
-      Number(form.timestep) > 3600
-    )
-      return t(
-        '时间步长须为 1–3600 的整数秒。',
-        'The time step must be an integer from 1 to 3600 seconds.',
+        '请填写有效时段，结束日期须晚于开始日期。',
+        'Choose valid dates with the end after the start.',
       );
     if (form.kind === 'site') {
       if (!form.site || !form.met)
@@ -620,6 +610,16 @@ export function newCaseProblem(
       return t('请选择 IGBP 或 USGS 地表分类。', 'Choose IGBP or USGS land-cover classification.');
   }
   if (step === 4) return null;
+  if (
+    !form.timestep?.trim() ||
+    !Number.isInteger(Number(form.timestep)) ||
+    Number(form.timestep) < 1 ||
+    Number(form.timestep) > 3600
+  )
+    return t(
+      '时间步长须为 1–3600 的整数秒。',
+      'The time step must be an integer from 1 to 3600 seconds.',
+    );
   return spinupProblem(
     form.start,
     form.end,

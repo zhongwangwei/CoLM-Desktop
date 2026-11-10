@@ -169,6 +169,93 @@ fn parameter_audit() -> Result<()> {
     if override_keys != catalog_pft_keys || override_targets != catalog_pft_targets {
         bail!("pft_override_fields.inc and pft.rs have drifted");
     }
+    // Match the generator's ordered merge: imported fields can appear in both groups.
+    let namelist_sources = [
+        "share/MOD_Namelist.F90",
+        "main/MATERIAL/MOD_MT_Namelist.F90",
+    ]
+    .into_iter()
+    .map(|relative| {
+        let text = std::fs::read_to_string(root.join("vendor/CoLM202X").join(relative))?;
+        let groups = colm_schema::source::namelist_groups(&text);
+        Ok((relative, text, groups))
+    })
+    .collect::<Result<Vec<_>>>()?;
+    let mut merged_groups = BTreeMap::new();
+    for (_, _, groups) in &namelist_sources {
+        merged_groups.extend(groups.clone());
+    }
+    let mut namelist_inventory = serde_json::Map::new();
+    for (relative, text, groups) in &namelist_sources {
+        let mut excluded = Vec::new();
+        let mut alternate_groups = BTreeMap::new();
+        for (name, group) in groups {
+            if name.eq_ignore_ascii_case("DEF_rawdata_nml") && group == "nl_colm_rawdata" {
+                excluded.push(name.clone());
+                continue;
+            }
+            if override_keys
+                .iter()
+                .any(|key| key.eq_ignore_ascii_case(name))
+            {
+                continue;
+            }
+            let effective_group = lookup_ci(&merged_groups, name).unwrap();
+            if effective_group != *group {
+                alternate_groups.insert(
+                    name.clone(),
+                    json!({
+                        "declared_group": group, "schema_group": effective_group
+                    }),
+                );
+            }
+            let matched = colm_schema::all()
+                .iter()
+                .filter(|field| {
+                    field
+                        .name
+                        .split('%')
+                        .next()
+                        .unwrap()
+                        .eq_ignore_ascii_case(name)
+                })
+                .collect::<Vec<_>>();
+            if matched.is_empty()
+                || matched
+                    .iter()
+                    .any(|field| field.group != Some(effective_group.as_str()))
+            {
+                bail!("namelist member missing or group mismatched in schema: {relative}:{group}:{name}");
+            }
+        }
+        // Apply the same owner expansion as render(), then independently compare to the built schema.
+        for field in extract(text, &merged_groups)? {
+            let (name, group) = expanded_schema_identity(&field, &merged_groups);
+            if !colm_schema::all().iter().any(|current| {
+                current.name.eq_ignore_ascii_case(&name) && current.group == group.as_deref()
+            }) {
+                bail!(
+                    "source declaration missing or group mismatched in schema: {relative}:{name}"
+                );
+            }
+            let source_file = relative.rsplit('/').next().unwrap();
+            let expected = format!("{source_file}:{}", field.line);
+            if parameters::find(&name)
+                .is_none_or(|descriptor| descriptor.source_location != expected)
+            {
+                bail!(
+                    "catalog source location differs from declaration: {name}: expected {expected}"
+                );
+            }
+        }
+        namelist_inventory.insert((*relative).into(), json!({
+            "parsed_namelist_members": groups.len(),
+            "excluded_members": excluded,
+            "alternate_groups": alternate_groups,
+            "coverage": "schema scalars/expanded containers or separately verified PFT overrides",
+            "limitation": "source parser and extractor coverage; not a Fortran compiler/preprocessor proof"
+        }));
+    }
     let pft_text = std::fs::read_to_string(&pft_source)?;
     for target in &override_targets {
         if !pft_text.contains(target) {
@@ -321,10 +408,15 @@ fn parameter_audit() -> Result<()> {
         *process_source_counts.entry(file.into()).or_default() += 1;
     }
     let source_inventory = json!({
+        "namelist_source_coverage": namelist_inventory,
         "MOD_Namelist.F90": {
-            "schema_fields": colm_schema::all().len(),
-            "catalog_descriptors": schema_descriptor_count,
+            "schema_fields": parameters::schema_descriptors().iter().filter(|d| d.source_location.starts_with("MOD_Namelist.F90:")).map(|d| &d.raw_key).collect::<BTreeSet<_>>().len(),
+            "catalog_descriptors": parameters::schema_descriptors().iter().filter(|d| d.source_location.starts_with("MOD_Namelist.F90:")).count(),
             "case_tuning_fields": tuning_names.len()
+        },
+        "MOD_MT_Namelist.F90": {
+            "schema_fields": parameters::schema_descriptors().iter().filter(|d| d.source_location.starts_with("MOD_MT_Namelist.F90:")).map(|d| &d.raw_key).collect::<BTreeSet<_>>().len(),
+            "catalog_descriptors": parameters::schema_descriptors().iter().filter(|d| d.source_location.starts_with("MOD_MT_Namelist.F90:")).count()
         },
         "MOD_Const_LC.F90": {
             "classified_arrays": lc_source_names.len(),
@@ -355,6 +447,7 @@ fn parameter_audit() -> Result<()> {
         "blocked_total": blocked.len(),
         "excluded_internal_total": excluded.len(),
         "unclassified_total": 0,
+        "unclassified_scope": "catalog section classification; source coverage is reported separately",
         "source_counts": {
             "schema_fields": colm_schema::all().len(),
             "land_cover_base_parameters": unique_lc,
@@ -383,6 +476,31 @@ fn parameter_audit() -> Result<()> {
                 .cloned(),
         )
         .collect::<Vec<_>>();
+    let fields = colm_schema::all()
+        .iter()
+        .map(|field| {
+            let descriptor = parameters::find(field.name).expect("schema descriptor audited above");
+            json!({
+                "name": field.name,
+                "kind": format!("{:?}", field.kind),
+                "arity": field.arity,
+                "default": descriptor.default,
+                "doc": field.doc,
+                "group": field.group,
+                "derived": field.group.is_none(),
+                "values": field.values.iter().filter(|value| match field.kind {
+                    colm_schema::FieldKind::Character { len } => value.len() <= len,
+                    _ => true,
+                }).collect::<Vec<_>>(),
+                "requires": field.requires,
+                "section": descriptor.section,
+            })
+        })
+        .collect::<Vec<_>>();
+    std::fs::write(
+        out.join("fields.json"),
+        serde_json::to_string_pretty(&fields)?,
+    )?;
     std::fs::write(out.join("catalog.json"), parameters::to_json()?)?;
     std::fs::write(
         out.join("candidates.json"),
@@ -432,6 +550,22 @@ fn parameter_audit() -> Result<()> {
         out.display()
     );
     Ok(())
+}
+
+fn expanded_schema_identity(
+    field: &Field,
+    groups: &BTreeMap<String, String>,
+) -> (String, Option<String>) {
+    match &field.owner {
+        Some(owner) => {
+            let prefix = owner_prefix(owner);
+            (
+                format!("{prefix}%{}", field.name),
+                lookup_ci(groups, prefix),
+            )
+        }
+        None => (field.name.clone(), field.group.clone()),
+    }
 }
 
 fn fortran_parameter_declarations(path: &std::path::Path) -> Result<Vec<(String, usize)>> {
@@ -585,12 +719,56 @@ fn gen_histmap() -> Result<()> {
         }
     }
 
-    let out = hist::render(&vars, &switches);
+    let mut spatial = Vec::new();
+    for (source, writer, minimum) in [
+        ("HYDRO/MOD_Catch_Hist.F90", "vector_gather_and_write", 7),
+        ("HYDRO/MOD_Catch_Hist.F90", "ncio_write_serial_time", 3),
+        (
+            "HYDRO/MOD_Grid_RiverLakeHist.F90",
+            "route_hist_write_resv",
+            3,
+        ),
+        (
+            "MATERIAL/FAMILY_PARTICLE/MOD_MT_Sediment.F90",
+            "route_hist_write_ucat",
+            7,
+        ),
+    ] {
+        let src = root.join("vendor/CoLM202X/main").join(source);
+        let text = std::fs::read_to_string(&src)
+            .with_context(|| format!("cannot read {}", src.display()))?;
+        let mut found = hist::extract_spatial(&text, writer, minimum)?;
+        if source.ends_with("MOD_MT_Sediment.F90") {
+            if !text.contains("IF (.not. sediment_particle_enabled()) RETURN") {
+                anyhow::bail!("sediment history activation guard changed; review its runtime gate");
+            }
+            // write_sediment_history 的前置 RETURN 依赖 provider 注册结果，
+            // 仅有 DEF_USE_SEDIMENT 还不足以证明这一族在运行时已激活。
+            for var in &mut found {
+                var.runtime = Some(match var.runtime.take() {
+                    Some(runtime) => format!("(sediment_particle_enabled()) .and. ({runtime})"),
+                    None => "sediment_particle_enabled()".to_string(),
+                });
+            }
+        }
+        spatial.extend(found);
+    }
+    for var in &spatial {
+        if !switches.iter().any(|s| {
+            var.switch
+                .as_ref()
+                .is_some_and(|name| s.name.eq_ignore_ascii_case(name))
+        }) {
+            anyhow::bail!("spatial writer {} has no declared history switch", var.name);
+        }
+    }
+    let out = hist::render(&vars, &switches, &spatial);
     let dst = root.join("crates/colm-hist/src/generated.rs");
     std::fs::write(&dst, out)?;
     println!(
-        "wrote {} variables and {} switches to {}",
+        "wrote {} patch variables, {} spatial writer sites and {} switches to {}",
         vars.len(),
+        spatial.len(),
         switches.len(),
         dst.display()
     );
@@ -925,6 +1103,28 @@ fn repo_root() -> Result<PathBuf> {
 #[cfg(test)]
 mod parameter_audit_tests {
     use super::*;
+
+    #[test]
+    fn source_audit_expands_containers_and_uses_merged_groups() {
+        let source = "module example\nlogical :: DEF_USE_SEDIMENT = .false.\ntype nl_forcing_type\ncharacter(len=16) :: dataset = 'POINT'\nend type\nnamelist /nl_colm/ DEF_USE_SEDIMENT\nnamelist /nl_colm_forcing/ DEF_forcing\n";
+        let mut groups = colm_schema::source::namelist_groups(source);
+        groups.extend(colm_schema::source::namelist_groups(
+            "namelist /nl_colm_material/ DEF_USE_SEDIMENT\n",
+        ));
+        let fields = extract(source, &groups).unwrap();
+        let identities = fields
+            .iter()
+            .map(|field| expanded_schema_identity(field, &groups))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            identities,
+            vec![
+                ("DEF_USE_SEDIMENT".into(), Some("nl_colm_material".into())),
+                ("DEF_forcing%dataset".into(), Some("nl_colm_forcing".into())),
+            ]
+        );
+        assert_ne!(identities[0].1.as_deref(), Some("nl_colm"));
+    }
 
     #[test]
     fn parameter_scan_excludes_comments_and_procedure_local_constants() {

@@ -1328,3 +1328,29 @@ pub static SWITCHES: &[Switch] = &[
     Switch { name: "shearvel", declared: false, sync: Sync::Always, diag_matrix: false },
     Switch { name: "sensors", declared: true, sync: Sync::Always, diag_matrix: false },
 ];
+
+/// Fortran 空间 writer 的能力证据；名字可能是动态前缀，不是 Rust patch 输出清单。
+/// 源：HYDRO/MOD_Catch_Hist.F90、HYDRO/MOD_Grid_RiverLakeHist.F90、MATERIAL/FAMILY_PARTICLE/MOD_MT_Sediment.F90。
+#[rustfmt::skip]
+pub static SPATIAL_VARS: &[Var] = &[
+    Var { name: "bedout_", macros: &[Cond::AnyOf(&["GridRiverLakeFlow"])], runtime: Some("sediment_particle_enabled()"), long_name: Some("bedload solid-volume flux, size class "), units: Some("m^3/s"), dims: &["hydrounit"], switch: Some("bedout"), line: 4443 },
+    Var { name: "layer_", macros: &[Cond::AnyOf(&["GridRiverLakeFlow"])], runtime: Some("sediment_particle_enabled()"), long_name: Some("active layer storage, size class "), units: Some("m^3"), dims: &["hydrounit"], switch: Some("sedlayer"), line: 4470 },
+    Var { name: "netflw_", macros: &[Cond::AnyOf(&["GridRiverLakeFlow"])], runtime: Some("sediment_particle_enabled()"), long_name: Some("net bed-water exchange flux (incl. shallow deposit), size class "), units: Some("m^3/s"), dims: &["hydrounit"], switch: Some("netflw"), line: 4461 },
+    Var { name: "qresv_in", macros: &[Cond::AnyOf(&["CatchLateralFlow"])], runtime: Some("DEF_Reservoir_Method > 0"), long_name: Some("reservoir inflow"), units: Some("m^3/s"), dims: &["reservoir"], switch: Some("qresv_in"), line: 340 },
+    Var { name: "qresv_in", macros: &[Cond::AnyOf(&["GridRiverLakeFlow"])], runtime: Some("DEF_Reservoir_Method > 0"), long_name: Some("reservoir inflow"), units: Some("m^3/s"), dims: &["reservoir"], switch: Some("qresv_in"), line: 614 },
+    Var { name: "qresv_out", macros: &[Cond::AnyOf(&["CatchLateralFlow"])], runtime: Some("DEF_Reservoir_Method > 0"), long_name: Some("reservoir outflow"), units: Some("m^3/s"), dims: &["reservoir"], switch: Some("qresv_out"), line: 363 },
+    Var { name: "qresv_out", macros: &[Cond::AnyOf(&["GridRiverLakeFlow"])], runtime: Some("DEF_Reservoir_Method > 0"), long_name: Some("reservoir outflow"), units: Some("m^3/s"), dims: &["reservoir"], switch: Some("qresv_out"), line: 631 },
+    Var { name: "sedcon_", macros: &[Cond::AnyOf(&["GridRiverLakeFlow"])], runtime: Some("sediment_particle_enabled()"), long_name: Some("suspended sediment concentration, size class "), units: Some("m^3/m^3"), dims: &["hydrounit"], switch: Some("sedcon"), line: 4425 },
+    Var { name: "sedinp_", macros: &[Cond::AnyOf(&["GridRiverLakeFlow"])], runtime: Some("sediment_particle_enabled()"), long_name: Some("sediment erosion input, size class "), units: Some("m^3/s"), dims: &["hydrounit"], switch: Some("sedinp"), line: 4452 },
+    Var { name: "sedout_", macros: &[Cond::AnyOf(&["GridRiverLakeFlow"])], runtime: Some("sediment_particle_enabled()"), long_name: Some("suspended sediment flux, size class "), units: Some("m^3/s"), dims: &["hydrounit"], switch: Some("sedout"), line: 4434 },
+    Var { name: "shearvel", macros: &[Cond::AnyOf(&["GridRiverLakeFlow"])], runtime: Some("sediment_particle_enabled()"), long_name: Some("shear velocity"), units: Some("m/s"), dims: &["hydrounit"], switch: Some("shearvel"), line: 4477 },
+    Var { name: "v_discharge", macros: &[Cond::AnyOf(&["CatchLateralFlow"])], runtime: None, long_name: Some("River Discharge"), units: Some("m^3/s"), dims: &["basin"], switch: Some("discharge"), line: 228 },
+    Var { name: "v_veloc_hru", macros: &[Cond::AnyOf(&["CatchLateralFlow"])], runtime: None, long_name: Some("Surface Flow Velocity in Hydro unit"), units: Some("m/s"), dims: &["hydrounit"], switch: Some("veloc_hru"), line: 267 },
+    Var { name: "v_veloc_riv", macros: &[Cond::AnyOf(&["CatchLateralFlow"])], runtime: None, long_name: Some("River Velocity"), units: Some("m/s"), dims: &["basin"], switch: Some("riv_veloct"), line: 213 },
+    Var { name: "v_wdsrf_bsn", macros: &[Cond::AnyOf(&["CatchLateralFlow"])], runtime: None, long_name: Some("River Height"), units: Some("m"), dims: &["basin"], switch: Some("riv_height"), line: 198 },
+    Var { name: "v_wdsrf_hru", macros: &[Cond::AnyOf(&["CatchLateralFlow"])], runtime: None, long_name: Some("Depth of Surface Water in Hydro unit"), units: Some("m"), dims: &["hydrounit"], switch: Some("wdsrf_hru"), line: 252 },
+    Var { name: "v_xsubs_bsn", macros: &[Cond::AnyOf(&["CatchLateralFlow"])], runtime: None, long_name: Some("Subsurface lateral flow between basins"), units: Some("m/s"), dims: &["basin"], switch: Some("xsubs_bsn"), line: 280 },
+    Var { name: "v_xsubs_hru", macros: &[Cond::AnyOf(&["CatchLateralFlow"])], runtime: None, long_name: Some("SubSurface lateral flow between HRUs"), units: Some("m/s"), dims: &["hydrounit"], switch: Some("xsubs_hru"), line: 293 },
+    Var { name: "volresv", macros: &[Cond::AnyOf(&["CatchLateralFlow"])], runtime: Some("DEF_Reservoir_Method > 0"), long_name: Some("reservoir water volume"), units: Some("m^3"), dims: &["reservoir"], switch: Some("volresv"), line: 317 },
+    Var { name: "volresv", macros: &[Cond::AnyOf(&["GridRiverLakeFlow"])], runtime: Some("DEF_Reservoir_Method > 0"), long_name: Some("reservoir water volume"), units: Some("m^3"), dims: &["reservoir"], switch: Some("volresv"), line: 597 },
+];

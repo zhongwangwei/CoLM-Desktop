@@ -135,6 +135,20 @@ export function compatibleKernel<T extends KernelChoice>(
     ) ?? matching[0]
   );
 }
+/** 只提前判断已有宏能证明的冲突；CLI 仍负责完整输入与执行检查。 */
+export function kernelRunProblem(
+  macros: string[],
+  engine: string,
+  preprocessors: string,
+  ranks: number,
+  crop: boolean,
+): string | undefined {
+  if (engine === 'fortran' && ranks > 1 && !macros.includes('USEMPI'))
+    return '多进程 Fortran 运行需要 USEMPI 内核 / Fortran runs with multiple ranks require a USEMPI kernel';
+  if (engine === 'rust' && crop && preprocessors === 'fortran' && !macros.includes('CROP'))
+    return 'Rust 作物算例使用 Fortran 前处理时需要 CROP 内核；也可改用 Rust 前处理 / Rust crop cases need a CROP kernel for Fortran preprocessing, or select Rust preprocessing';
+}
+
 export function remoteSubmissionBlocked(record: unknown): boolean {
   if (record == null) return false;
   return !remoteRunPermissions(record).terminal;

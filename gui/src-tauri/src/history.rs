@@ -1429,9 +1429,20 @@ pub(crate) fn command_start_for_run(
     args: &[String],
     run_id: Option<&str>,
 ) -> Result<Option<Event>, String> {
-    let Some(event) = command_event(args, run_id)? else {
+    command_start_for_execution(args, run_id, None)
+}
+
+pub(crate) fn command_start_for_execution(
+    args: &[String],
+    run_id: Option<&str>,
+    environment: Option<serde_json::Value>,
+) -> Result<Option<Event>, String> {
+    let Some(mut event) = command_event(args, run_id)? else {
         return Ok(None);
     };
+    if let Some(environment) = environment {
+        event.detail["execution_environment"] = environment;
+    }
     if status_poll(&event) {
         return Ok(Some(event));
     }

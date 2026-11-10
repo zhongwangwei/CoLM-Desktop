@@ -1119,7 +1119,12 @@ fn creation_cancel_stops_only_its_own_process_and_blocks_later_stages() {
         1
     );
     assert!(handle.join().unwrap().unwrap_err().contains("取消"));
-    assert!(runs.inner.lock().unwrap().pending.contains("unrelated-run"));
+    assert!(runs
+        .inner
+        .lock()
+        .unwrap()
+        .pending
+        .contains(&run_process_key("unrelated-run").unwrap()));
     assert!(creation
         .capture_command(std::process::Command::new("sh").args(["-c", "exit 0"]))
         .unwrap_err()
@@ -2660,4 +2665,121 @@ fn legacy_study_options_never_select_a_current_revision_or_remote_head() {
         .windows(2)
         .any(|pair| pair == ["--model-revision", "2"]));
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn explicit_threads_override_environment_for_budget_and_child() {
+    assert_eq!(
+        effective_threads(Some(4), Some(OsStr::new("32")), 16),
+        Some(4)
+    );
+    assert_eq!(
+        effective_threads(None, Some(OsStr::new("32")), 16),
+        Some(32)
+    );
+    assert_eq!(effective_threads(None, Some(OsStr::new("0")), 16), Some(16));
+    assert_eq!(effective_threads(None, None, 16), None);
+    let mut command = std::process::Command::new("unused");
+    command.env("RAYON_NUM_THREADS", "32");
+    configure_run_threads(&mut command, Some(4));
+    assert_eq!(execution_environment(&command)["RAYON_NUM_THREADS"], "4");
+    command.env_remove("RAYON_NUM_THREADS");
+    assert!(execution_environment(&command)["RAYON_NUM_THREADS"].is_null());
+}
+
+#[cfg(unix)]
+#[test]
+fn case_path_aliases_share_registration_lookup_and_cancellation() {
+    let root = creation_test_dir("aliases");
+    std::fs::create_dir_all(root.join("case")).unwrap();
+    std::os::unix::fs::symlink(root.join("case"), root.join("alias")).unwrap();
+    let case = root.join("case").display().to_string();
+    let alias = format!("{}/alias/", root.display());
+    let processes = RunProcesses::default();
+    processes.prepare(std::slice::from_ref(&case)).unwrap();
+    assert!(processes.prepare(std::slice::from_ref(&alias)).is_err());
+    assert!(processes.remember(&alias, 42).unwrap());
+    assert_eq!(processes.running_pid(&case).unwrap(), Some(42));
+    processes.forget(&alias).unwrap();
+    assert!(processes.running_pid(&case).unwrap().is_none());
+    processes.prepare(std::slice::from_ref(&case)).unwrap();
+    assert_eq!(processes.cancel(Some(vec![alias.clone()])).unwrap(), 1);
+    assert!(processes.forget(&case).unwrap());
+    assert!(processes.prepare(&[case, alias]).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_cancel_before_spawn_does_not_execute_command() {
+    let processes = RunProcesses::default();
+    let case = creation_test_dir("migration-before").display().to_string();
+    processes.prepare(std::slice::from_ref(&case)).unwrap();
+    processes.cancel(Some(vec![case.clone()])).unwrap();
+    let mut command = std::process::Command::new("must-never-be-launched");
+    let error = capture_registered_command(&mut command, &processes, &case, None).unwrap_err();
+    assert!(error.contains("Migration cancelled"), "{error}");
+    assert!(processes.forget(&case).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_cancel_terminates_registered_process_and_keeps_cancelled_status() {
+    let _serial = CHILD_PROCESS_TEST_LOCK.lock().unwrap();
+    let processes = RunProcesses::default();
+    let case = creation_test_dir("migration-live").display().to_string();
+    processes.prepare(std::slice::from_ref(&case)).unwrap();
+    let worker_processes = processes.clone();
+    let worker_case = case.clone();
+    let worker = std::thread::spawn(move || {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exec sleep 30"]);
+        capture_registered_command(&mut command, &worker_processes, &worker_case, None)
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while processes.running_pid(&case).unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(processes.running_pid(&case).unwrap().is_some());
+    assert_eq!(processes.cancel(Some(vec![case.clone()])).unwrap(), 1);
+    assert!(worker.join().unwrap().is_err());
+    assert!(processes.forget(&case).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn migration_preparation_is_registered_and_releases_on_import_failure() {
+    let _serial = CHILD_PROCESS_TEST_LOCK.lock().unwrap();
+    let case = creation_test_dir("migration-import").display().to_string();
+    let preparing_case = case.clone();
+    let result = tauri::async_runtime::block_on(capture_migration(
+        vec!["model-migrate-case".into(), case.clone()],
+        move || {
+            // 模拟历史导入仍在进行时，用户已经发来停止请求。
+            assert_eq!(
+                migration_processes()
+                    .cancel(Some(vec![preparing_case.clone()]))
+                    .unwrap(),
+                1
+            );
+            assert!(migration_processes()
+                .inner
+                .lock()
+                .unwrap()
+                .cancelled
+                .contains(&run_process_key(&preparing_case).unwrap()));
+            Err("import failed before any sidecar launch".into())
+        },
+    ));
+    assert_eq!(
+        result.unwrap_err(),
+        "import failed before any sidecar launch"
+    );
+    migration_processes()
+        .prepare(std::slice::from_ref(&case))
+        .unwrap();
+    assert!(
+        !migration_processes().forget(&case).unwrap(),
+        "old cancellation was released with its reservation"
+    );
 }

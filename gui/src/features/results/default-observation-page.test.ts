@@ -202,6 +202,8 @@ test('a server run is read in place, and fetching takes only that run', async ()
   const noop = () => {};
   const fetching: boolean[] = [];
   const context = (runs: unknown[]) => ({
+    cache: { current: new Map<string, unknown>() },
+    automaticEvaluation: { current: '' },
     setFetching: (value: boolean) => fetching.push(value),
     setRunsLoading: noop,
     setRunsError: noop,

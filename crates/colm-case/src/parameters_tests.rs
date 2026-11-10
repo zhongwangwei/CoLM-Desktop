@@ -196,3 +196,75 @@ fn catalog_exports_json() {
     assert!(json.contains("lct:IGBP:DEF_LC_VMAX25"));
     assert!(json.contains("process:methane:DEF_METHANE"));
 }
+
+#[test]
+fn schema_destinations_and_sources_preserve_catalog_identity() {
+    for field in colm_schema::all() {
+        let descriptor = parameters::find(field.name).unwrap();
+        let target = match field.group {
+            Some("nl_colm_forcing") => Some("forcing.nml"),
+            Some("nl_colm_history") => Some("history.nml"),
+            Some("nl_colm_isotope_parameter") => Some("DEF_ISOTOPE_PARAM_FILE"),
+            Some(_) => Some("case.nml"),
+            None => None,
+        };
+        assert_eq!(
+            descriptor.storage_target.as_deref(),
+            target,
+            "{}",
+            field.name
+        );
+        assert_eq!(descriptor.storage, parameters::Storage::CaseNml);
+        assert_eq!(descriptor.catalog_version, 2);
+        if let Some(target) = target {
+            assert!(descriptor.write_strategy.contains(target));
+        } else {
+            assert_eq!(
+                descriptor.write_strategy,
+                "read-only derived value; do not write"
+            );
+        }
+        let source = if field.name == "DEF_USE_NH4_LEACHING"
+            || field.name != "DEF_USE_SEDIMENT"
+                && matches!(
+                    field.group,
+                    Some("nl_colm_material" | "nl_colm_isotope_parameter")
+                ) {
+            "MOD_MT_Namelist.F90"
+        } else {
+            "MOD_Namelist.F90"
+        };
+        assert_eq!(
+            descriptor.source_location,
+            format!("{source}:{}", field.line)
+        );
+        if source == "MOD_MT_Namelist.F90" {
+            assert!(
+                !descriptor.calibration_eligible,
+                "source correction must not invalidate frozen Study providers"
+            );
+        }
+        if !matches!(descriptor.scope, ParameterScope::LandCoverClass) {
+            assert_eq!(descriptor.default_provider, format!("{source} declaration"));
+        }
+    }
+}
+
+#[test]
+fn real_schema_catalog_defaults_are_readable_namelist_literals() {
+    for field in colm_schema::all()
+        .iter()
+        .filter(|field| matches!(field.default, colm_schema::Default::Real(_)))
+    {
+        let descriptor = parameters::find(field.name).unwrap();
+        let value = descriptor.default.as_deref().unwrap();
+        assert_eq!(
+            colm_namelist::real_literal(value),
+            Some(value),
+            "{}: {value}",
+            descriptor.id
+        );
+        colm_namelist::parse(&format!("&defaults\nvalue = {value}\n/\n"))
+            .unwrap_or_else(|error| panic!("{}: {error}", descriptor.id));
+    }
+}

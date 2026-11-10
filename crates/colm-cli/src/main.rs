@@ -3533,6 +3533,10 @@ fn run_with_provenance(opts: &Opts) -> Result<()> {
             &location,
         )?;
     }
+    if owns_provenance {
+        // 委派 CLI 追加同一份记录；只有外层清空，避免上一轮 launcher 混入这次运行。
+        std::fs::write(case.join(provenance::EXECUTIONS_FILE), "")?;
+    }
     let result = (|| -> Result<()> {
         if materialized_run && owns_provenance {
             let prerequisites = required_upstream_stages(stage);
@@ -4142,9 +4146,10 @@ fn run_case(
         // 接缝。没有任何报错，两次运行都是成功的。
         //
         // 只删 `*_hist_*.nc`：restart 是 `mkinidata` 的产物，`colm` 要读它。
+        // 任一实际重跑都会使旧结果失效；只有模型段成功或可信跳过才恢复 current。
+        colm_case::mark_results_stale(case)
+            .with_context(|| format!("cannot mark {} results stale", case.display()))?;
         if matches!(stage, Stage::Colm) {
-            colm_case::mark_results_stale(case)
-                .with_context(|| format!("cannot mark {} results stale", case.display()))?;
             let removed = clear_history(&out)?;
             if removed > 0 && !quiet {
                 println!("  {sname:<10} 清掉上一次的 {removed} 个 history 文件");
@@ -4258,6 +4263,8 @@ fn run_case(
                 &mut forward,
             )?
         };
+        provenance::append_execution(case, &r.execution)
+            .context("cannot record the actual stage execution command")?;
         notice(RunNotice::StageDone {
             stage: sname,
             ok: r.succeeded(),

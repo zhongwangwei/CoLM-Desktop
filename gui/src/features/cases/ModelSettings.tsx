@@ -323,8 +323,8 @@ export default function ModelSettings({
       <h3>{t('地表覆盖与植被方案', 'Land cover and vegetation scheme')}</h3>
       <p className="muted">
         {t(
-          'IGBP / USGS 使用地类结构；PFT / PC 使用植被结构。选择 PFT / PC 后仍需确认地类数据来源。',
-          'IGBP / USGS use land-cover classes; PFT / PC use vegetation structures. PFT / PC also require a land-cover data classification.',
+          'IGBP / USGS 使用地类结构；PFT / PC 使用植被结构。新建时选择 PFT / PC 会自动使用 IGBP 地类数据。',
+          'IGBP / USGS use land-cover classes; PFT / PC use vegetation structures. Selecting PFT / PC for a new case automatically uses IGBP land-cover data.',
         )}
       </p>
       <Notice tone="warning">

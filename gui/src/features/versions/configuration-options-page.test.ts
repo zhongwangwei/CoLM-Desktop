@@ -2090,3 +2090,16 @@ for (const language of ['zh', 'en'] as const)
     );
     assert.ok(!paragraphs.includes(wue.reason));
   });
+
+test('engine changes invalidate the configuration query and refresh backend field states', async () => {
+  const p = harness();
+  p.props.engine = 'rust';
+  p.render();
+  assert.equal(p.requests[0].args.engine, 'rust');
+  await p.settle();
+  p.props.engine = 'fortran';
+  assert.equal(p.render().status, 'loading');
+  assert.equal(p.requests.length, 2);
+  assert.equal(p.requests[1].args.engine, 'fortran');
+  assert.notEqual((await p.settle()).status, 'loading');
+});

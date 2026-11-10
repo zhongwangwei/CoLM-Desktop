@@ -225,7 +225,7 @@ async function comparisonSources(entries: ComparisonEntry[], knownRuns: Run[]): 
       (dir): dir is string => !!dir,
     );
     const inventories = await boundedMap(dirs, 2, (dir) =>
-      invokeJson<Run[]>('model_case_runs', { dir }).catch(() => []),
+      invokeJson<Run[]>('model_case_runs', { dir }),
     );
     sources = [...sources, ...inventories.flat()];
   }
@@ -240,7 +240,17 @@ async function comparisonMetricsFor(
   request: ComparisonRequest,
   sources: Run[],
   window: (from: string, to: string) => { from: number | null; to: number | null },
+  current: () => boolean = () => true,
 ): Promise<Metric[]> {
+  sources = await comparisonSources([entry], sources);
+  if (!current()) return [];
+  if (!sources.some((run) => run.run_case === entry.run.run_case))
+    throw new Error(
+      bilingual(
+        `这不是已登记的运行副本：${entry.run.run_case}`,
+        `Not a recorded run copy: ${entry.run.run_case}`,
+      ),
+    );
   const values = await invokeJson<Metric[]>('metrics', {
     case: entry.run.run_case,
     obs: entry.obs.trim(),
@@ -251,6 +261,13 @@ async function comparisonMetricsFor(
     maxPoints: 2400,
     ...window(request.from, request.to),
   });
+  if (!values.length)
+    throw new Error(
+      bilingual(
+        '没有可计算的指标：请检查变量、有效配对数和评估时段',
+        'No metrics: check variables, valid pairs and evaluation window',
+      ),
+    );
   return values.map((value) => ({
     ...value,
     site: entry.run.run_case,
@@ -294,7 +311,18 @@ function splitSettledComparison(
       failures.push({ runCase, obs, error: comparisonFailureReason(outcome.error, false) });
       return;
     }
-    rows.push(...(outcome.value ?? []));
+    if (!outcome.value?.length) {
+      failures.push({
+        runCase,
+        obs,
+        error: bilingual(
+          '没有可计算的指标：请检查变量、有效配对数和评估时段',
+          'No metrics: check variables, valid pairs and evaluation window',
+        ),
+      });
+      return;
+    }
+    rows.push(...outcome.value);
   });
   return { rows, failures };
 }
@@ -788,6 +816,8 @@ export default function ResultsPage({
     setSingleResult(null);
     setComparisonResult(null);
     setDiagnostic(null);
+    cache.current = new Map();
+    automaticEvaluation.current = '';
     setCatalogKey('');
     setVariable('');
     setSeriesKey('');
@@ -809,7 +839,7 @@ export default function ResultsPage({
       cancelled = true;
       requestEpoch.current++;
     };
-  }, [source, caseDir, versionId, revision]);
+  }, [source, caseDir, versionId, revision, completedRunCase]);
   // 单站评估的输入条件变化：作废在途的单站请求，但**保留上一次的快照**并在表上方标「待更新」。
   // 直接清空会让「条件已改」和「从没算过」看起来一样；导出仍由 exportGate 按条件一致性挡住。
   useEffect(() => {
@@ -1007,11 +1037,17 @@ export default function ResultsPage({
     async function readSeries(vars: string, maxPoints: number | null = 2400) {
       const args = { case: source, vars, ...windowArgs(), maxPoints };
       const key = JSON.stringify(args);
-      if (maxPoints !== null && cache.current.has(key)) return cache.current.get(key) as SeriesData;
+      const currentCache = cache.current;
+      if (maxPoints !== null && currentCache.has(key)) {
+        const cached = currentCache.get(key) as SeriesData;
+        currentCache.delete(key);
+        currentCache.set(key, cached);
+        return cached;
+      }
       const value = await invokeJson<SeriesData>('series', args).catch((error: unknown) => {
         throw new Error(readErrorText(error, en));
       });
-      if (maxPoints !== null) {
+      if (maxPoints !== null && cache.current === currentCache) {
         if (cache.current.size >= 16) cache.current.delete(cache.current.keys().next().value!);
         cache.current.set(key, value);
       }
@@ -1208,17 +1244,7 @@ export default function ResultsPage({
             'Every run needs an observation file; fill the shared one and apply it to all rows',
           ),
         );
-      const sources = await comparisonSources(entries, projectRuns);
-      if (!live()) return [];
-      for (const entry of entries) {
-        if (!sources.some((r) => r.run_case === entry.run.run_case))
-          throw new Error(
-            tr(
-              `这不是已登记的运行副本：${entry.run.run_case}`,
-              `Not a recorded run copy: ${entry.run.run_case}`,
-            ),
-          );
-      }
+      const sources = projectRuns;
       // 进度绑定本次任务 id：旧任务既不能推进新任务的进度，也不能在 finally 里清掉它。
       comparisonTaskId.current++;
       const taskId = comparisonTaskId.current;
@@ -1236,7 +1262,7 @@ export default function ResultsPage({
           6,
           async (entry) => {
             try {
-              return await comparisonMetricsFor(entry, request, sources, windowArgs);
+              return await comparisonMetricsFor(entry, request, sources, windowArgs, live);
             } finally {
               // 失败也要计数，否则「3/10」会停在 2/10 直到整批结束。
               advance();
@@ -1289,7 +1315,7 @@ export default function ResultsPage({
         } as ProjectRun,
         obs: failure.obs,
       }));
-      const sources = await comparisonSources(retryEntries, projectRuns);
+      const sources = projectRuns;
       if (!live()) return [];
       comparisonTaskId.current++;
       const taskId = comparisonTaskId.current;
@@ -1306,7 +1332,7 @@ export default function ResultsPage({
           6,
           async (entry) => {
             try {
-              return await comparisonMetricsFor(entry, request, sources, windowArgs);
+              return await comparisonMetricsFor(entry, request, sources, windowArgs, live);
             } finally {
               advance();
             }
@@ -1393,7 +1419,10 @@ export default function ResultsPage({
         corrected: request?.corrected ?? corrected,
         comparisonSources: comparisonText(comparisonEntries),
       },
-      notice: 'No automatic ranking across unequal inputs or evaluation conditions',
+      notice: tr(
+        '输入或评估条件不一致时，不自动排名',
+        'No automatic ranking across unequal inputs or evaluation conditions',
+      ),
     };
   }
   const report = () =>
@@ -1583,13 +1612,27 @@ export default function ResultsPage({
     setExternalRun('');
   }
   function toggleComparisonRun(run: ProjectRun) {
+    const added = { run, obs: obs.trim() };
+    const adding =
+      !comparisonEntries.some((entry) => entry.run.run_case === run.run_case) &&
+      comparisonEntries.length < MAX_COMPARISON_RUNS;
     setComparisonEntries((current) => {
       if (current.some((entry) => entry.run.run_case === run.run_case))
         return current.filter((entry) => entry.run.run_case !== run.run_case);
       // 后端/旧手动表单最多比较 20 条：在勾选处就拦住并解释，避免选到 21 条才报错（GUI 审查 H-01）。
       if (current.length >= MAX_COMPARISON_RUNS) return current;
-      return [...current, { run, obs: obs.trim() }];
+      return [...current, added];
     });
+    if (adding && !added.obs && run.case_dir) {
+      void defaultObservation(run.case_dir)
+        .then((path) => {
+          if (path)
+            setComparisonEntries((current) =>
+              current.map((entry) => (entry === added ? { ...entry, obs: path } : entry)),
+            );
+        })
+        .catch(() => {});
+    }
   }
   function removeComparisonEntry(index: number) {
     setComparisonEntries((current) => current.filter((_, item) => item !== index));
@@ -1755,7 +1798,7 @@ export default function ResultsPage({
   if (!runChooser && tab === 'comparison')
     fields.push({
       id: 'comparison-sources',
-      label: 'Run paths | observations',
+      label: tr('运行路径 | 观测文件', 'Run paths | observations'),
       value: comparisonText(comparisonEntries),
       type: 'text',
       disabled: busy,
@@ -3173,8 +3216,8 @@ export default function ResultsPage({
             <div className="results-comparison-conditions">
               <p>
                 {tr(
-                  `比较 ${comparisonEntries.length} 个运行；评估时段 ${from || '全部'} — ${to || '全部'}（${timeBasisText}），跳过 ${spinup} 条记录，观测闭合订正：${corrected ? '是' : '否'}。`,
-                  `Comparing ${comparisonEntries.length} run(s); window ${from || 'all'} — ${to || 'all'} (${timeBasisText}), skip ${spinup} records, observation energy correction: ${corrected ? 'yes' : 'no'}.`,
+                  `比较 ${comparisonEntries.length} 个运行；评估时段 ${from || '全部'} — ${to || '全部'}（各运行时间基准见结果行），跳过 ${spinup} 条记录，观测闭合订正：${corrected ? '是' : '否'}。`,
+                  `Comparing ${comparisonEntries.length} run(s); window ${from || 'all'} — ${to || 'all'} (see each result row for its time basis), skip ${spinup} records, observation energy correction: ${corrected ? 'yes' : 'no'}.`,
                 )}
               </p>
               <ActionButton
@@ -3201,7 +3244,9 @@ export default function ResultsPage({
               <tr>
                 {[
                   tr('站点', 'Site'),
-                  ...(tab === 'comparison' ? [tr('观测文件', 'Observation')] : []),
+                  ...(tab === 'comparison'
+                    ? [tr('观测文件', 'Observation'), tr('时间基准', 'Time basis')]
+                    : []),
                   tr('变量', 'Variable'),
                   tr('单位', 'Units'),
                   tr('配对数', 'n'),
@@ -3212,6 +3257,12 @@ export default function ResultsPage({
                   'r',
                   'NSE',
                   'KGE',
+                  'α',
+                  'β',
+                  tr('模拟均值', 'Model mean'),
+                  tr('观测均值', 'Observed mean'),
+                  tr('模拟标准差', 'Model SD'),
+                  tr('观测标准差', 'Observed SD'),
                   tr('QC 来源', 'QC source'),
                   tr('订正', 'Correction'),
                   tr('覆盖率', 'Coverage'),
@@ -3230,6 +3281,11 @@ export default function ResultsPage({
                       {m.comparison_obs?.split(/[\\/]/).at(-1) || '—'}
                     </td>
                   )}
+                  {tab === 'comparison' && (
+                    <td>
+                      {m.time_basis ? timeBasisLabel(m.time_basis, en) : tr('未知', 'Unknown')}
+                    </td>
+                  )}
                   <td title={metricFrequencyTitle(m, en)}>{m.name}</td>
                   <td
                     title={
@@ -3244,7 +3300,21 @@ export default function ResultsPage({
                     {m.units_assumed ? '*' : ''}
                   </td>
                   <td>{m.n}</td>
-                  {[m.rmse, m.mae, m.bias, m.r2, m.correlation, m.nse, m.kge].map((v, j) => (
+                  {[
+                    m.rmse,
+                    m.mae,
+                    m.bias,
+                    m.r2,
+                    m.correlation,
+                    m.nse,
+                    m.kge,
+                    m.alpha,
+                    m.beta,
+                    m.model_mean,
+                    m.obs_mean,
+                    m.model_sd,
+                    m.obs_sd,
+                  ].map((v, j) => (
                     <td key={j}>{number(v)}</td>
                   ))}
                   <td title={metricQcTitle(m)}>{metricQcLabel(m, en)}</td>

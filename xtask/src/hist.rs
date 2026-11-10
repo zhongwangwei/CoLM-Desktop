@@ -86,8 +86,18 @@ pub fn extract(text: &str) -> Result<Vec<Var>> {
 }
 
 pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
+    extract_writers(text, minimum, None)
+}
+
+/// 空间输出与 patch history 的名字和维度约定不同，单独生成能力证据，
+/// 不交给 Rust 的 patch history writer 当作实际输出清单。
+pub fn extract_spatial(text: &str, writer: &str, minimum: usize) -> Result<Vec<Var>> {
+    extract_writers(text, minimum, Some(writer))
+}
+
+fn extract_writers(text: &str, minimum: usize, spatial_writer: Option<&str>) -> Result<Vec<Var>> {
     let mut out: BTreeMap<String, Var> = BTreeMap::new();
-    let mut mstack: Vec<Option<Cond>> = Vec::new();
+    let mut mstack: Vec<Vec<Cond>> = Vec::new();
     let mut ifstack: Vec<RuntimeFrame> = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
@@ -105,18 +115,19 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
         let t = logical.trim();
 
         if t.starts_with("#if") {
-            mstack.push(parse_cond(t)?);
+            mstack.push(parse_cond(t)?.into_iter().collect());
             i += 1;
             continue;
         }
-        // #else 之后的分支条件是原条件的否定，而实测 MOD_Hist.F90 的 #else
-        // 分支里没有写出调用。置 None（当作无条件）在这里是安全的，
-        // 但若将来 #else 里出现了写出点，这就成了多报 —— 所以下面
-        // Step 2 的核对数字是这条简化的看门人。
         if t.starts_with("#else") {
-            if let Some(l) = mstack.last_mut() {
-                *l = None;
-            }
+            let Some(branch) = mstack.last_mut() else {
+                bail!("unmatched preprocessor #else at line {}", i + 1);
+            };
+            *branch = match branch.as_slice() {
+                [Cond::AnyOf(names)] => names.iter().cloned().map(Cond::Not).collect(),
+                [Cond::Not(name)] => vec![Cond::AnyOf(vec![name.clone()])],
+                _ => bail!("unsupported preprocessor alternative at line {}", i + 1),
+            };
             i += 1;
             continue;
         }
@@ -173,7 +184,10 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
         // `write_history_material_ratio_2d`（甲烷模块按「稻区面积强度」写的那一个）。
         // 按更窄的前缀匹配会把它整条漏掉 —— 漏报正是这张表最不能犯的错：
         // GUI 会说「这个内核产不出」，而内核明明写得出来。
-        if t.contains("CALL write_history_") {
+        if spatial_writer.map_or_else(
+            || t.contains("CALL write_history_"),
+            |writer| t.contains(&format!("CALL {writer}")),
+        ) {
             let start = i;
             let mut depth = 0i32;
             let mut buf = String::new();
@@ -193,17 +207,77 @@ pub fn extract_at_least(text: &str, minimum: usize) -> Result<Vec<Var>> {
                     break;
                 }
             }
+            let outer_switch = spatial_writer.and_then(|_| {
+                ifstack
+                    .iter()
+                    .rev()
+                    .filter_map(|frame| frame.current.as_deref())
+                    .find_map(|condition| condition.strip_prefix("DEF_hist_vars%"))
+                    .filter(|name| name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                    .map(str::to_string)
+            });
+            // 没有布尔开关的空间诊断不冒充 DEF_hist_vars 的可编辑成员。
+            if spatial_writer.is_some() && outer_switch.is_none() {
+                continue;
+            }
             let rt = conjunction(
                 ifstack
                     .iter()
                     .filter_map(|frame| frame.current.clone())
+                    .filter(|condition| {
+                        outer_switch
+                            .as_ref()
+                            .is_none_or(|switch| condition != &format!("DEF_hist_vars%{switch}"))
+                    })
                     .chain(inline_runtime(&buf)),
             );
-            let lits = raw_literals(&keyword_literals_removed(&buf));
-            let (long_name, units) = call_metadata(&lits);
-            let dims = call_dimensions(&lits);
-            let switch = first_argument_switch(&buf);
-            for name in literals(&buf) {
+            let lits = raw_literals(&if spatial_writer.is_some() {
+                buf.clone()
+            } else {
+                keyword_literals_removed(&buf)
+            });
+            let (long_name, units) = if spatial_writer == Some("ncio_write_serial_time") {
+                // 直接 NetCDF 写出后的属性调用与数据调用分开；按同名变量读取，
+                // 不把 reservoir/time 维度误当描述和单位。
+                let name = lits
+                    .first()
+                    .ok_or_else(|| anyhow::anyhow!("missing spatial variable name"))?;
+                let attribute = |key: &str| {
+                    lines[i..]
+                        .iter()
+                        .take_while(|line| !line.trim().eq_ignore_ascii_case("ENDIF"))
+                        .find_map(|line| {
+                            let values = raw_literals(strip_comment(line));
+                            (line.contains("CALL ncio_put_attr")
+                                && values.first() == Some(name)
+                                && values.get(1).is_some_and(|value| value == key))
+                            .then(|| values.get(2).cloned())
+                            .flatten()
+                        })
+                };
+                (attribute("long_name"), attribute("units"))
+            } else {
+                call_metadata(&lits)
+            };
+            let dims = match spatial_writer {
+                Some("vector_gather_and_write") => lits.get(1).cloned().into_iter().collect(),
+                Some("route_hist_write_resv" | "ncio_write_serial_time") => {
+                    vec!["reservoir".to_string()]
+                }
+                Some(_) => vec!["hydrounit".to_string()],
+                None => call_dimensions(&lits),
+            };
+            let switch = outer_switch.or_else(|| first_argument_switch(&buf));
+            let names = if spatial_writer.is_some() {
+                // 拼接名保留前缀，不能假称运行时的 size-class 编号已确定。
+                lits.first()
+                    .map(|name| name.strip_prefix("f_").unwrap_or(name).to_string())
+                    .into_iter()
+                    .collect()
+            } else {
+                literals(&buf)
+            };
+            for name in names {
                 let macros: Vec<Cond> = mstack.iter().flatten().cloned().collect();
                 let candidate = Var {
                     name,
@@ -676,7 +750,7 @@ fn ensure_flat(condition: &Option<Sync>, line: &str) -> Result<()> {
 
 /// 渲染入库产物。**按 `name` 排序**，不依赖 `extract` 用的容器 ——
 /// 否则换掉 `BTreeMap` 会让 drift 测试假红。
-pub fn render(vars: &[Var], switches: &[Switch]) -> String {
+pub fn render(vars: &[Var], switches: &[Switch], spatial: &[Var]) -> String {
     let mut s = String::new();
     s.push_str(&format!(
         "//! 由 `cargo run -p xtask -- gen-histmap` 生成。**不要手改。**\n\
@@ -693,6 +767,39 @@ pub fn render(vars: &[Var], switches: &[Switch]) -> String {
          pub static VARS: &[Var] = &[\n",
         count = vars.len()
     ));
+    render_variables(&mut s, vars);
+    s.push_str("];\n\n");
+    s.push_str(
+        "/// `DEF_hist_vars` 的全部开关，按 `history_var_type` 的声明顺序（`MOD_Namelist.F90`）。\n\
+         #[rustfmt::skip]\n\
+         pub static SWITCHES: &[Switch] = &[\n",
+    );
+    for switch in switches {
+        let sync = match &switch.sync {
+            Sync::Always => "Sync::Always".to_string(),
+            Sync::Runtime(condition) => format!("Sync::Runtime({condition:?})"),
+            Sync::Macro(name) => format!("Sync::Macro({name:?})"),
+            Sync::Never => "Sync::Never".to_string(),
+        };
+        let _ = writeln!(
+            s,
+            "    Switch {{ name: {:?}, declared: {}, sync: {sync}, diag_matrix: {} }},",
+            switch.name, switch.declared, switch.diag_matrix
+        );
+    }
+    s.push_str("];\n");
+    if !spatial.is_empty() {
+        s.push_str("\n/// Fortran 空间 writer 的能力证据；名字可能是动态前缀，不是 Rust patch 输出清单。\n");
+        s.push_str("/// 源：HYDRO/MOD_Catch_Hist.F90、HYDRO/MOD_Grid_RiverLakeHist.F90、MATERIAL/FAMILY_PARTICLE/MOD_MT_Sediment.F90。\n");
+        s.push_str("#[rustfmt::skip]\npub static SPATIAL_VARS: &[Var] = &[");
+        s.push('\n');
+        render_variables(&mut s, spatial);
+        s.push_str("];\n");
+    }
+    s
+}
+
+fn render_variables(s: &mut String, vars: &[Var]) {
     let mut sorted: Vec<&Var> = vars.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     for v in sorted {
@@ -730,27 +837,6 @@ pub fn render(vars: &[Var], switches: &[Switch]) -> String {
             v.name, v.line
         );
     }
-    s.push_str("];\n\n");
-    s.push_str(
-        "/// `DEF_hist_vars` 的全部开关，按 `history_var_type` 的声明顺序（`MOD_Namelist.F90`）。\n\
-         #[rustfmt::skip]\n\
-         pub static SWITCHES: &[Switch] = &[\n",
-    );
-    for switch in switches {
-        let sync = match &switch.sync {
-            Sync::Always => "Sync::Always".to_string(),
-            Sync::Runtime(condition) => format!("Sync::Runtime({condition:?})"),
-            Sync::Macro(name) => format!("Sync::Macro({name:?})"),
-            Sync::Never => "Sync::Never".to_string(),
-        };
-        let _ = writeln!(
-            s,
-            "    Switch {{ name: {:?}, declared: {}, sync: {sync}, diag_matrix: {} }},",
-            switch.name, switch.declared, switch.diag_matrix
-        );
-    }
-    s.push_str("];\n");
-    s
 }
 
 fn render_cond(c: &Cond) -> String {
@@ -942,5 +1028,65 @@ mod tests {
         let same = vars.iter().find(|v| v.name == "same").unwrap();
         assert_eq!(same.long_name.as_deref(), Some("first"));
         assert_eq!(same.units.as_deref(), Some("W/m2"));
+    }
+}
+
+#[cfg(test)]
+mod spatial_tests {
+    use super::*;
+
+    #[test]
+    fn spatial_writers_keep_switch_identity_and_compile_and_runtime_gates() {
+        let catch = include_str!("../../vendor/CoLM202X/main/HYDRO/MOD_Catch_Hist.F90");
+        let vars = extract_spatial(catch, "vector_gather_and_write", 7).unwrap();
+        assert_eq!(vars.len(), 7);
+        for switch in ["xsubs_bsn", "xsubs_hru", "wdsrf_hru", "veloc_hru"] {
+            let var = vars
+                .iter()
+                .find(|v| v.switch.as_deref() == Some(switch))
+                .unwrap();
+            assert_eq!(
+                var.macros,
+                vec![Cond::AnyOf(vec!["CatchLateralFlow".into()])]
+            );
+            assert_eq!(
+                var.runtime, None,
+                "the editable switch itself is not a prerequisite"
+            );
+        }
+        let reservoir = extract_spatial(catch, "ncio_write_serial_time", 3).unwrap();
+        assert_eq!(reservoir.len(), 3);
+        assert!(reservoir
+            .iter()
+            .all(|v| v.runtime.as_deref() == Some("DEF_Reservoir_Method > 0")));
+        assert!(reservoir
+            .iter()
+            .all(|v| v.long_name.is_some() && v.units.is_some()));
+        let grid = include_str!("../../vendor/CoLM202X/main/HYDRO/MOD_Grid_RiverLakeHist.F90");
+        let vars = extract_spatial(grid, "route_hist_write_resv", 3).unwrap();
+        assert_eq!(vars.len(), 3);
+        assert!(vars
+            .iter()
+            .all(|v| v.runtime.as_deref() == Some("DEF_Reservoir_Method > 0")));
+        let sediment =
+            include_str!("../../vendor/CoLM202X/main/MATERIAL/FAMILY_PARTICLE/MOD_MT_Sediment.F90");
+        let vars = extract_spatial(sediment, "route_hist_write_ucat", 7).unwrap();
+        assert_eq!(vars.len(), 7);
+        let layer = vars
+            .iter()
+            .find(|v| v.switch.as_deref() == Some("sedlayer"))
+            .unwrap();
+        assert_eq!(layer.name, "layer_");
+        assert_eq!(layer.units.as_deref(), Some("m^3"));
+        assert_eq!(
+            layer.macros,
+            vec![Cond::AnyOf(vec!["GridRiverLakeFlow".into()])]
+        );
+    }
+
+    #[test]
+    fn preprocessor_else_does_not_remove_the_compilation_gate() {
+        let vars = extract_at_least("#ifdef A\n#else\nCALL write_history_variable_2d (DEF_hist_vars%x, a, 'f_x', 'description', 'm')\n#endif\n", 1).unwrap();
+        assert_eq!(vars[0].macros, vec![Cond::Not("A".into())]);
     }
 }

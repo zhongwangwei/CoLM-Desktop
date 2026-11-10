@@ -240,6 +240,7 @@ fn a_report_knows_whether_it_succeeded() {
     // run_stage 本身要跑真二进制，由黄金回归验；这里只钉住这个小判据，
     // 免得它将来被改成「只要没崩就算成功」。
     let r = StageReport {
+        execution: serde_json::Value::Null,
         stage: Stage::Colm,
         outcome: Outcome::Succeeded,
         log: PathBuf::from("/tmp/colm.log"),
@@ -421,6 +422,13 @@ fn an_observed_stage_reports_the_child_it_actually_started() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].0.to_string(), printed, "the child's own PID");
     assert_eq!(seen[0].1, k.dir.join(crate::manifest::program_file("colm")));
+    assert_eq!(
+        report.execution["program"],
+        seen[0].1.to_string_lossy().as_ref()
+    );
+    assert_eq!(report.execution["args"], serde_json::json!(["case.nml"]));
+    assert_eq!(report.execution["launcher_used"], false);
+    assert_eq!(report.execution["ranks"], 1);
 }
 
 #[test]
@@ -446,4 +454,22 @@ fn the_external_launcher_runs_a_plain_executable_on_every_rank() {
             "--case-outputs"
         ]
     );
+}
+
+#[test]
+fn execution_description_uses_final_command_and_does_not_guess_auto_threads() {
+    let mut command = Command::new("/runtime/bin/srun");
+    command.args(["--cpu-bind=cores", "-n", "4", "/model/colm-rs", "case.nml"]);
+    command.env("RAYON_NUM_THREADS", "6");
+    let execution = execution_description(&command, Stage::Colm, 4, true);
+    assert_eq!(execution["program"], "/runtime/bin/srun");
+    assert_eq!(execution["args"][0], "--cpu-bind=cores");
+    assert_eq!(execution["requested_threads"], 6);
+    assert_eq!(execution["thread_mode"], "explicit");
+    assert_eq!(execution["launcher_used"], true);
+    command.env_remove("RAYON_NUM_THREADS");
+    let execution = execution_description(&command, Stage::Colm, 4, true);
+    assert_eq!(execution["thread_mode"], "auto");
+    assert!(execution["requested_threads"].is_null());
+    assert!(execution["rayon_num_threads"].is_null());
 }

@@ -7,6 +7,7 @@ import {
 import type { Overlay } from '../../lib/types';
 import type { SchemaField } from './case-model';
 import type { Descriptor } from '../versions/model';
+import type { FamilyContext } from '../versions/configuration-options';
 export type ModelParameter = Descriptor & {
   subgroup?: string | null;
   subgroup_zh?: string;
@@ -354,6 +355,7 @@ export type ExclusionContext = {
   grid?: string | null;
   // CROP 内核要求 BGC：这时不能靠自动关闭 BGC 来解决冲突，由卡片提示切换内核。
   compiledCrop?: boolean;
+  processFiles?: FamilyContext['processFiles'];
 };
 const processNames: Record<string, [string, string]> = {
   DEF_USE_BGC: ['生物地球化学（BGC）', 'Biogeochemistry (BGC)'],
@@ -362,6 +364,8 @@ const processNames: Record<string, [string, string]> = {
   DEF_USE_GridRiverLakeFlow: ['河湖汇流', 'River-lake routing'],
   DEF_UnitCatchment_regional: ['区域单元汇流', 'Regional unit-catchment routing'],
   DEF_URBAN_RUN: ['城市过程', 'Urban processes'],
+  DEF_USE_METHANE: ['甲烷材料', 'Methane materials'],
+  DEF_USE_SEDIMENT: ['河道泥沙', 'River sediment'],
   material: ['材料过程', 'Material processes'],
 };
 /**
@@ -433,12 +437,44 @@ export function exclusionPatch(
     if (!on(a) || !on(b)) return false;
     return touched(a) && !touched(b) ? close(b, zh, en) : close(a, zh, en);
   };
+  // Only verified active CH4 assets establish a routing dependency; unknown modes stay pending.
+  const methaneNeedsRiver = context.processFiles?.some(
+    (file) =>
+      file.verified &&
+      file.active_methane_asset === true &&
+      file.entries.some(
+        (entry) =>
+          entry.path.toLowerCase() === 'def_methane%inundation_mode' &&
+          !entry.unset &&
+          ['routing', 'hybrid', 'dh_all_thr05', 'dyn_routing_hybrid'].includes(
+            (entry.value ?? '')
+              .trim()
+              .replace(/^(['"])(.*)\1$/, '$2')
+              .toLowerCase(),
+          ),
+      ),
+  );
   for (let round = 0; round < 8; round++) {
     const changed = [
       !!scheme &&
         scheme !== 'PFT' &&
         scheme !== 'PC' &&
         close('DEF_USE_BGC', 'BGC 需要 PFT 或 PC 植被结构', 'BGC requires a PFT or PC structure'),
+      !on('DEF_USE_BGC') &&
+        close('DEF_USE_METHANE', '甲烷材料需要 BGC', 'Methane materials require BGC'),
+      !flagOn(read('DEF_USE_GridRiverLakeFlow'), 'DEF_USE_GridRiverLakeFlow') &&
+        close(
+          'DEF_USE_SEDIMENT',
+          '河道泥沙需要河湖汇流',
+          'River sediment requires river-lake routing',
+        ),
+      !flagOn(read('DEF_USE_GridRiverLakeFlow'), 'DEF_USE_GridRiverLakeFlow') &&
+        methaneNeedsRiver &&
+        close(
+          'DEF_USE_METHANE',
+          '甲烷 routing/hybrid 淹没方案需要河湖汇流',
+          'Methane routing/hybrid inundation requires river-lake routing',
+        ),
       !on('DEF_USE_BGC') &&
         !context.compiledCrop &&
         close('DEF_TUNING_CROP_PLANTING_DAY', '作物过程需要 BGC', 'Crop processes require BGC'),
@@ -700,6 +736,8 @@ const CONFIGURATION_REASONS: Record<string, string> = {
   '流域侧向流的基流优化 Rust 引擎尚未移植，仅 Fortran 引擎生效':
     'Catchment lateral-flow baseflow optimization is not implemented in Rust; applies only to Fortran',
   'SinglePoint 执行路径不会使用这个字段': 'The SinglePoint execution path does not use this field',
+  '单点历史 writer 不使用压缩；此设置仅用于空间/向量历史输出':
+    'Single-point history does not use compression. This setting applies to spatial or vector history',
   'SinglePoint 普通历史文件不使用此压缩设置':
     'Regular SinglePoint history does not use this compression setting',
   '当前内核未启用 HYPERSPECTRAL': 'HYPERSPECTRAL is not enabled in this kernel',
@@ -736,6 +774,8 @@ const CONFIGURATION_REASONS: Record<string, string> = {
     'Site POINT forcing always cycles the same file; this switch does not change reading',
   '当前内核已编入扩展截留模块，8 种方案在 Fortran 引擎里都有计算路径；Rust 引擎只支持 1 与 8':
     'The kernel includes extended interception: Fortran supports all eight schemes, while Rust supports 1 and 8',
+  '当前引擎与内核支持 CoLM2014（1）与 CoLM2024（8）两种方案':
+    'The selected engine and kernel support CoLM2014 (1) and CoLM2024 (8)',
   '当前内核未编入 extend_interception，可用 CoLM2014（1）与 CoLM2024（8）两种方案':
     'This kernel lacks extend_interception; CoLM2014 (1) and CoLM2024 (8) are available',
   '仅 MATSIRO 截留方案使用': 'Only used by the MATSIRO interception scheme',

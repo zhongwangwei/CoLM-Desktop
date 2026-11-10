@@ -96,9 +96,10 @@ fn default_literal(value: colm_schema::Default) -> String {
             if value { ".true." } else { ".false." }.to_string()
         }
         colm_schema::Default::Integer(value) => value.to_string(),
-        colm_schema::Default::Real(value)
-        | colm_schema::Default::Str(value)
-        | colm_schema::Default::Array(value) => value.to_string(),
+        colm_schema::Default::Real(value) => colm_namelist::real_literal(value)
+            .unwrap_or(value)
+            .to_string(),
+        colm_schema::Default::Str(value) | colm_schema::Default::Array(value) => value.to_string(),
     }
 }
 
@@ -998,11 +999,22 @@ pub struct FieldState {
     pub effective_mixed: bool,
 }
 
+fn runtime_is_rust(engine: Option<&str>) -> Result<bool, String> {
+    match engine.unwrap_or("rust") {
+        "rust" => Ok(true),
+        "fortran" => Ok(false),
+        other => Err(format!(
+            "未知模型引擎 {other:?} / Unknown model engine {other:?}"
+        )),
+    }
+}
+
 struct VisibilityContext<'a> {
     doc: &'a colm_namelist::Document,
     have: &'a std::collections::BTreeSet<&'a str>,
     /// 甲烷算例 CH4 参数文件里的淹没方案（读不到算例目录时为 `None`）。
     methane_mode: Option<String>,
+    rust_engine: bool,
     single: bool,
     usgs: bool,
     lct: bool,
@@ -1060,10 +1072,7 @@ pub(crate) fn integer(doc: &colm_namelist::Document, name: &str) -> i64 {
 }
 
 fn parse_real(value: &str) -> Option<f64> {
-    value
-        .split('_')
-        .next()
-        .unwrap_or(value)
+    colm_namelist::real_literal(value)?
         .replace(['d', 'D'], "e")
         .parse()
         .ok()
@@ -1126,6 +1135,7 @@ impl<'a> VisibilityContext<'a> {
             doc,
             have,
             methane_mode: case_dir.and_then(|dir| methane_mode(doc, dir)),
+            rust_engine: true,
             // 单点判据：内核宏优先；但新建算例向导/内核未选时 backend 拿到的是带 SITE_fsitedata
             // 的草稿、宏里还没有 SinglePoint。只看宏会把站点身份字段（SITE_landtype 等）当成可编辑，
             // 界面上就出现“地表覆盖类型 = -1”“从站点文件读取地表类型 = 关”这种迷惑默认值。
@@ -2097,8 +2107,11 @@ fn expert_tuning_runtime_state(
     }
     // Rust 把 CROP 运行时化后，空间 PFT/PC + BGC 算例也可以有正的播种日；
     // 一旦写入了正播种日，这个字段就不能再藏起来，否则用户保存后无法查看或关闭作物过程。
-    let rust_spatial_crop =
-        !c.single && (c.pft || c.pc) && c.bgc && real(c.doc, "DEF_TUNING_CROP_PLANTING_DAY") > 0.0;
+    let rust_spatial_crop = c.rust_engine
+        && !c.single
+        && (c.pft || c.pc)
+        && c.bgc
+        && real(c.doc, "DEF_TUNING_CROP_PLANTING_DAY") > 0.0;
     if name == "DEF_TUNING_CROP_PLANTING_DAY"
         && !(c.single && c.crop && c.cropland())
         && !rust_spatial_crop
@@ -2195,7 +2208,8 @@ fn field_runtime_state(
 
     // Rust 把 CROP 运行时化：空间 PFT/PC + BGC 算例一旦写入正播种日，字段就应可见；
     // 但它 schema 里带 requires=["CROP"]，默认内核会被编译期过滤掉，这里放行。
-    let rust_spatial_planting = name == "DEF_TUNING_CROP_PLANTING_DAY"
+    let rust_spatial_planting = c.rust_engine
+        && name == "DEF_TUNING_CROP_PLANTING_DAY"
         && !c.single
         && (c.pft || c.pc)
         && c.bgc
@@ -2266,14 +2280,16 @@ fn field_runtime_state(
         }
         // 分块只决定 mksrfdata 把地表数据切成哪些块文件（`MOD_Block.F90:104-160`），缺省 72×36 对任何
         // 范围都可用；PIO 分组只用于 Fortran 内核的 MPI IO，Rust 引擎不读。需要时直接改 namelist。
-        if one_of(&[
-            "DEF_BlockInfoFile",
-            "DEF_AverageElementSize",
-            "DEF_nx_blocks",
-            "DEF_ny_blocks",
-            "DEF_PIO_groupsize",
-            "DEF_nIO_eq_nBlock",
-        ]) {
+        if c.rust_engine
+            && one_of(&[
+                "DEF_BlockInfoFile",
+                "DEF_AverageElementSize",
+                "DEF_nx_blocks",
+                "DEF_ny_blocks",
+                "DEF_PIO_groupsize",
+                "DEF_nIO_eq_nBlock",
+            ])
+        {
             return hidden("分块与 MPI IO 分组用缺省值即可，Rust 引擎在进程内多线程运行");
         }
     }
@@ -2307,7 +2323,7 @@ fn field_runtime_state(
             // 与 `colm-rs` 同一判定：选 van Genuchten（不用 Campbell）时上游强制打开变饱和流。
             && (logical(c.doc, "DEF_USE_VariablySaturatedFlow")
                 || !logical(c.doc, "DEF_USE_Campbell_SOIL_MODEL"));
-        if !ready {
+        if c.rust_engine && !ready {
             let reason = "需要：TOPMODEL 产流（0）、LCT 次网格、变饱和流，且不开 LULCC 与城市";
             return if logical(c.doc, name) {
                 (FieldMode::Editable, Some(reason), vec![".false."])
@@ -2336,7 +2352,7 @@ fn field_runtime_state(
     }
     // 平衡检查只在 Fortran 的 `MOD_CheckEquilibrium` 里做；Rust 引擎不读，打开也不会多出诊断输出。
     // 默认关闭，开着也不影响结果，所以照常可改，只注明引擎。
-    if name == "DEF_CheckEquilibrium" {
+    if name == "DEF_CheckEquilibrium" && c.rust_engine {
         return (
             FieldMode::Editable,
             Some("仅 Fortran 引擎生效；Rust 引擎不做平衡检查"),
@@ -2353,6 +2369,7 @@ fn field_runtime_state(
     }
     // 空间基流优化：Rust 只接了单块区域（`ParaOpt` 的分块向量文件还没接，`colm-rs` 在前处理之后才拒绝）。
     if name == "DEF_Optimize_Baseflow"
+        && c.rust_engine
         && !c.single
         && !c.have.contains("CATCHMENT")
         && spatial_blocks(c.doc) > 1
@@ -2386,11 +2403,11 @@ fn field_runtime_state(
         return disabled("由「输出变量」页管理，勾选写在算例目录的 history.nml");
     }
     // Fortran 的读写方式开关，不改变结果；Rust 引擎一次读入整段强迫、同步写 history。
-    if one_of(&["USE_SITE_ForcingReadAhead", "USE_SITE_HistWriteBack"]) {
+    if c.rust_engine && one_of(&["USE_SITE_ForcingReadAhead", "USE_SITE_HistWriteBack"]) {
         return hidden("只影响 Fortran 引擎的读写方式，不改变结果");
     }
     // 单点城市：Rust 的站点地表数据总用站点文件里的城市参数，关掉改读 rawdata 的路径没接。
-    if name.starts_with("USE_SITE_urban_") {
+    if c.rust_engine && name.starts_with("USE_SITE_urban_") {
         return rust_unported(
             !logical(c.doc, name),
             "Rust 引擎总是用站点文件里的城市参数，改读 rawdata 仅 Fortran 引擎生效",
@@ -2399,7 +2416,7 @@ fn field_runtime_state(
     if name == "USE_SITE_LAI" && c.single && c.urban {
         return hidden("城市单点不按这个开关读 LAI");
     }
-    if !c.single {
+    if c.rust_engine && !c.single {
         // Rust 网格历史假定每个 patch 都不被屏蔽（`spatial/history.rs`），2m WMO 虚拟 patch 与
         // 只输出城市都会让它在入口停机。
         if one_of(&["DEF_Output_2mWMO", "DEF_URBAN_ONLY"]) {
@@ -2458,8 +2475,8 @@ fn field_runtime_state(
     {
         return hidden("SinglePoint 执行路径不会使用这个字段");
     }
-    if c.single && name == "DEF_HIST_CompressLevel" && !c.material {
-        return hidden("SinglePoint 普通历史文件不使用此压缩设置");
+    if c.single && name == "DEF_HIST_CompressLevel" {
+        return hidden("单点历史 writer 不使用压缩；此设置仅用于空间/向量历史输出");
     }
     if name == "DEF_TOPMOD_method" && c.runoff != 0 {
         return hidden("仅 TOPMODEL 产流方案使用");
@@ -2509,11 +2526,11 @@ fn field_runtime_state(
     // Rust 只有月尺度 LAI 读取器：`.false.`（8 天 MODIS LAI）时 `colm-rs` 入口拒绝（运行中没有 8 天
     // 读取器，LAI 会停在初值）。缺省 `.true.` 时隐藏；被设成 `.false.` 时显示，只允许改回 `.true.`。
     // 单点城市上游整段不读 LAI，`colm-rs` 也放行，那里保持原样。
-    if name == "DEF_LAI_MONTHLY" && !c.lai_feedback && !(c.single && c.urban) {
+    if c.rust_engine && name == "DEF_LAI_MONTHLY" && !c.lai_feedback && !(c.single && c.urban) {
         return forced_true(c, name, "Rust 引擎只读月尺度 LAI，8 天 LAI 尚未移植");
     }
     // 单点自然站点关掉 USE_SITE_LAI 要从 landdata 的 LAI 文件读，Rust 还没接（`MonthlyLeafAreaIndex::read`）。
-    if name == "USE_SITE_LAI" && c.single && !c.urban {
+    if c.rust_engine && name == "USE_SITE_LAI" && c.single && !c.urban {
         return rust_unported(
             !logical(c.doc, name),
             "Rust 引擎只读站点文件里的 LAI，从 landdata 读取尚未移植，仅 Fortran 引擎生效",
@@ -2621,7 +2638,7 @@ fn field_runtime_state(
     // 不带宏（随软件发布的内核都是这样）时 `main/` 的 `LEAF_interception_wrap`/`_pftwrap`
     // 接受 1（CoLM2014）与 8（CoLM2024），其余档位 `CALL abort`（`MOD_LeafInterception.F90`）。
     if name == "DEF_Interception_scheme" {
-        return if c.have.contains("extend_interception") {
+        return if c.have.contains("extend_interception") && !c.rust_engine {
             (
                 FieldMode::Editable,
                 Some("当前内核已编入扩展截留模块，8 种方案在 Fortran 引擎里都有计算路径；Rust 引擎只支持 1 与 8"),
@@ -2630,7 +2647,7 @@ fn field_runtime_state(
         } else {
             (
                 FieldMode::Editable,
-                Some("当前内核未编入 extend_interception，可用 CoLM2014（1）与 CoLM2024（8）两种方案"),
+                Some("当前引擎与内核支持 CoLM2014（1）与 CoLM2024（8）两种方案"),
                 vec!["1", "8"],
             )
         };
@@ -2667,7 +2684,7 @@ fn field_runtime_state(
     {
         return hidden("没开变饱和流（VSF）时 CoLM 会自动关闭动态湖泊");
     }
-    if name == "DEF_USE_Dynamic_Lake" && c.urban {
+    if c.rust_engine && name == "DEF_USE_Dynamic_Lake" && c.urban {
         return rust_unported(
             logical(c.doc, name),
             "Rust 引擎尚未验证动态湖泊与城市模型同开，仅 Fortran 引擎生效",
@@ -2852,10 +2869,20 @@ fn field_runtime_state(
     (FieldMode::Editable, None, Vec::new())
 }
 
+#[cfg(test)]
 fn field_states_for_at(
     text: &str,
     have: &std::collections::BTreeSet<&str>,
     case_dir: Option<&std::path::Path>,
+) -> Result<Vec<FieldState>, String> {
+    field_states_for_engine_at(text, have, case_dir, None)
+}
+
+fn field_states_for_engine_at(
+    text: &str,
+    have: &std::collections::BTreeSet<&str>,
+    case_dir: Option<&std::path::Path>,
+    engine: Option<&str>,
 ) -> Result<Vec<FieldState>, String> {
     let mut doc = colm_namelist::parse(text).map_err(|e| format!("{e:#}"))?;
     if let Some(dir) = case_dir {
@@ -2863,7 +2890,8 @@ fn field_states_for_at(
         load_forcing_fields(&mut doc, dir)?;
     }
     migrate_legacy_material(&mut doc);
-    let context = VisibilityContext::new_at(&doc, have, case_dir);
+    let mut context = VisibilityContext::new_at(&doc, have, case_dir);
+    context.rust_engine = runtime_is_rust(engine)?;
     // `DEF_wetland_finundation_scheme` 在甲烷算例里按 CH4 参数文件的淹没方案派生，namelist 值不生效。
     let finundation = case_dir
         .and_then(|dir| methane_mode(&doc, dir))
@@ -3103,8 +3131,9 @@ fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
 pub async fn field_states_batch(
     dirs: Vec<String>,
     kernel_dir: String,
+    engine: Option<String>,
 ) -> Result<Vec<FieldState>, String> {
-    tauri::async_runtime::spawn_blocking(move || field_states(dirs, kernel_dir))
+    tauri::async_runtime::spawn_blocking(move || field_states(dirs, kernel_dir, engine.as_deref()))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -3112,6 +3141,7 @@ pub async fn field_states_batch(
 pub(crate) fn field_states(
     dirs: Vec<String>,
     kernel_dir: String,
+    engine: Option<&str>,
 ) -> Result<Vec<FieldState>, String> {
     if dirs.is_empty() {
         return Err("没有可配置的算例".into());
@@ -3124,7 +3154,7 @@ pub(crate) fn field_states(
     let groups: Vec<Vec<FieldState>> = all
         .iter()
         .map(|(dir, text)| {
-            field_states_for_at(text, &have, Some(std::path::Path::new(dir)))
+            field_states_for_engine_at(text, &have, Some(std::path::Path::new(dir)), engine)
                 .map_err(|e| format!("{dir}: {e}"))
         })
         .collect::<Result<_, _>>()?;
@@ -3552,7 +3582,9 @@ fn typed_pft_value(
     colm_case::pft::validate_override(meta.name, number).map_err(|error| format!("{error:#}"))?;
     Ok(match meta.kind {
         colm_case::pft::Kind::Real => colm_namelist::Value::Real {
-            text: raw.trim().to_string(),
+            text: colm_namelist::real_literal(raw)
+                .ok_or("无效实数")?
+                .to_string(),
         },
         colm_case::pft::Kind::Integer => {
             if number.fract() != 0.0 {
@@ -3646,7 +3678,7 @@ fn typed_like(reference: &colm_namelist::Value, raw: &str) -> Result<colm_nameli
         Value::Real { .. } => parse_real(s)
             .filter(|v| v.is_finite())
             .map(|_| Value::Real {
-                text: s.to_string(),
+                text: colm_namelist::real_literal(s).unwrap().to_string(),
             })
             .ok_or_else(|| format!("{raw:?} 不是实数")),
         Value::Str(_) => Ok(Value::Str(s.trim_matches(['\'', '"']).to_string())),
@@ -4929,7 +4961,7 @@ fn typed_scalar(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
                 return Err(format!("{path} is a real; {raw:?} is not finite"));
             }
             Ok(Value::Real {
-                text: s.to_string(),
+                text: colm_namelist::real_literal(s).unwrap().to_string(),
             })
         }
         K::Character { len } => {
@@ -4962,6 +4994,13 @@ fn put(
     path: &str,
     v: colm_namelist::Value,
 ) -> Result<(), String> {
+    if colm_schema::find(schema_name(path)).is_some_and(|field| field.group.is_none())
+        && !schema_name(path).eq_ignore_ascii_case("DEF_USE_CROP")
+    {
+        return Err(format!(
+            "{path} 是只读派生字段 / {path} is a read-only derived field"
+        ));
+    }
     // 组名从 schema 来 —— 那是从 CoLM 自己的声明里扫出来的。
     // schema 不认识的字段只能改不能插：不知道往哪个组插，而插错组等于没设。
     match colm_schema::find(schema_name(path))

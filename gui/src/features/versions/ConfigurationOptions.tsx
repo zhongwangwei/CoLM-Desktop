@@ -167,6 +167,7 @@ export default function ConfigurationOptions({
     source: source.kind === 'draft' ? { ...source, overlay: sourceOverlay } : source,
     caseDir,
     kernelDir,
+    engine: engine ?? null,
     pftSelection: selection,
     caseValues: queryValues,
   });

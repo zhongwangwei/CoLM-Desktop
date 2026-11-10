@@ -95,7 +95,7 @@ fn described_defaults_are_writable_fortran_literals() {
         "DEF_MEDLYN_G0",
         "DEF_WUE_LAMBDA",
     ] {
-        assert_eq!(default(name), "-1.0_r8", "{name}");
+        assert_eq!(default(name), "-1.0", "{name}");
     }
     for name in [
         "DEF_TUNING_ZLND",
@@ -2935,10 +2935,16 @@ fn expert_core_tuning_validation_matches_fortran_limits() {
 }
 
 #[test]
-fn interception_choices_follow_the_kernel_file_selection_macro() {
-    let extended = runtime_states(
-        "&nl_colm\n/\n",
-        &["SinglePoint", "LULC_IGBP", "extend_interception"],
+fn interception_choices_follow_the_engine_and_kernel_file_selection_macro() {
+    let macros = ["SinglePoint", "LULC_IGBP", "extend_interception"]
+        .into_iter()
+        .collect();
+    let extended =
+        field_states_for_engine_at("&nl_colm\n/\n", &macros, None, Some("fortran")).unwrap();
+    let rust = field_states_for_engine_at("&nl_colm\n/\n", &macros, None, Some("rust")).unwrap();
+    assert_eq!(
+        runtime_state(&rust, "DEF_Interception_scheme").allowed_values,
+        ["1", "8"]
     );
     assert_eq!(
         runtime_state(&extended, "DEF_Interception_scheme").allowed_values,
@@ -6001,4 +6007,109 @@ fn startup_history_import_does_not_block_or_repeat() {
         duplicate_rx.try_recv(),
         Err(mpsc::TryRecvError::Disconnected)
     );
+}
+
+#[test]
+fn real_defaults_and_writes_use_readable_namelist_literals() {
+    for field in describe_fields()
+        .iter()
+        .filter(|f| f.kind == "Real" && f.arity.is_none())
+    {
+        let text = format!("&literal\nvalue={}\n/\n", field.default);
+        assert!(
+            colm_namelist::parse(&text).is_ok(),
+            "{}: {}",
+            field.name,
+            field.default
+        );
+        assert!(!field.default.contains("_r8"), "{}", field.name);
+    }
+    for input in ["1.25_r8", "1.25_R4", "1.25D-3_r8"] {
+        let value = typed_scalar("DEF_BALL_BERRY_GRADM", input).unwrap();
+        assert!(!value.to_string().contains('_'));
+        assert!(colm_namelist::parse(&format!("&literal\nvalue={value}\n/\n")).is_ok());
+        assert_eq!(
+            typed_like(&colm_namelist::Value::Real { text: "0.0".into() }, input).unwrap(),
+            value
+        );
+    }
+    for input in ["1.0_garbage", "1.0_r8_more", "NaN_r8", "inf_r8"] {
+        assert!(
+            typed_scalar("DEF_BALL_BERRY_GRADM", input).is_err(),
+            "{input}"
+        );
+        assert!(
+            typed_like(&colm_namelist::Value::Real { text: "0.0".into() }, input).is_err(),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn fortran_fields_are_visible_only_in_their_supported_runtime_context() {
+    let macros = ["SinglePoint", "LULC_IGBP"].into_iter().collect();
+    let text = "&nl_colm\n/\n";
+    let rust = field_states_for_engine_at(text, &macros, None, Some("rust")).unwrap();
+    let fortran = field_states_for_engine_at(text, &macros, None, Some("fortran")).unwrap();
+    for name in ["USE_SITE_ForcingReadAhead", "USE_SITE_HistWriteBack"] {
+        assert!(matches!(runtime_state(&rust, name).mode, FieldMode::Hidden));
+        assert!(matches!(
+            runtime_state(&fortran, name).mode,
+            FieldMode::Editable
+        ));
+    }
+    assert!(field_states_for_engine_at(text, &macros, None, Some("unknown")).is_err());
+}
+
+#[test]
+fn derived_field_write_is_rejected_even_when_already_present() {
+    let field = colm_schema::all()
+        .iter()
+        .find(|f| f.group.is_none() && f.name != "DEF_USE_CROP")
+        .unwrap();
+    let text = format!("&nl_colm\n {}='old'\n/\n", field.name);
+    let mut doc = colm_namelist::parse(&text).unwrap();
+    assert!(put(
+        &mut doc,
+        field.name,
+        colm_namelist::Value::Str("new".into())
+    )
+    .is_err());
+    assert_eq!(doc.to_string(), text);
+    assert!(put(&mut doc, "DEF_USE_CROP", colm_namelist::Value::Bool(true)).is_ok());
+}
+
+#[test]
+fn history_compression_is_hidden_for_all_single_point_material_modes_only() {
+    for methane in [".false.", ".true."] {
+        let text = format!("&nl_colm\n DEF_USE_LCT = .true.\n DEF_USE_METHANE = {methane}\n/\n");
+        let single = runtime_states(&text, &["SinglePoint", "LULC_IGBP"]);
+        let state = runtime_state(&single, "DEF_HIST_CompressLevel");
+        assert_eq!(state.mode, FieldMode::Hidden, "methane={methane}");
+        assert!(state.reason.unwrap().contains("单点历史 writer 不使用压缩"));
+        let spatial = runtime_states(&text, &["LULC_IGBP"]);
+        assert_eq!(
+            mode(&spatial, "DEF_HIST_CompressLevel"),
+            &FieldMode::Editable,
+            "methane={methane}"
+        );
+    }
+}
+
+#[test]
+fn fortran_flood_feedback_keeps_its_supported_runoff_adjustment_path() {
+    let macros = ["GRIDBASED", "GridRiverLakeFlow", "LULC_IGBP"]
+        .into_iter()
+        .collect();
+    let text = "&nl_colm\n DEF_USE_GridRiverLakeFlow=.true.\n DEF_Runoff_SCHEME=3\n/\n";
+    let fortran = field_states_for_engine_at(text, &macros, None, Some("fortran")).unwrap();
+    assert!(matches!(
+        runtime_state(&fortran, "DEF_GridRiverLake_FloodFeedback").mode,
+        FieldMode::Editable
+    ));
+    let rust = field_states_for_engine_at(text, &macros, None, Some("rust")).unwrap();
+    assert!(!matches!(
+        runtime_state(&rust, "DEF_GridRiverLake_FloodFeedback").mode,
+        FieldMode::Editable
+    ));
 }

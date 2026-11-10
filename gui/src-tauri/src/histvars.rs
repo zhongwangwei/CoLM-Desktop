@@ -34,6 +34,7 @@ pub struct HistVar {
 fn switch_long_name(switch: &str) -> Option<String> {
     colm_hist::generated::VARS
         .iter()
+        .chain(colm_hist::generated::SPATIAL_VARS)
         .filter(|var| {
             var.switch
                 .is_some_and(|name| name.eq_ignore_ascii_case(switch))
@@ -95,20 +96,35 @@ pub fn hist_vars(
     text: String,
     kernel_dir: String,
     dir: Option<String>,
+    engine: Option<String>,
 ) -> Result<Vec<HistVar>, String> {
     let k = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
         .map_err(|e| format!("{e:#}"))?;
-    let macros: std::collections::BTreeSet<&str> =
-        k.manifest.macros.iter().map(String::as_str).collect();
     let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
     // 旧算例的 CH4 开关还在 `@@DEF_USE_MATERIAL@@`/`@@DEF_MATERIAL_@@NAMES` 里；不迁移的话
     // 打开旧算例时 methane history 会被判成未启用。
     crate::config::migrate_legacy_material(&mut doc);
+    for_document(
+        &doc,
+        &k,
+        dir.as_deref().map(std::path::Path::new),
+        engine.as_deref(),
+    )
+}
+
+pub(crate) fn for_document(
+    doc: &colm_namelist::Document,
+    kernel: &colm_kernel::Kernel,
+    dir: Option<&std::path::Path>,
+    engine: Option<&str>,
+) -> Result<Vec<HistVar>, String> {
+    let macros: std::collections::BTreeSet<&str> =
+        kernel.manifest.macros.iter().map(String::as_str).collect();
 
     // 输出变量开关在 `DEF_HIST_vars_namelist` 指的文件里（`config::set_fields_batch` 写在那里）。
     let overrides = dir
         .as_ref()
-        .map(|dir| crate::config::history_overrides(&doc, std::path::Path::new(dir)))
+        .map(|dir| crate::config::history_overrides(doc, dir))
         .unwrap_or_default();
     // 开关的最终取值与引擎同一判定（`colm_hist::selection::switch_states`）：声明默认值 →
     // `DEF_HIST_vars_out_default` → 输出变量文件覆盖 → DiagMatrix。
@@ -118,12 +134,12 @@ pub fn hist_vars(
         .collect();
     let switches: std::collections::BTreeMap<String, bool> =
         colm_hist::selection::switch_states(&colm_hist::selection::SelectionInput {
-            out_default: crate::config::logical(&doc, "DEF_HIST_vars_out_default"),
+            out_default: crate::config::logical(doc, "DEF_HIST_vars_out_default"),
             overrides: &listed,
-            runtime: &|condition: &str| Ok(crate::config::logical(&doc, condition)),
+            runtime: &|condition: &str| Ok(crate::config::logical(doc, condition)),
             defined: &|name: &str| macros.contains(name),
-            diag_matrix: crate::config::logical(&doc, "DEF_USE_BGC")
-                && crate::config::logical(&doc, "DEF_USE_DiagMatrix"),
+            diag_matrix: crate::config::logical(doc, "DEF_USE_BGC")
+                && crate::config::logical(doc, "DEF_USE_DiagMatrix"),
         })
         .map(|states| {
             states
@@ -138,20 +154,17 @@ pub fn hist_vars(
             .get(&path.to_ascii_lowercase())
             .copied()
             .or_else(|| overrides.get(path).copied())
-            .unwrap_or_else(|| truth_value(&doc, path).unwrap_or(false))
+            .unwrap_or_else(|| truth_value(doc, path).unwrap_or(false))
     };
-    let gate_truth = |path: &str| -> Option<bool> { truth_value(&doc, path) };
+    let gate_truth = |path: &str| -> Option<bool> { truth_value(doc, path) };
 
     let mut out = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
     for f in colm_schema::all() {
         let Some(name) = f.name.strip_prefix("DEF_hist_vars%") else {
             continue;
         };
         let on = truth(f.name);
-        let (writable, blocked_by) =
-            switch_writability(name, colm_hist::generated::VARS, &macros, &gate_truth);
-        seen.insert(name.to_string());
+        let (writable, blocked_by) = configuration_writability(name, &macros, &gate_truth, engine);
         out.push(HistVar {
             name: name.to_string(),
             on,
@@ -164,9 +177,9 @@ pub fn hist_vars(
     if truth("DEF_USE_METHANE") {
         // 没有开关的这些变量都是 CH4 history（`MOD_Material_Reactive_Methane_Hist`）：写不写、写哪些由
         // CH4 参数文件的 `write_ch4_history`/`ch4_history_vars` 决定，规则与引擎共用 `colm_hist::methane`。
-        let methane = dir.as_ref().and_then(|dir| {
-            crate::config::methane_history_settings(&doc, std::path::Path::new(dir))
-        });
+        let methane = dir
+            .as_ref()
+            .and_then(|dir| crate::config::methane_history_settings(doc, dir));
         let methane_state = |name: &str| -> (bool, Option<bool>, Option<String>) {
             let Some((write, vars)) = &methane else {
                 return (false, Some(false), Some("需要 CH4 甲烷材料".into()));
@@ -199,7 +212,7 @@ pub fn hist_vars(
             }
         };
         for v in colm_hist::generated::VARS {
-            if seen.contains(v.name) {
+            if !is_methane_diagnostic(v) {
                 continue;
             }
             let writable = if let Some(c) = v.macros.iter().find(|c| !c.holds(&macros)) {
@@ -237,6 +250,52 @@ pub fn hist_vars(
         }
     }
     Ok(out)
+}
+
+// 按开关身份去重；主输出中的异名 writer 和无开关常规诊断都不是甲烷变量。
+fn is_methane_diagnostic(var: &colm_hist::Var) -> bool {
+    var.switch.is_none()
+        && var
+            .runtime
+            .is_some_and(|condition| condition.contains("DEF_USE_METHANE"))
+}
+
+fn configuration_writability(
+    switch: &str,
+    macros: &std::collections::BTreeSet<&str>,
+    truth: &impl Fn(&str) -> Option<bool>,
+    engine: Option<&str>,
+) -> (Option<bool>, Option<String>) {
+    let regular = switch_writability(switch, colm_hist::generated::VARS, macros, truth);
+    if regular.0 == Some(true) {
+        return regular;
+    }
+    let spatial = colm_hist::generated::SPATIAL_VARS;
+    if !spatial.iter().any(|var| {
+        var.switch
+            .is_some_and(|name| name.eq_ignore_ascii_case(switch))
+    }) {
+        return regular;
+    }
+    let evidence = switch_writability(switch, spatial, macros, truth);
+    if evidence.0 == Some(false) {
+        // 同一个开关可能同时有 patch 和空间 writer，不能用空间分支的
+        // 不成立覆盖另一路尚未确定的条件。
+        if colm_hist::generated::VARS.iter().any(|var| {
+            var.switch
+                .is_some_and(|name| name.eq_ignore_ascii_case(switch))
+        }) {
+            return regular;
+        }
+        return evidence;
+    }
+    if engine != Some("fortran") {
+        return (
+            None,
+            Some("仅已核对 Fortran 空间写出点；当前运行引擎的输出能力尚未核对".into()),
+        );
+    }
+    evidence
 }
 
 fn truth_value(doc: &colm_namelist::Document, path: &str) -> Option<bool> {

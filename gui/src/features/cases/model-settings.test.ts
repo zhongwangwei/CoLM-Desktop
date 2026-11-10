@@ -230,6 +230,7 @@ test('model settings guide exposes classification only with a callback and catal
     return { ...contract, actions: [...contract.actions, ...rendered] };
   };
   let result = render();
+  assert.match(JSON.stringify(nodes), /新建时选择 PFT \/ PC 会自动使用 IGBP 地类数据/);
   const settings = nodes.find((node) => typeof node.props.hasSettings === 'function')!.props
     .hasSettings as (id: string) => boolean;
   assert.equal(settings('soil'), false, 'hydraulic choices have no separate settings dialog');
@@ -707,4 +708,83 @@ test('PFT and PC backend applicability reasons have English translations', async
     assert.doesNotMatch(configurationReason(reason, true) ?? '', /[\u4e00-\u9fff]/, reason);
     assert.equal(configurationReason(reason, false), reason);
   }
+});
+
+test('parent process closure affects dependent material families and reaches a fixed point', async () => {
+  const { exclusionPatch, autoClosedText } = await import('./model-settings');
+  const on = '.true.',
+    off = '.false.';
+  const current = {
+    DEF_USE_BGC: on,
+    DEF_USE_METHANE: on,
+    DEF_USE_ISOTOPE: on,
+    DEF_USE_SEDIMENT: on,
+    DEF_SOLUTE_NAMES: "'Cl'",
+    DEF_USE_GridRiverLakeFlow: on,
+  };
+  const context = { subgrid: 'PFT', domain: 'region', grid: 'latlon' };
+  const bgc = exclusionPatch(current, { DEF_USE_BGC: off }, context);
+  assert.equal(bgc.patch.DEF_USE_METHANE, off);
+  for (const key of ['DEF_USE_ISOTOPE', 'DEF_USE_SEDIMENT', 'DEF_SOLUTE_NAMES'])
+    assert.equal(bgc.patch[key], undefined);
+  assert.match(autoClosedText(bgc.closed, false), /甲烷材料.*BGC/);
+  assert.match(autoClosedText(bgc.closed, true), /Methane materials.*BGC/);
+  const river = exclusionPatch(current, { DEF_USE_GridRiverLakeFlow: off }, context);
+  assert.equal(river.patch.DEF_USE_SEDIMENT, off);
+  for (const key of ['DEF_USE_METHANE', 'DEF_USE_ISOTOPE', 'DEF_SOLUTE_NAMES'])
+    assert.equal(river.patch[key], undefined);
+  const cascade = exclusionPatch(current, { DEF_USE_LCT: on }, { ...context, subgrid: 'IGBP' });
+  assert.equal(cascade.patch.DEF_USE_BGC, off);
+  assert.equal(cascade.patch.DEF_USE_METHANE, off);
+  const site = exclusionPatch(current, {}, { subgrid: 'PFT', domain: 'site' });
+  assert.equal(site.patch.DEF_USE_GridRiverLakeFlow, off);
+  assert.equal(site.patch.DEF_USE_SEDIMENT, off);
+  const combined = { ...current, ...bgc.patch } as Record<string, string>;
+  assert.deepEqual(exclusionPatch(combined, {}, context).closed, []);
+});
+
+test('only verified active routing methane modes close with river routing', async () => {
+  const { exclusionPatch } = await import('./model-settings');
+  const processFiles = (
+    mode: string,
+    verified = true,
+    active = true,
+  ): NonNullable<import('./model-settings').ExclusionContext['processFiles']> => [
+    {
+      file: 'methane.nml',
+      title: '',
+      section: '',
+      verified,
+      active_methane_asset: active,
+      entries: [
+        {
+          path: 'DEF_METHANE%inundation_mode',
+          value: mode,
+          unset: false,
+          group: 'methane',
+          kind: 'choice',
+          asset_value: mode,
+          default: 'wetwat',
+          options: [],
+          editable: true,
+          descriptor_id: null,
+          pending: false,
+        },
+      ],
+    },
+  ];
+  const current = { DEF_USE_BGC: '.true.', DEF_USE_METHANE: '.true.' };
+  const patch = { DEF_USE_GridRiverLakeFlow: '.false.' };
+  const result = (mode: string, verified = true, active = true) =>
+    exclusionPatch(current, patch, {
+      subgrid: 'PFT',
+      processFiles: processFiles(mode, verified, active),
+    });
+  for (const mode of ['routing', "'HYBRID'", 'dh_all_thr05', 'dyn_routing_hybrid']) {
+    assert.equal(result(mode).patch.DEF_USE_METHANE, '.false.');
+    assert.equal(result(mode, false).patch.DEF_USE_METHANE, undefined);
+    assert.equal(result(mode, true, false).patch.DEF_USE_METHANE, undefined);
+  }
+  for (const mode of ['wetwat', 'satellite', 'giems', 'dynamic_wtd', 'dynamic-wtd', 'future', ''])
+    assert.equal(result(mode).patch.DEF_USE_METHANE, undefined);
 });

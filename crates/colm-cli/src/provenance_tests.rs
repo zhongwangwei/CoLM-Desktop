@@ -234,3 +234,34 @@ fn disabled_recording_keeps_sources_without_program_or_output_hashes() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn provenance_records_only_local_execution_environment_without_guessing_defaults() {
+    let case = case_dir("execution-env");
+    let version = Version::Official;
+    let mut run = record(&case, &case, &version);
+    let local = value(&run, true, None);
+    assert_eq!(local["execution_environment"], execution_environment());
+    assert_eq!(local["execution_environment"].as_object().unwrap().len(), 3);
+    run.location = "server";
+    assert!(value(&run, true, None)
+        .get("execution_environment")
+        .is_none());
+    std::fs::remove_dir_all(case).unwrap();
+}
+
+#[test]
+fn provenance_keeps_actual_stage_commands_including_launcher_arguments() {
+    let case = case_dir("launches");
+    let version = Version::Official;
+    let run = record(&case, &case, &version);
+    let launch = json!({"stage":"colm", "program":"/runtime/srun", "args":["-n", "4", "colm-rs", "case.nml"], "launcher_used":true, "ranks":4});
+    append_execution(&case, &launch).unwrap();
+    assert_eq!(
+        value(&run, true, None)["execution_launches"],
+        json!([launch])
+    );
+    std::fs::write(case.join(EXECUTIONS_FILE), "").unwrap();
+    assert_eq!(value(&run, true, None)["execution_launches"], json!([]));
+    std::fs::remove_dir_all(case).unwrap();
+}

@@ -587,6 +587,10 @@ export const commandContract = {
     "kernelDir": {
       "required": true,
       "rust_type": "String"
+    },
+    "engine": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "case_land_cover": {
@@ -1118,6 +1122,10 @@ export const commandContract = {
     "dir": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "engine": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "print_report": {},
@@ -1462,6 +1470,10 @@ export const commandContract = {
     "caseValues": {
       "required": false,
       "rust_type": "Option<std::collections::BTreeMap<String, String>>"
+    },
+    "engine": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "probe_observation_table": {

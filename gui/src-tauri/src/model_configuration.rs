@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 pub(crate) fn query(
     root: &Path,
     source: ConfigurationSource,
@@ -14,6 +15,26 @@ pub(crate) fn query(
     kernel_dir: Option<&str>,
     selection: Option<PftSelection>,
     case_values: Option<BTreeMap<String, String>>,
+) -> Result<Value, String> {
+    query_for_engine(
+        root,
+        source,
+        case_dir,
+        kernel_dir,
+        selection,
+        case_values,
+        None,
+    )
+}
+
+pub(crate) fn query_for_engine(
+    root: &Path,
+    source: ConfigurationSource,
+    case_dir: Option<&str>,
+    kernel_dir: Option<&str>,
+    selection: Option<PftSelection>,
+    case_values: Option<BTreeMap<String, String>>,
+    engine: Option<&str>,
 ) -> Result<Value, String> {
     // Registry::open creates these directories; a read query requires an existing registry.
     if !root.join("versions").is_dir() || !root.join("drafts").is_dir() {
@@ -87,6 +108,7 @@ pub(crate) fn query(
         kernel.is_some(),
     )?;
     let mut context = VisibilityContext::new_at(&doc, &have, case.as_deref());
+    context.rust_engine = runtime_is_rust(engine)?;
     // Resolve CH4 from verified model assets after process overrides, not the source case file.
     context.methane_mode = files
         .iter()
@@ -158,13 +180,18 @@ pub(crate) fn query(
             )
         })
         .collect();
+    let history_variables = kernel
+        .as_ref()
+        .map(|kernel| crate::histvars::for_document(&doc, kernel, case.as_deref(), engine))
+        .transpose()?
+        .unwrap_or_default();
     let pft = pft_parameters(&overlay, selection, &doc, kernel.as_ref().map(|_| &have))?;
     let crop_defaults: BTreeMap<_, _> = colm_case::crop_defaults()
         .into_iter()
         .map(|(name, value)| (name, value.to_string()))
         .collect();
     Ok(
-        json!({"identity":identity,"fields":fields,"process_files":files,"pft_parameters":pft,"crop_defaults":crop_defaults,"history_switches":history_switches,
+        json!({"identity":identity,"fields":fields,"process_files":files,"pft_parameters":pft,"crop_defaults":crop_defaults,"history_switches":history_switches,"history_variables":history_variables,
         "context_complete":false,"warnings":["当前目录用于发现配置；未读取所选冻结源码的默认值，最终适用性仍需运行前检查。"]}),
     )
 }
@@ -333,7 +360,7 @@ fn confirmed_gate(
                 && matches!(
                     reason,
                     Some("SinglePoint 执行路径不会使用这个字段")
-                        | Some("SinglePoint 普通历史文件不使用此压缩设置")
+                        | Some("单点历史 writer 不使用压缩；此设置仅用于空间/向量历史输出")
                 )
             || matches!(reason, Some("只有非结构网格内核写向量历史"))
                 && !have.contains("UNSTRUCTURED"))

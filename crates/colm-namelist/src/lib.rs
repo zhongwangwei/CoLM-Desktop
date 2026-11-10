@@ -21,4 +21,4 @@ pub mod value;
 
 pub use document::Document;
 pub use parse::parse;
-pub use value::{Path, Segment, Value};
+pub use value::{real_literal, Path, Segment, Value};

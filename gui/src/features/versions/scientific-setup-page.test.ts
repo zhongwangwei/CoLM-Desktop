@@ -550,3 +550,16 @@ test('English cards translate a disabled backend configuration reason', async ()
   assert.ok(!text.includes('当前内核未编入这个功能'));
   assert.ok(text.includes(configurationReason('当前内核未编入这个功能', true)!));
 });
+
+test('engine changes refresh scientific configuration and ignore the previous engine response', async () => {
+  const h = harness();
+  h.props.environment.engine = 'rust';
+  h.render();
+  assert.equal(h.requests[0].args.engine, 'rust');
+  h.props.environment.engine = 'fortran';
+  h.render();
+  assert.equal(h.requests.length, 2);
+  assert.equal(h.requests[1].args.engine, 'fortran');
+  assert.equal((await h.resolve(0)).status, 'loading');
+  assert.notEqual((await h.resolve(1)).status, 'loading');
+});

@@ -161,6 +161,11 @@ export interface ResultMetric {
   correlation?: number | null;
   alpha?: number | null;
   beta?: number | null;
+  model_mean?: number | null;
+  obs_mean?: number | null;
+  model_sd?: number | null;
+  obs_sd?: number | null;
+
   [key: string]: unknown;
 }
 export interface ResultReport {

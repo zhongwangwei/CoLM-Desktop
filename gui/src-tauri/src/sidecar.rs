@@ -404,6 +404,13 @@ pub(crate) struct RunningIdentity {
     pub startup_lock: Option<StudyLockSnapshot>,
 }
 
+fn run_process_key(key: &str) -> Result<String, String> {
+    match key.strip_prefix("study:") {
+        Some(dir) => creation_key(dir).map(|dir| format!("study:{dir}")),
+        None => creation_key(key),
+    }
+}
+
 impl RunProcesses {
     /// Hold the launch registry while removing generated output, so no GUI run starts mid-delete.
     pub(crate) fn with_idle<T>(
@@ -455,6 +462,10 @@ impl RunProcesses {
     }
 
     fn reserve(state: &mut RunProcessState, keys: &[String]) -> Result<(), String> {
+        let keys = keys
+            .iter()
+            .map(|key| run_process_key(key))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut unique = HashSet::with_capacity(keys.len());
         if let Some(key) = keys.iter().find(|key| !unique.insert(key.as_str())) {
             return Err(format!("duplicate case in one run request: {key}"));
@@ -475,6 +486,8 @@ impl RunProcesses {
 
     /// Register a Study run together with the ID that will claim its `run.lock` on cancellation.
     fn prepare_study_run(&self, key: &str, run_id: &str) -> Result<(), String> {
+        let normalized = run_process_key(key)?;
+        let key = normalized.as_str();
         let mut state = self
             .inner
             .lock()
@@ -489,6 +502,8 @@ impl RunProcesses {
     /// Returns false when cancellation won the race between spawn and PID
     /// registration. The caller must terminate the just-spawned process tree.
     fn remember(&self, key: &str, pid: u32) -> Result<bool, String> {
+        let normalized = run_process_key(key)?;
+        let key = normalized.as_str();
         let mut state = self
             .inner
             .lock()
@@ -506,6 +521,8 @@ impl RunProcesses {
     }
 
     fn take_cancelled(&self, key: &str) -> Result<bool, String> {
+        let normalized = run_process_key(key)?;
+        let key = normalized.as_str();
         let mut state = self
             .inner
             .lock()
@@ -518,6 +535,8 @@ impl RunProcesses {
     }
 
     fn forget(&self, key: &str) -> Result<bool, String> {
+        let normalized = run_process_key(key)?;
+        let key = normalized.as_str();
         let mut state = self
             .inner
             .lock()
@@ -534,6 +553,8 @@ impl RunProcesses {
     /// 后台轮询只收运行还在登记表里的结果：进程已退出（`forget` 之后）或取消已开始，
     /// 迟到的锁身份不能留给同一研究目录的下一次运行。
     fn remember_startup_lock(&self, key: &str, lock: StudyLockSnapshot) -> Result<(), String> {
+        let normalized = run_process_key(key)?;
+        let key = normalized.as_str();
         let mut state = self
             .inner
             .lock()
@@ -546,6 +567,8 @@ impl RunProcesses {
 
     /// 后台观察线程用：运行结束或被取消后就不必再读 `run.lock`。
     fn study_run_active(&self, key: &str) -> Result<bool, String> {
+        let normalized = run_process_key(key)?;
+        let key = normalized.as_str();
         self.inner
             .lock()
             .map_err(|_| "run process registry poisoned".to_string())
@@ -556,6 +579,8 @@ impl RunProcesses {
     /// 与运行 ID 在同一把锁下取出）。
     #[cfg(test)]
     fn running_pid(&self, key: &str) -> Result<Option<u32>, String> {
+        let normalized = run_process_key(key)?;
+        let key = normalized.as_str();
         self.inner
             .lock()
             .map_err(|_| "run process registry poisoned".to_string())
@@ -566,6 +591,8 @@ impl RunProcesses {
     /// ID 认领研究锁、用锁身份否决裸锁。三者必须在同一把锁下读取，否则中途 `forget` 会把
     /// 它们拆成不匹配的几半。
     fn running_identity(&self, key: &str) -> Result<Option<RunningIdentity>, String> {
+        let normalized = run_process_key(key)?;
+        let key = normalized.as_str();
         let state = self
             .inner
             .lock()
@@ -679,6 +706,13 @@ impl RunProcesses {
     }
 
     pub(crate) fn cancel(&self, keys: Option<Vec<String>>) -> Result<usize, String> {
+        let keys = keys
+            .map(|keys| {
+                keys.iter()
+                    .map(|key| run_process_key(key))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?;
         let (requested, targets) = {
             let mut state = self
                 .inner
@@ -1306,9 +1340,13 @@ pub async fn cancel_runs(
     cases: Option<Vec<String>>,
 ) -> Result<usize, String> {
     let processes = processes.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || processes.cancel(cases))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let migrations = migration_processes().cancel(cases.clone());
+        let runs = processes.cancel(cases);
+        Ok(migrations? + runs?)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 不写本机运行状态、因而不在 `RunProcesses` 里的 `colm-cli` 子进程：远程提交/编引擎/取回，以及
@@ -1436,7 +1474,9 @@ pub(crate) fn kill_remote_child(pid: u32) -> Result<(), String> {
 
 /// 终止所有登记的子进程（远程与数据准备）；返回成功发出终止的个数。关窗/退出时调用。
 pub(crate) fn cancel_detached_children() -> Result<usize, String> {
-    cancel_children_where(|_| true)
+    let migrations = migration_processes().cancel(None);
+    let detached = cancel_children_where(|_| true);
+    Ok(migrations? + detached?)
 }
 
 fn cancel_children_where(wanted: impl Fn(&ChildOwner) -> bool) -> Result<usize, String> {
@@ -1947,7 +1987,7 @@ fn run_args(
     validate_engine(engine)?;
     validate_model_version(model_version)?;
     if mpi_ranks == 0 || mpi_ranks > 4096 {
-        return Err("mpiRanks must be between 1 and 4096".into());
+        return Err("MPI 进程数须为 1–4096 / mpiRanks must be between 1 and 4096".into());
     }
     let mut args = vec![
         "run".to_string(),
@@ -2372,24 +2412,20 @@ fn run_batch_blocking(
     validate_engine(engine.as_deref())?;
     validate_model_version(model_version.as_deref())?;
     if mpi_ranks == 0 || mpi_ranks > 4096 {
-        return Err("mpiRanks must be between 1 and 4096".into());
+        return Err("MPI 进程数须为 1–4096 / mpiRanks must be between 1 and 4096".into());
     }
     if threads.is_some_and(|threads| threads == 0 || threads > 4096) {
-        return Err("threads must be between 1 and 4096".into());
+        return Err("线程数须为 1–4096 / threads must be between 1 and 4096".into());
     }
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    // run_one preserves an inherited Rayon setting over the GUI thread count.
-    let threads = std::env::var_os("RAYON_NUM_THREADS")
-        .map(|value| {
-            value
-                .to_str()
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|value| *value > 0)
-                .unwrap_or(available)
-        })
-        .or(threads);
+    // 显式界面设置优先，批量调度预算必须与子进程实际收到的值一致。
+    let threads = effective_threads(
+        threads,
+        std::env::var_os("RAYON_NUM_THREADS").as_deref(),
+        available,
+    );
     let total = cases.len();
     processes.prepare(&cases)?;
     let per_case = batch_cpu_budget(
@@ -2517,7 +2553,7 @@ fn run_case_blocking(
     record_input_fingerprints: Option<bool>,
 ) -> Result<i32, String> {
     if threads.is_some_and(|threads| threads == 0 || threads > 4096) {
-        return Err("threads must be between 1 and 4096".into());
+        return Err("线程数须为 1–4096 / threads must be between 1 and 4096".into());
     }
     processes.prepare(std::slice::from_ref(&case))?;
     run_one(
@@ -2551,6 +2587,43 @@ fn released_on_error<T>(
     })
 }
 
+fn effective_threads(
+    explicit: Option<usize>,
+    inherited: Option<&OsStr>,
+    available: usize,
+) -> Option<usize> {
+    explicit.or_else(|| {
+        inherited.map(|value| {
+            value
+                .to_str()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(available)
+        })
+    })
+}
+
+fn configure_run_threads(command: &mut std::process::Command, threads: Option<usize>) {
+    if let Some(threads) = threads {
+        command.env("RAYON_NUM_THREADS", threads.to_string());
+    }
+}
+
+fn execution_environment(command: &std::process::Command) -> serde_json::Value {
+    let mut environment = serde_json::Map::new();
+    for key in ["RAYON_NUM_THREADS", "COLM_MPIEXEC", "COLM_MPIEXEC_ARGS"] {
+        let value = command
+            .get_envs()
+            .find(|(name, _)| *name == OsStr::new(key))
+            .map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| {
+                std::env::var_os(key).map(|value| value.to_string_lossy().into_owned())
+            });
+        environment.insert(key.into(), serde_json::json!(value));
+    }
+    serde_json::Value::Object(environment)
+}
+
 /// `run_case` 里除去日志缓冲区那部分的逻辑，批量与单算例共用。
 #[allow(clippy::too_many_arguments)]
 fn run_one(
@@ -2571,17 +2644,19 @@ fn run_one(
 ) -> Result<i32, String> {
     let cli = resolve_cli();
     let mut cmd = sidecar_command(&cli);
-    // 用户自己在环境里设了就听用户的。
-    if let Some(threads) = threads.filter(|_| std::env::var_os("RAYON_NUM_THREADS").is_none()) {
-        cmd.env("RAYON_NUM_THREADS", threads.to_string());
-    }
+    // 显式设置覆盖继承环境；未指定时仍继承用户环境。
+    configure_run_threads(&mut cmd, threads);
     let (mut args, event) = released_on_error(processes, case, || {
         crate::remote::server_case_args(case, "")?;
         let mut args = run_args(case, kernel, force, stage, mpi_ranks, engine, model_version)?;
         add_input_fingerprints(&mut args, record_input_fingerprints);
         crate::model::options(&mut args, model_revision)?;
         add_preprocessors(&mut args, preprocessors)?;
-        let event = crate::history::command_start_for_run(&args, Some(run_id))?;
+        let event = crate::history::command_start_for_execution(
+            &args,
+            Some(run_id),
+            Some(execution_environment(&cmd)),
+        )?;
         Ok((args, event))
     })?;
     if let Some(event) = &event {
@@ -3514,7 +3589,7 @@ pub async fn study_parameter_contexts(
     if choices.spatial {
         return spatial_study_rows(&dirs, &kernel_dir, &choices, &types.unwrap_or_default());
     }
-    let field_states = crate::config::field_states(dirs.clone(), kernel_dir.clone())?;
+    let field_states = crate::config::field_states(dirs.clone(), kernel_dir.clone(), None)?;
     let fields = field_states
         .iter()
         .map(|state| (state.name.to_ascii_lowercase(), state))
@@ -3779,7 +3854,7 @@ fn spatial_study_rows(
     choices: &StudyTypeChoices,
     types: &[u8],
 ) -> Result<Vec<StudyParameterContextRow>, String> {
-    let field_states = crate::config::field_states(dirs.to_vec(), kernel_dir.to_string())?;
+    let field_states = crate::config::field_states(dirs.to_vec(), kernel_dir.to_string(), None)?;
     let fields = field_states
         .iter()
         .map(|state| (state.name.to_ascii_lowercase(), state))
@@ -5028,6 +5103,82 @@ pub async fn hybrid_fit(request: FitRequest) -> Result<serde_json::Value, String
     }))
 }
 
+static MIGRATION_PROCESSES: OnceLock<RunProcesses> = OnceLock::new();
+fn migration_processes() -> &'static RunProcesses {
+    MIGRATION_PROCESSES.get_or_init(RunProcesses::default)
+}
+
+/// 迁移属于具体算例，停止运行也要停止它；登记先于后台调度，避免启动间隙丢失取消。
+pub(crate) async fn capture_migration(
+    mut args: Vec<String>,
+    prepare_inputs: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<String, String> {
+    let activity = crate::model::BindingChange::begin()?;
+    let case = args.get(1).ok_or("missing migration case")?.clone();
+    migration_processes().prepare(std::slice::from_ref(&case))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
+        let processes = migration_processes();
+        let event = match prepare_inputs().and_then(|()| crate::history::command_start(&args)) {
+            Ok(event) => event,
+            Err(error) => {
+                let _ = processes.forget(&case);
+                return Err(error);
+            }
+        };
+        if let Some(event) = &event {
+            args.extend(["--operation-id".into(), event.operation_id.clone()]);
+        }
+        let mut command = sidecar_command(&resolve_cli());
+        command.args(&args);
+        let result = capture_registered_command(&mut command, processes, &case, event.as_ref());
+        let cancelled = processes.forget(&case)?;
+        crate::history::command_finish(
+            event.as_ref(),
+            result,
+            if cancelled { "cancelled" } else { "succeeded" },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn capture_registered_command(
+    command: &mut std::process::Command,
+    processes: &RunProcesses,
+    case: &str,
+    event: Option<&colm_history::Event>,
+) -> Result<String, String> {
+    // 不消耗取消标记，终态审计与后续启动检查都需要它。
+    if processes
+        .inner
+        .lock()
+        .map_err(|_| "run process registry poisoned")?
+        .cancelled
+        .contains(&run_process_key(case)?)
+    {
+        return Err("迁移已取消 / Migration cancelled".into());
+    }
+    let mut child = colm_kernel::run::top_level_sidecar(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    remember_process(processes, case, &mut child)?;
+    if let Some(event) = event {
+        crate::live_runs::bind_operation(child.id(), &event.operation_id);
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(format!(
+            "迁移未完成 / Migration did not finish: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 pub(crate) async fn capture_async(args: Vec<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || capture(&args))
         .await
@@ -5120,7 +5271,9 @@ pub(crate) fn add_preprocessors(args: &mut Vec<String>, value: Option<&str>) -> 
             args.extend(["--preprocessors".into(), value.unwrap().into()]);
             Ok(())
         }
-        Some(_) => Err("preprocessors must be rust or fortran".into()),
+        Some(_) => {
+            Err("前处理引擎须为 rust 或 fortran / preprocessors must be rust or fortran".into())
+        }
     }
 }
 

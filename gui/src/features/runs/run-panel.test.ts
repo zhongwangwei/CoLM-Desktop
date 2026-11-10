@@ -21,7 +21,8 @@ import {
   parallelBudgetPlan,
 } from './run-model';
 import { eachLimited, runRemoteBatch } from './remote-batch';
-import { compatibleKernel, submittedRanks } from './run-model';
+import { compatibleKernel, submittedRanks, kernelRunProblem } from './run-model';
+import { cropEnabled, effectiveModelFields } from '../cases/case-model';
 import { applyRunEvent } from '../../lib/run-events';
 import type { RunState } from '../../lib/types';
 
@@ -33,6 +34,7 @@ function panel(
     remoteBatch?: boolean;
     recordInputFingerprints?: boolean;
     ranks?: string;
+    kernelMacros?: string[];
     ipc?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
     single?: boolean;
     targets?: string[];
@@ -76,6 +78,10 @@ function panel(
   visit(source);
   const state = {
     running: {} as Record<string, RunState>,
+    kernels: [
+      { dir: '/kernel', macros: options.kernelMacros ?? ['SinglePoint', 'LULC_IGBP', 'USEMPI'] },
+    ],
+    version: undefined,
     versionRef: { id: 'chosen', revision: 2 },
     selectedCase: { dir: '/good', binding: { version: { id: 'old', revision: 1 } } },
   };
@@ -151,6 +157,11 @@ function panel(
     recovering: false,
     disabled: false,
     kernelMatches: true,
+    effectiveProfile: { crop: false },
+    batchProfiles: undefined,
+    kernelRunProblem,
+    cropEnabled,
+    effectiveModelFields,
     kernel: '/kernel',
     engine: options.engine ?? 'rust',
     preprocessors: 'rust',
@@ -1304,4 +1315,10 @@ test('one Rust site stays single-process and single-threaded on a server', async
   assert.equal(submitted.args.ranks, 1);
   assert.equal(submitted.args.threads, 1);
   assert.equal(submitted.args.cpus, 1);
+});
+
+test('known kernel conflicts stop before migration or submission', async () => {
+  const p = panel({ engine: 'fortran', ranks: '2', kernelMacros: ['SinglePoint', 'LULC_IGBP'] });
+  await assert.rejects(p.run(), /USEMPI/);
+  assert.deepEqual(p.calls, []);
 });

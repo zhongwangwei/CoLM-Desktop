@@ -27,6 +27,8 @@ pub enum ParameterScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Storage {
+    /// Legacy schema-family tag, including forcing/history/isotope fields.
+    /// Use `storage_target` for the actual write destination.
     CaseNml,
     PftOverride,
     PcPftOverride,
@@ -84,8 +86,12 @@ pub struct ParameterDescriptor {
     pub subgroup_en: String,
     pub scope: ParameterScope,
     pub storage: Storage,
+    /// Concrete schema destination; absent for derived fields and scoped/process writers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_target: Option<String>,
     pub value_kind: String,
     pub unit: Option<String>,
+    /// Static catalog classification, not runtime activation or writer availability.
     pub visibility: Visibility,
     pub activation: Vec<String>,
     pub default: Option<String>,
@@ -228,7 +234,21 @@ fn schema_descriptor(
         || lc.is_some())
         && matches!(field.kind, colm_schema::FieldKind::Real)
         && !structural_parameter;
-    let source_location = format!("MOD_Namelist.F90:{}", field.line);
+    // Sediment is declared in MOD_Namelist and imported by the material namelist.
+    let source_file = match (field.name, field.group) {
+        ("DEF_USE_SEDIMENT", _) => "MOD_Namelist.F90",
+        ("DEF_USE_NH4_LEACHING", _) => "MOD_MT_Namelist.F90",
+        (_, Some("nl_colm_material" | "nl_colm_isotope_parameter")) => "MOD_MT_Namelist.F90",
+        _ => "MOD_Namelist.F90",
+    };
+    let source_location = format!("{source_file}:{}", field.line);
+    let storage_target = match field.group {
+        Some("nl_colm_forcing") => Some("forcing.nml"),
+        Some("nl_colm_history") => Some("history.nml"),
+        Some("nl_colm_isotope_parameter") => Some("DEF_ISOTOPE_PARAM_FILE"),
+        Some(_) => Some("case.nml"),
+        None => None,
+    };
     let doc = field.doc.map(str::to_string);
     ParameterDescriptor {
         catalog_version: CATALOG_VERSION,
@@ -250,6 +270,7 @@ fn schema_descriptor(
             ParameterScope::CaseScalar
         },
         storage: Storage::CaseNml,
+        storage_target: storage_target.map(str::to_string),
         value_kind: schema_kind(field.kind),
         unit,
         visibility: if field.group.is_some() {
@@ -264,11 +285,10 @@ fn schema_descriptor(
         activation: field.requires.iter().map(|x| x.to_string()).collect(),
         default: Some(default_value(field.default)),
         default_provider: if lc.is_some() {
-            "MOD_Const_LC.F90 contextual IGBP/USGS table"
+            "MOD_Const_LC.F90 contextual IGBP/USGS table".into()
         } else {
-            "MOD_Namelist.F90 declaration"
-        }
-        .into(),
+            format!("{source_file} declaration")
+        },
         validation: match lc.and_then(|m| crate::land_cover::bounds(m.name)) {
             Some(bounds) => bounded(
                 bounds,
@@ -284,8 +304,8 @@ fn schema_descriptor(
                 finite: matches!(field.kind, colm_schema::FieldKind::Real),
             },
         },
-        write_strategy: if field.group.is_some() {
-            "write sparse explicit override to case.nml only when user changes it".into()
+        write_strategy: if let Some(target) = storage_target {
+            format!("write sparse explicit override to {target} only when user changes it")
         } else {
             "read-only derived value; do not write".into()
         },
@@ -332,6 +352,7 @@ fn pft_descriptor(meta: &crate::pft::ParameterMeta, pc: bool) -> ParameterDescri
         } else {
             Storage::PftOverride
         },
+        storage_target: None,
         value_kind: match meta.kind {
             crate::pft::Kind::Real => "real",
             crate::pft::Kind::Integer => "integer",
@@ -395,6 +416,7 @@ fn process_descriptor(field: process::ProcessDefault) -> ParameterDescriptor {
         subgroup_en: field.group.to_string(),
         scope: ParameterScope::ProcessFile,
         storage: Storage::ProcessParameterFile,
+        storage_target: None,
         value_kind: field.kind.into(),
         unit: None,
         visibility: Visibility::EditableExpert,
@@ -473,9 +495,8 @@ fn default_value(default: colm_schema::Default) -> String {
             }
         }
         colm_schema::Default::Integer(v) => v.to_string(),
-        colm_schema::Default::Real(v)
-        | colm_schema::Default::Str(v)
-        | colm_schema::Default::Array(v) => v.to_string(),
+        colm_schema::Default::Real(v) => colm_namelist::real_literal(v).unwrap_or(v).to_string(),
+        colm_schema::Default::Str(v) | colm_schema::Default::Array(v) => v.to_string(),
     }
 }
 

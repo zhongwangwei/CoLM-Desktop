@@ -76,6 +76,7 @@ import ModelSettings from './ModelSettings';
 import {
   autoClosedText,
   exclusionPatch,
+  type ExclusionContext,
   regionalRoutingPatch,
   schemeFlagKeys,
   simulationMode,
@@ -315,6 +316,16 @@ export default function NewCasePage() {
     [schemaReady, setSchemaReady] = useState(false),
     [modelFields, setModelFields] = useState<SchemaField[]>([]);
   const siteDefaults = useRef<SiteDefaults>(seed?.siteDefaults ?? { previous: {}, values: {} });
+  const [historyCapabilities, setHistoryCapabilities] = useState<{
+    request: string;
+    variables: Array<{
+      name: string;
+      settable: boolean;
+      writable: boolean | null;
+      blocked_by?: string | null;
+      long_name?: string | null;
+    }>;
+  } | null>(null);
   const [historySwitches, setHistorySwitches] = useState<Record<string, string>>({});
   const [historyVariables, setHistoryVariables] = useState<
     Array<{ name: string; long_name?: string }>
@@ -510,6 +521,10 @@ export default function NewCasePage() {
     if (!busy && (error || (multiSite && multiResults.length > 0)))
       document.querySelector('.main-pane')?.scrollTo({ top: 0 });
   }, [busy, error, multiSite, multiResults]);
+  const [processContext, setProcessContext] = useState<{
+    request: string;
+    files: ExclusionContext['processFiles'];
+  } | null>(null);
   const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
     [cropDefaults, setCropDefaults] = useState<Record<string, string>>({});
@@ -867,23 +882,36 @@ export default function NewCasePage() {
     source: { kind: 'frozen', version: state.versionRef },
     caseDir: null,
     kernelDir: configurationKernel?.dir ?? null,
+    engine: form.engine,
     pftSelection: null,
     caseValues: dataPatch,
   });
   useEffect(() => {
     let current = true;
+    setOptionStates([]);
+    setCropDefaults({});
+    setHistorySwitches({});
+    setHistoryCapabilities(null);
+    setProcessContext(null);
     if (!schemaReady || !state.version) return;
     setOptionError('');
     void invoke<{
       fields: ConfigurationField[];
+      process_files?: ExclusionContext['processFiles'];
       crop_defaults?: Record<string, string>;
       history_switches?: Record<string, string>;
+      history_variables?: NonNullable<typeof historyCapabilities>['variables'];
     }>('model_configuration', JSON.parse(dataRequest))
       .then((result) => {
         if (current) {
           setOptionStates(result.fields);
+          setProcessContext({ request: dataRequest, files: result.process_files });
           setCropDefaults(result.crop_defaults ?? {});
           setHistorySwitches(result.history_switches ?? {});
+          setHistoryCapabilities({
+            request: dataRequest,
+            variables: result.history_variables ?? [],
+          });
         }
       })
       .catch((e) => {
@@ -893,6 +921,11 @@ export default function NewCasePage() {
       current = false;
     };
   }, [dataRequest, schemaReady, state.version]);
+  const historyByName = new Map(
+    (historyCapabilities?.request === dataRequest ? historyCapabilities.variables : []).map(
+      (variable) => [variable.name, variable],
+    ),
+  );
   useNavigationGuard(() =>
     lock.current
       ? t(
@@ -959,6 +992,7 @@ export default function NewCasePage() {
       domain: context.domain ?? form.kind,
       grid: (context.domain ?? form.kind) === 'site' ? null : (context.grid ?? form.grid),
       compiledCrop: configurationKernel?.macros.includes('CROP') === true,
+      processFiles: processContext?.request === dataRequest ? processContext.files : undefined,
     });
     setAutoClosed({ text: autoClosedText(result.closed, en), step });
     setCaseValues((old) => {
@@ -3065,6 +3099,14 @@ export default function NewCasePage() {
             'Choose data sources and simulation period.',
           )}
         >
+          {form.kind === 'site' && !form.host && (
+            <p className="muted">
+              {t(
+                '如需 CBL 或臭氧数据，请创建算例后到算例配置第 3 步选择对应文件，再开始运行。',
+                'For CBL or ozone data, create the case, select the corresponding files in case configuration step 3, then run it.',
+              )}
+            </p>
+          )}
           {bundledSite && finalDirectory && (
             <p className="path">
               {t('本站点保存位置：', 'Station directory: ')}
@@ -3658,11 +3700,22 @@ export default function NewCasePage() {
           )}
           <HistoryVariablesCard
             actionPrefix="new"
-            variables={historyVariables.map((v) => ({
-              name: v.name,
-              settable: true,
-              longName: v.long_name,
-            }))}
+            variables={historyVariables.map((v) => {
+              const verified = historyByName.get(v.name);
+              return {
+                name: v.name,
+                settable: verified?.settable === true && verified.writable === true,
+                longName: verified?.long_name ?? v.long_name,
+                reason:
+                  verified?.blocked_by ??
+                  (verified?.writable === true
+                    ? undefined
+                    : t(
+                        '当前内核与配置的输出能力尚未核对',
+                        'Output capability has not been verified for the current kernel and configuration',
+                      )),
+              };
+            })}
             values={{ ...historySwitches, ...caseValues }}
             disabled={!enabled}
             en={en}

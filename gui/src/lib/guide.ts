@@ -224,7 +224,6 @@ const pageAliases: Record<
     control: 'result-tab',
     value: 'diagnostics',
   },
-  'result-export': { route: 'case', tab: 'results', control: 'result-tab', value: 'report' },
   'result-tuning': { route: 'research', control: 'research-tab', value: 'tuning' },
   'result-uncertainty': { route: 'research', control: 'research-tab', value: 'uncertainty' },
   'hybrid-learn': { route: 'research', control: 'research-tab', value: 'parameters' },

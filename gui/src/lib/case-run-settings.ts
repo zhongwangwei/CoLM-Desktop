@@ -6,7 +6,7 @@
  * 做成纯函数便于单测；storage 读写由 app-state 负责。
  */
 export const CASE_RUN_SETTINGS_KEY = 'colm-case-run-settings';
-/** 最多保留多少个算例目录；旧的按插入顺序淘汰。 */
+/** 最多保留多少个算例目录；按最近保存顺序淘汰。 */
 export const CASE_RUN_SETTINGS_LIMIT = 100;
 
 export function parseCaseRunSettings(

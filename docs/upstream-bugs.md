@@ -944,3 +944,13 @@ PFT/PC 路径仍拒绝方案 8，未受影响。开关现在只控制示踪物�
 - 扩展截获 `MOD_LeafTemperature_Extended.F90` 的 `rstfacsun/sha` 为 `intent(out)`：上游 `d6de53e9`
   起不再编译扩展截获，问题随之消失。
 - `create_defineh.bash` 的 `#error "TRACER requires GridRiverLakeFlow"`：上游已去掉。
+
+
+## 上游选项：ESACCI 开关缺少启用路径（2026-11-11 复核）
+
+当前 vendored `CoLM202X` 中，`DEF_USE_ESACCI` 仅在 `share/MOD_Namelist.F90:255`
+初始化为 `.false.`，在该文件 MPI 广播处传递；另两处引用位于
+`mksrfdata/MOD_LandPatch.F90` 和 `main/MOD_Const_LC.F90`，均为条件读取。
+全树大小写不敏感检索未发现后续赋值或 namelist 成员声明，因此当前源码没有把它设为真的配置路径。
+这是上游开关不可达的问题；桌面端保留只读元数据，不提供一个无法落盘生效的开关。
+修复需上游明确 ESACCI 数据与地类表的选择契约，本轮未修改 vendor 或推断替代方案。

@@ -2,7 +2,7 @@ import { bilingual } from '../../lib/bilingual';
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
-import { effectiveModelFields } from '../cases/case-model';
+import { cropEnabled, effectiveModelFields } from '../cases/case-model';
 import { checkInBatches, eachLimited, nextCheckBatch, runRemoteBatch } from './remote-batch';
 import NamelistPreview from './NamelistPreview';
 import EngineProgress from '../cases/EngineProgress';
@@ -16,6 +16,7 @@ import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../comp
 import { ActionButton } from '../../components/ActionButton';
 import {
   compatibleKernel,
+  kernelRunProblem,
   activeRunTargets,
   endedRun,
   openRuns,
@@ -678,13 +679,13 @@ export default function RunPanel({
         // 4096 是手动输入的上界；自动计划的总 ranks 由"节点×每节点核数"算出，CLI 本就可以接受
         // 更大的值（GUI 审查 F-R-02：96×48=4608 的合法计划不该被手动上界误拒）。
         (!plan && nums[0] > 4096) ||
-        nums[1] > 256 ||
+        nums[1] > 4096 ||
         nums[2] > 4096
       )
         throw new Error(
           t(
-            '进程与并发数须为 1–4096 的整数，线程数须为 1–256 的整数',
-            'Ranks and workers must be integers between 1 and 4096; threads between 1 and 256',
+            '进程与并发数须为 1–4096 的整数，线程数须为 1–4096 的整数',
+            'Ranks and workers must be integers between 1 and 4096; threads between 1 and 4096',
           ),
         );
       if (
@@ -696,6 +697,20 @@ export default function RunPanel({
         throw new Error(
           t('申请 CPU 数须为 1–1024 的整数', 'Requested CPUs must be an integer from 1 to 1024'),
         );
+      const selectedKernel = state.kernels.find((entry) => entry.dir === kernel);
+      if (selectedKernel) {
+        const crop = [effectiveProfile, ...Object.values(batchProfiles ?? {})].some(
+          (profile) => profile?.crop ?? cropEnabled(effectiveModelFields(state.version?.overlay)),
+        );
+        const problem = kernelRunProblem(
+          selectedKernel.macros,
+          engine,
+          preprocessors,
+          nums[0],
+          crop,
+        );
+        if (problem) throw new Error(problem);
+      }
       setRemote(null);
       const runId = crypto.randomUUID();
       cancelledRun.current = null;
@@ -749,6 +764,7 @@ export default function RunPanel({
               );
             prepared.push(dir);
           } catch (error) {
+            if (preparationCancelled()) return { cancelled: true };
             patchRun([dir], runId, { status: 'failed', running: false, error: String(error) });
             notify(String(error), true);
           }
@@ -1195,6 +1211,9 @@ export default function RunPanel({
           stoppedBatches.add(id);
         }
       }
+      // 远程提交前也有本机版本迁移，先按准备中的算例停止它。
+      const preparing = targets.filter((dir) => latest.current[dir]?.status === 'preparing');
+      if (host && preparing.length) await invoke<number>('cancel_runs', { cases: preparing });
       if (host && batchCases) {
         let count = 0;
         let interrupted = 0;
@@ -1570,12 +1589,13 @@ export default function RunPanel({
     const existing = state.caseRunSettings?.[casePath];
     const merged = { ...(existing ?? {}), ...shared };
     if (JSON.stringify(existing) === JSON.stringify(merged)) return;
-    update((old) => ({
-      caseRunSettings: {
-        ...(old.caseRunSettings ?? {}),
-        [casePath]: { ...(old.caseRunSettings?.[casePath] ?? {}), ...shared },
-      },
-    }));
+    update((old) => {
+      const settings = { ...(old.caseRunSettings ?? {}) };
+      const current = settings[casePath];
+      delete settings[casePath];
+      settings[casePath] = { ...(current ?? {}), ...shared };
+      return { caseRunSettings: settings };
+    });
   }, [
     batchCases,
     casePath,
@@ -2024,6 +2044,14 @@ export default function RunPanel({
           const field = fields.find((entry) => entry.id === id);
           return field ? [render(field)] : [];
         })}
+        {!host && engine === 'rust' && (
+          <p className="muted">
+            {t(
+              '本机 Rust 使用单进程：空间算例在线程间并行，单点算例每站 1 线程，多站通过并发站点数并行。',
+              'Local Rust uses one process: spatial cases use threads, single-site cases use one thread per station, and station batches run concurrently.',
+            )}
+          </p>
+        )}
         {/* 批量页也要有阶段/强制重跑：它们此前只进页面契约，界面靠 `{!batchCases}` 的引擎区
             渲染，批量时整段消失（GUI 审查 F-R-01）。单算例仍由下面的引擎区渲染，避免重复。 */}
         {batchCases &&

@@ -2362,7 +2362,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
             serde_json::from_slice(&std::fs::read(staging.join(colm_model::RUN_MANIFEST))?)?;
         for flag in ["--highres-params", "--soil-hyper-albedo-dir"] {
             if run.inputs.contains_key(&format!("execution-option:{flag}")) {
-                bail!("remote spectral data options require an explicit server input mapping");
+                bail!("远程运行暂不支持 {flag} 的光谱数据输入映射；请在本机运行该算例 / Remote execution does not yet support server input mapping for {flag}; run this case locally");
             }
         }
         Some(serde_json::to_value(run)?)

@@ -453,6 +453,8 @@ function comparisonPage(
   options: {
     entries?: number[];
     requestSeq?: { current: { single: number; multi: number } };
+    unknown?: number;
+    sourceError?: string;
   } = {},
 ) {
   const page = '../results/ResultsPage.tsx';
@@ -474,11 +476,16 @@ function comparisonPage(
   });
   const comparisonSources = callback(page, 'comparisonSources', {
     projectRuns: runs,
-    caseDirOfRunPath: () => null,
+    caseDirOfRunPath: () => '/case',
     boundedMap,
-    invokeJson: async () => [],
+    invokeJson: async () => {
+      if (options.sourceError) throw new Error(options.sourceError);
+      return [];
+    },
   });
   const comparisonMetricsFor = callback(page, 'comparisonMetricsFor', {
+    comparisonSources,
+    bilingual: (zh: string) => zh,
     invokeJson: async (command: string, args: Record<string, unknown>) => {
       requests.push({ command, ...args });
       return metricRows(args);
@@ -497,6 +504,7 @@ function comparisonPage(
   });
   const splitSettledComparison = callback(page, 'splitSettledComparison', {
     comparisonFailureReason,
+    bilingual: (zh: string) => zh,
   });
   const common = {
     task,
@@ -506,7 +514,7 @@ function comparisonPage(
       return model;
     },
     comparisonEntries,
-    projectRuns: runs,
+    projectRuns: runs.filter((_, index) => index !== options.unknown),
     from: '',
     to: '',
     spinup: '0',
@@ -673,6 +681,7 @@ test('cancelled comparison entries are recorded as cancelled failures, not backe
   });
   const split = callback(page, 'splitSettledComparison', {
     comparisonFailureReason: failureReason,
+    bilingual: (zh: string) => zh,
   });
   const entries = [
     { run: resultRun(0), obs: '/obs/0.nc' },
@@ -849,6 +858,7 @@ test('Results report formats retain summary metrics and route native PDF through
     corrected: false,
   };
   const reportData = callback(page, 'reportData', {
+    tr: (zh: string) => zh,
     source: '/copy',
     runs: [],
     catalog: { steps: 2 },
@@ -1443,6 +1453,7 @@ test('process saves refresh history availability in both directions without rese
       disabled: string[] = [];
     const context = { entry: { dir: '/new-preview' }, profile: { bgc } };
     const refreshHistory = callback('./CasesPage.tsx', 'refreshHistory', {
+      engine: 'fortran',
       epoch,
       state: { kernels: [{ dir: '/new-kernel' }] },
       compatibleKernel: (_kernels: unknown, profile: unknown) => {
@@ -1457,6 +1468,7 @@ test('process saves refresh history availability in both directions without rese
         assert.equal(name, 'hist_vars');
         assert.deepEqual(args, {
           text: 'effective',
+          engine: 'fortran',
           kernelDir: '/new-kernel',
           dir: '/new-preview',
         });
@@ -1481,6 +1493,8 @@ test('process saves refresh history availability in both directions without rese
       },
     });
     const change = callback('./CasesPage.tsx', 'changeCaseOptions', {
+      processContext: null,
+      dataRequest: 'current',
       dir: '/case',
       editingDisabled: false,
       loadFailed: false,
@@ -1528,6 +1542,7 @@ test('history refresh ignores a response after leaving the case', async () => {
   const request = { active: true },
     epoch = { current: request };
   const refresh = callback('./CasesPage.tsx', 'refreshHistory', {
+    engine: 'fortran',
     epoch,
     state: { kernels: [] },
     compatibleKernel: () => ({ dir: '/kernel' }),
@@ -1604,6 +1619,8 @@ for (const failure of ['write', 'context', 'history']) {
     const request = { active: true };
     const notices: string[] = [];
     const change = callback('./CasesPage.tsx', 'changeCaseOptions', {
+      processContext: null,
+      dataRequest: 'current',
       dir: '/case',
       editingDisabled: false,
       loadFailed: false,
@@ -1788,6 +1805,8 @@ test('case option previews release after reads, failures, and stale responses', 
       events: string[] = [];
     const context = { entry: { dir: '/preview' }, profile: {}, preview_token: 'owned' };
     const change = callback('./CasesPage.tsx', 'changeCaseOptions', {
+      processContext: null,
+      dataRequest: 'current',
       dir: '/case',
       editingDisabled: false,
       loadFailed: false,
@@ -1833,4 +1852,124 @@ test('case option previews release after reads, failures, and stale responses', 
     await change({ DEF_USE_BGC: 'true' });
     assert.deepEqual(events, outcome === 'stale' ? ['release'] : ['read', 'release']);
   }
+});
+
+test('empty metrics remain a failed station on both comparison and retry', async () => {
+  const page = comparisonPage((args) => (args.obs === '/obs/1.nc' ? [] : [resultMetric(0)]));
+  await page.compare();
+  assert.equal((page.published.at(-1)!.rows as unknown[]).length, 2);
+  assert.match(
+    String((page.published.at(-1)!.failures as { error: string }[])[0].error),
+    /有效配对/,
+  );
+  await page.retry(true)();
+  assert.equal((page.published.at(-1)!.rows as unknown[]).length, 2);
+  assert.equal((page.published.at(-1)!.failures as unknown[]).length, 1);
+});
+
+test('missing source and source inventory errors fail only their station, including retry', async () => {
+  for (const sourceError of [undefined, 'inventory unreadable']) {
+    const page = comparisonPage(() => [resultMetric(0)], { unknown: 1, sourceError });
+    await page.compare();
+    assert.equal((page.published.at(-1)!.rows as unknown[]).length, 2);
+    const failures = page.published.at(-1)!.failures as { runCase: string; error: string }[];
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].runCase, '/case/runs/1');
+    assert.match(failures[0].error, sourceError ? /inventory unreadable/ : /已登记/);
+    await page.retry(true)();
+    assert.equal((page.published.at(-1)!.failures as unknown[]).length, 1);
+  }
+});
+
+test('late series reads cannot repopulate a cache invalidated by a completed run', async () => {
+  let release!: (value: unknown) => void;
+  const cache = { current: new Map<string, unknown>() };
+  const read = callback('../results/ResultsPage.tsx', 'readSeries', {
+    source: '/copy',
+    en: false,
+    cache,
+    readErrorText,
+    useCallback: (fn: unknown) => fn,
+    windowArgs: () => ({ from: null, to: null }),
+    invokeJson: () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  });
+  const pending = read('Qle');
+  cache.current = new Map();
+  release({ time: [1], vars: { Qle: [2] } });
+  await pending;
+  assert.equal(cache.current.size, 0);
+});
+
+test('selected runs receive their own observation defaults without overwriting edits', async () => {
+  for (const edited of [false, true]) {
+    let entries: { run: unknown; obs: string }[] = [];
+    let release!: (value: string) => void;
+    const run = { ...resultRun(0), case_dir: '/source/case' };
+    const toggle = callback('../results/ResultsPage.tsx', 'toggleComparisonRun', {
+      comparisonEntries: entries,
+      obs: '',
+      MAX_COMPARISON_RUNS: 20,
+      setComparisonEntries: (update: (rows: typeof entries) => typeof entries) => {
+        entries = update(entries);
+      },
+      defaultObservation: (dir: string) => {
+        assert.equal(dir, '/source/case');
+        return new Promise<string>((resolve) => {
+          release = resolve;
+        });
+      },
+    });
+    toggle(run);
+    if (edited) entries = entries.map((entry) => ({ ...entry, obs: '/manual.nc' }));
+    release('/matched.nc');
+    await Promise.resolve();
+    assert.equal(entries[0].obs, edited ? '/manual.nc' : '/matched.nc');
+  }
+});
+
+test('automatic evaluation failures retain the manual evaluation retry action', () => {
+  const text = readFileSync(new URL('../results/ResultsPage.tsx', import.meta.url), 'utf8');
+  assert.match(
+    text,
+    /action="evaluate-observations"[\s\S]*?disabled={!source \|\| !obs \|\| busy}[\s\S]*?run={evaluate}/,
+  );
+  assert.match(text, /\[source, caseDir, versionId, revision, completedRunCase\]/);
+});
+
+test('a comparison cancelled during source lookup never starts metrics', async () => {
+  let live = true;
+  const metricsFor = callback('../results/ResultsPage.tsx', 'comparisonMetricsFor', {
+    comparisonSources: async () => {
+      live = false;
+      return [resultRun(0)];
+    },
+    invokeJson: () => {
+      throw new Error('metrics must not start');
+    },
+  });
+  assert.deepEqual(
+    await metricsFor(
+      { run: resultRun(0), obs: '/obs.nc' },
+      {},
+      [],
+      () => ({}),
+      () => live,
+    ),
+    [],
+  );
+});
+
+test('settled comparison defensively records empty fulfilled results as failures', () => {
+  const split = callback('../results/ResultsPage.tsx', 'splitSettledComparison', {
+    bilingual: (zh: string) => zh,
+  });
+  const result = split([{ run: resultRun(0), obs: '/obs.nc' }], [{ value: [] }]) as unknown as {
+    rows: unknown[];
+    failures: { error: string }[];
+  };
+  assert.equal(result.rows.length, 0);
+  assert.match(result.failures[0].error, /有效配对/);
 });

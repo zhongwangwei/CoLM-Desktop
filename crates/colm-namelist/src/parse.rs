@@ -21,6 +21,14 @@ pub fn parse(src: &str) -> Result<Document> {
             items.push(Item::Verbatim(raw.to_string()));
             continue;
         }
+        if t.eq_ignore_ascii_case("&end") {
+            if !in_group {
+                bail!("line {}: group closed without an open group", lineno + 1);
+            }
+            in_group = false;
+            items.push(Item::GroupEnd(raw.to_string()));
+            continue;
+        }
         if t.starts_with('&') {
             if in_group {
                 bail!("line {}: group opened inside a group", lineno + 1);
@@ -58,14 +66,14 @@ pub fn parse(src: &str) -> Result<Document> {
         let lead = head.len() - head.trim_start().len();
         let text = head.trim();
 
-        let value =
+        let (value, repaired_text) =
             parse_value(text).with_context(|| format!("line {}: bad value: {text}", lineno + 1))?;
 
-        // prefix + text + suffix 必须逐字节等于原行，这是往返的全部依据。
+        // 合法输入逐字节往返，只修复旧版本写出的非法实数 kind 后缀。
         items.push(Item::Entry(Entry {
             path,
+            text: repaired_text.unwrap_or_else(|| text.to_string()),
             value,
-            text: text.to_string(),
             prefix: format!("{}={}", &line[..eq], &rest[..lead]),
             suffix: raw[eq + 1 + lead + text.len()..].to_string(),
         }));
@@ -91,21 +99,33 @@ fn comment_start(s: &str) -> Option<usize> {
     None
 }
 
-fn parse_value(s: &str) -> Result<Value> {
+fn parse_value(s: &str) -> Result<(Value, Option<String>)> {
     if s.is_empty() {
         bail!("empty value");
     }
     let items = split_values(s)?;
-    if items.len() == 1 {
-        parse_scalar(&items[0])
+    // 只替换数值 token，保留逗号空槽、空白和字符串的原始位置。
+    let mut normalized = String::new();
+    let mut offset = 0;
+    for item in &items {
+        let start = offset + s[offset..].find(item).expect("token came from this input");
+        normalized.push_str(&s[offset..start]);
+        normalized.push_str(crate::real_literal(item).unwrap_or(item));
+        offset = start + item.len();
+    }
+    normalized.push_str(&s[offset..]);
+    let repaired_text = (normalized != s).then_some(normalized);
+    let value = if items.len() == 1 {
+        parse_scalar(&items[0])?
     } else {
-        Ok(Value::List(
+        Value::List(
             items
                 .iter()
                 .map(|x| parse_scalar(x))
                 .collect::<Result<_>>()?,
-        ))
-    }
+        )
+    };
+    Ok((value, repaired_text))
 }
 
 /// 按空格或逗号切分，引号内不切。
@@ -165,7 +185,6 @@ fn parse_scalar(s: &str) -> Result<Value> {
     if let Some(b) = parse_logical(s) {
         return Ok(Value::Bool(b));
     }
-    let low = s.to_ascii_lowercase();
     if (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
         || (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
     {
@@ -181,9 +200,9 @@ fn parse_scalar(s: &str) -> Result<Value> {
         return Ok(Value::Int(i));
     }
     // 只要能当实数读出来就按实数存，但保留原始文本
-    if low.replace(['d'], "e").parse::<f64>().is_ok() {
+    if let Some(literal) = crate::real_literal(s) {
         return Ok(Value::Real {
-            text: s.to_string(),
+            text: literal.to_string(),
         });
     }
     bail!("unrecognised value: {s}")

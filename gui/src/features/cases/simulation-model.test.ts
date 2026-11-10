@@ -58,7 +58,7 @@ test('dates reject calendar errors and edit only the selected date without reset
 });
 test('review rejects missing input, impossible dates, incompatible model and forcing coverage', () => {
   assert.equal(newCaseProblem(form, 3, undefined, {}), null);
-  assert.equal(newCaseProblem({ ...form, end: form.start }, 3, undefined, {}), null);
+  assert.ok(newCaseProblem({ ...form, end: form.start }, 3, undefined, {}));
   assert.ok(newCaseProblem({ ...form, end: '2007-12-31' }, 3, undefined, {}));
   assert.ok(newCaseProblem({ ...form, met: '' }, 3, undefined, {}));
   assert.ok(newCaseProblem(form, 3, undefined, { DEF_USE_BGC: '.true.' }));
@@ -163,7 +163,6 @@ test('spatial setup keeps mandatory data, mesh and numeric constraints', () => {
     { north: '91' },
     { dlon: '0' },
     { runtime: '' },
-    { timestep: '-1' },
     { grid: 'unstructured', mesh: '' },
     { kind: 'watershed', shapefile: '' },
   ];
@@ -481,13 +480,34 @@ test('spin-up defaults are strictly inside the period or unavailable', () => {
 test('creation requires integer time steps from 1 through 3600 seconds', () => {
   for (const timestep of ['', ' ', 'NaN', 'Infinity', '0', '-1', '3601', '0.5'])
     assert.match(
-      newCaseProblem({ ...form, timestep }, 3, undefined, {}, true) ?? '',
+      newCaseProblem({ ...form, timestep }, 5, undefined, {}, true) ?? '',
       /time step must be an integer from 1 to 3600 seconds/,
     );
   for (const timestep of ['1', '1800', '3600'])
-    assert.equal(newCaseProblem({ ...form, timestep }, 3, undefined, {}, true), null);
+    assert.equal(newCaseProblem({ ...form, timestep }, 5, undefined, {}, true), null);
   assert.equal(
-    newCaseProblem({ ...form, timestep: '0.5' }, 3, undefined, {}),
+    newCaseProblem({ ...form, timestep: '0.5' }, 5, undefined, {}),
     '时间步长须为 1–3600 的整数秒。',
   );
+});
+
+test('hidden time step cannot block the data or options steps', () => {
+  for (const step of [3, 4] as const)
+    for (const timestep of ['', '0', '-1', '0.5', '3601'])
+      assert.equal(newCaseProblem({ ...form, timestep }, step, undefined, {}), null);
+});
+
+test('creation and existing-case validation agree on midnight period boundaries', () => {
+  for (const end of ['2007-12-31', form.start, '2008-01-02']) {
+    const existing = {
+      ...caseDatePatch(form.start, 'start'),
+      ...caseDatePatch(end, 'end'),
+      'DEF_simulation_time%start_sec': '0',
+      'DEF_simulation_time%end_sec': '0',
+    };
+    assert.equal(
+      newCaseProblem({ ...form, end }, 3, undefined, {}) === null,
+      casePeriodValid(existing),
+    );
+  }
 });

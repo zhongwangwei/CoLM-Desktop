@@ -2455,11 +2455,15 @@ export default function ComparePage() {
                 <Field
                   label={t('比较的时间尺度', 'Time scale of the comparison')}
                   hint={t(
-                    '气候态是多年平均的评估模式；OpenBench 另有年气候态、月气候态两种时间尺度。',
-                    'Climatology evaluates multi-year means; OpenBench also provides annual and monthly climatology scales.',
+                    '逐年保留每年的结果；年气候态和月气候态则对多年数据求平均。',
+                    'Yearly retains each year; annual and monthly climatology average across years.',
                   )}
                 >
                   <Select value={timRes} onChange={(e) => setTimRes(e.target.value)}>
+                    <option value="Year">{t('逐年', 'Yearly')}</option>
+                    <option value="3Hour">{t('每 3 小时', '3-hourly')}</option>
+                    <option value="6Hour">{t('每 6 小时', '6-hourly')}</option>
+                    <option value="8Day">{t('每 8 天', '8-day')}</option>
                     <option value="Hour">{t('逐时', 'Hourly')}</option>
                     <option value="Day">{t('逐日', 'Daily')}</option>
                     <option value="Month">{t('逐月', 'Monthly')}</option>

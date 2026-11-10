@@ -8,6 +8,7 @@ import {
   reconcileRemoteRun,
   matchesRemoteRun,
   compatibleKernel,
+  kernelRunProblem,
   restoreRunView,
   settleRuns,
   submittingHost,
@@ -496,4 +497,13 @@ test('manual ranks only apply to spatial cases that really run MPI', () => {
     }),
     1,
   );
+});
+
+test('kernel preflight rejects known macro conflicts without restricting valid Rust ranks', () => {
+  assert.match(kernelRunProblem([], 'fortran', 'rust', 2, false) ?? '', /USEMPI/);
+  assert.equal(kernelRunProblem(['USEMPI'], 'fortran', 'rust', 2, false), undefined);
+  assert.equal(kernelRunProblem([], 'rust', 'rust', 8, true), undefined);
+  assert.match(kernelRunProblem([], 'rust', 'fortran', 1, true) ?? '', /CROP/);
+  assert.equal(kernelRunProblem(['CROP'], 'rust', 'fortran', 1, true), undefined);
+  assert.equal(kernelRunProblem([], 'rust', 'fortran', 1, false), undefined);
 });

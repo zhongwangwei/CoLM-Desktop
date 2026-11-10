@@ -43,13 +43,15 @@ async function page(
     language: options.language ?? 'zh',
     root: '/project',
     projectRunSettings: options.settings,
-    caseRunSettings: options.caseSettings ? { '/case': options.caseSettings } : undefined,
+    caseRunSettings: (options.caseSettings
+      ? { '/case': options.caseSettings }
+      : undefined) as AppState['caseRunSettings'],
     running: {} as Record<string, RunState>,
     kernels: [
       {
         dir: '/kernel',
         preset: 'default',
-        macros: [spatial ? 'GRIDBASED' : 'SinglePoint', 'LULC_IGBP'],
+        macros: [spatial ? 'GRIDBASED' : 'SinglePoint', 'LULC_IGBP', 'USEMPI'],
       },
     ],
     cases: (batchCases ?? ['/case']).map((dir) => ({ dir, spatial })),
@@ -613,4 +615,19 @@ test('local single-site submission settings survive page recreation', async () =
   const restored = await page({ spatial: false, host: '', caseSettings: saved });
   assert.equal(restored.field('run-stage').value, 'colm');
   assert.equal(restored.field('run-preprocessors').value, 'fortran');
+});
+
+test('saving an existing case moves it after other saved cases', async () => {
+  const p = await page({ host: '' });
+  p.persist();
+  const settings: NonNullable<AppState['caseRunSettings']> = {
+    '/case': { ...p.state.caseRunSettings!['/case'], threads: '1' },
+    '/other': { ...p.state.caseRunSettings!['/case'], threads: '2' },
+  };
+  p.state.caseRunSettings = settings;
+  p.render();
+  await p.set('run-threads', '6');
+  p.persist();
+  assert.deepEqual(Object.keys(p.state.caseRunSettings!), ['/other', '/case']);
+  assert.equal(p.state.caseRunSettings!['/case'].threads, '6');
 });

@@ -23,15 +23,42 @@
     ],
     "classified_parameter_declarations": 32
   },
+  "MOD_MT_Namelist.F90": {
+    "catalog_descriptors": 39,
+    "schema_fields": 39
+  },
   "MOD_Namelist.F90": {
     "case_tuning_fields": 43,
-    "catalog_descriptors": 1008,
-    "schema_fields": 964
+    "catalog_descriptors": 969,
+    "schema_fields": 925
   },
   "high_confidence_packages": {
     "bgc_fire_phenology_crop": "covered only where pft_override_fields.inc supplies a reviewed hook",
     "routing_urban_assimilation_downscaling": "schema/process fields catalogued; remaining coefficients excluded or pending package review",
     "water_thermal": "classified as future package; no safe runtime hook added"
+  },
+  "namelist_source_coverage": {
+    "main/MATERIAL/MOD_MT_Namelist.F90": {
+      "alternate_groups": {},
+      "coverage": "schema scalars/expanded containers or separately verified PFT overrides",
+      "excluded_members": [],
+      "limitation": "source parser and extractor coverage; not a Fortran compiler/preprocessor proof",
+      "parsed_namelist_members": 39
+    },
+    "share/MOD_Namelist.F90": {
+      "alternate_groups": {
+        "DEF_USE_SEDIMENT": {
+          "declared_group": "nl_colm",
+          "schema_group": "nl_colm_material"
+        }
+      },
+      "coverage": "schema scalars/expanded containers or separately verified PFT overrides",
+      "excluded_members": [
+        "DEF_rawdata_nml"
+      ],
+      "limitation": "source parser and extractor coverage; not a Fortran compiler/preprocessor proof",
+      "parsed_namelist_members": 282
+    }
   },
   "pft_override_fields.inc": {
     "catalog_fields": 87,

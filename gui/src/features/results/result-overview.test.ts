@@ -144,3 +144,11 @@ test('schedule and history-source warnings are localized without losing their ev
     assert.equal(metricWarningText(warning, false), warning);
   }
 });
+
+test('unknown Chinese backend warnings retain their evidence with a language label', () => {
+  assert.equal(
+    metricWarningText('新的科学诊断', true),
+    'Backend warning (Chinese original): 新的科学诊断',
+  );
+  assert.equal(metricWarningText('new diagnostic', true), 'new diagnostic');
+});

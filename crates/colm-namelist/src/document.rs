@@ -14,7 +14,7 @@
 //! （渲染成空格分隔）—— 合计约 369 行会在「读进来再写回去」时被改写。
 //!
 //! 于是分界是：**没被 `set` 过的行逐字节不动；被 `set` 过的行才按 `Value`
-//! 的规范形式重写。** 用户改了哪一行，diff 里就只出现哪一行。
+//! 的规范形式重写。** 旧版本误写的实数 kind 后缀会在解析时规范化，分隔符与注释保持原样。
 
 use anyhow::{bail, Result};
 
@@ -27,7 +27,7 @@ pub enum Item {
     Verbatim(String),
     /// `&group_name`
     GroupStart(String),
-    /// 单独成行的 `/`
+    /// 单独成行的 `/` 或 `&end`
     GroupEnd(String),
     /// 一个赋值
     Entry(Entry),
@@ -39,7 +39,7 @@ pub struct Entry {
     pub path: Path,
     pub value: Value,
     /// 值那一段的**原文**。`set` 会用新值的渲染结果覆盖它；
-    /// 没被改过就原样吐回，见模块文档。
+    /// 合法输入没被改过就原样吐回，旧实数 kind 后缀除外，见模块文档。
     pub text: String,
     /// 从行首到 `=` 之后的那一段原文（含缩进与对齐空格）
     pub prefix: String,

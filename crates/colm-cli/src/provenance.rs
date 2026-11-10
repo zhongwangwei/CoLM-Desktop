@@ -11,6 +11,18 @@ use colm_workspace::version::Readiness;
 use serde_json::{json, Value};
 
 pub(crate) const FILE: &str = "produced-by.json";
+pub(crate) const EXECUTIONS_FILE: &str = "execution-launches.jsonl";
+
+pub(crate) fn append_execution(case: &Path, execution: &Value) -> Result<()> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(case.join(EXECUTIONS_FILE))?;
+    writeln!(file, "{}", serde_json::to_string(execution)?)?;
+    Ok(())
+}
+
 /// 交给版本自己的 `colm-cli` 时设上：出处由外层写，里层不写。
 const DELEGATED_ENV: &str = "COLM_PROVENANCE_BY_PARENT";
 
@@ -95,6 +107,10 @@ pub(crate) fn value(record: &Record<'_>, ok: bool, error: Option<&str>) -> Value
         "location": { "kind": record.location },
         "kernel": kernel_identity(record.kernel),
     });
+    // 只记录本机实际执行环境；远程执行由服务器自己的记录提供，不能混入客户端环境。
+    if record.location == "local" {
+        value["execution_environment"] = execution_environment();
+    }
     if let Ok(snapshot) = std::env::var("COLM_EXECUTION_SNAPSHOT") {
         value["execution_snapshot"] = json!(snapshot);
     }
@@ -104,6 +120,28 @@ pub(crate) fn value(record: &Record<'_>, ok: bool, error: Option<&str>) -> Value
             value["kernel"]["program_sha256"] = json!(kernel.manifest.sha256);
         }
     }
+    match std::fs::read_to_string(record.case.join(EXECUTIONS_FILE)) {
+        Ok(text) => match text
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<std::result::Result<Vec<_>, _>>()
+        {
+            Ok(executions) => {
+                value["execution_launches_status"] = json!(if executions.is_empty() {
+                    "no_stages_recorded"
+                } else {
+                    "recorded"
+                });
+                value["execution_launches"] = json!(executions);
+            }
+            Err(error) => value["execution_launches_error"] = json!(error.to_string()),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            value["execution_launches"] = json!([]);
+            value["execution_launches_status"] = json!("not_recorded");
+        }
+        Err(error) => value["execution_launches_error"] = json!(error.to_string()),
+    }
     match input_sources(record.case) {
         Ok(sources) => value["input_sources"] = sources,
         Err(error) => value["input_sources_error"] = json!(format!("{error:#}")),
@@ -112,6 +150,19 @@ pub(crate) fn value(record: &Record<'_>, ok: bool, error: Option<&str>) -> Value
         value["model_identity_error"] = json!(error.to_string());
     }
     value
+}
+
+fn execution_environment() -> Value {
+    ["RAYON_NUM_THREADS", "COLM_MPIEXEC", "COLM_MPIEXEC_ARGS"]
+        .into_iter()
+        .map(|key| {
+            (
+                key.to_string(),
+                json!(std::env::var_os(key).map(|value| value.to_string_lossy().into_owned())),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>()
+        .into()
 }
 
 // Save declared sources and settings without opening their data payloads.

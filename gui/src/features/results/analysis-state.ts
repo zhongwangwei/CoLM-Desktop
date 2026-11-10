@@ -66,6 +66,12 @@ export interface AnalysisRow {
   correlation?: number | null;
   nse?: number | null;
   kge?: number | null;
+  alpha?: number | null;
+  beta?: number | null;
+  model_mean?: number | null;
+  obs_mean?: number | null;
+  model_sd?: number | null;
+  obs_sd?: number | null;
 }
 
 /** 评估变量可用性一行（结果页用来解释「为什么没有这个变量」）。 */
@@ -186,6 +192,12 @@ export const comparisonCsvHeader = [
   'r',
   'nse',
   'kge',
+  'alpha',
+  'beta',
+  'model_mean',
+  'obs_mean',
+  'model_sd',
+  'obs_sd',
 ] as const;
 
 /**
@@ -263,6 +275,12 @@ export function comparisonCsv<R extends AnalysisRow>(result: ComparisonResult<R>
         metric.correlation,
         metric.nse,
         metric.kge,
+        metric.alpha,
+        metric.beta,
+        metric.model_mean,
+        metric.obs_mean,
+        metric.model_sd,
+        metric.obs_sd,
       ]
         .map(csvCell)
         .join(','),

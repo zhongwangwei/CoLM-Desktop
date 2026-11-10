@@ -170,7 +170,7 @@ test('comparison csv takes its conditions and observation from the result snapsh
   assert.equal(lines[0], comparisonCsvHeader.join(','));
   assert.equal(
     lines[0],
-    'site,run_case,status,version,observation,from,to,spinup,corrected,time_basis,variable,units,n,rmse,mae,bias,r2,r,nse,kge',
+    'site,run_case,status,version,observation,from,to,spinup,corrected,time_basis,variable,units,n,rmse,mae,bias,r2,r,nse,kge,alpha,beta,model_mean,obs_mean,model_sd,obs_sd',
   );
   const row = lines[1];
   assert.match(row, /CN-Cng · a/);
@@ -288,4 +288,29 @@ test('comparison failures are recorded beside the rows and never exported as met
   assert.ok(!csv.includes('history missing'));
   assert.ok(!csv.includes('/other/runs/b'), 'request entries do not fabricate rows');
   assert.equal(result.failures.length, 2, 'failures stay on the snapshot for the page to list');
+});
+
+test('comparison csv preserves KGE components and both distributions', () => {
+  const result = comparisonResult();
+  Object.assign(result.rows[0], {
+    alpha: 1.2,
+    beta: 0.9,
+    model_mean: 18,
+    obs_mean: 20,
+    model_sd: 6,
+    obs_sd: 5,
+  });
+  const [header, row] = comparisonCsv(result)
+    .split('\n')
+    .map((line) => line.split(','));
+  for (const [key, expected] of Object.entries({
+    alpha: '1.2',
+    beta: '0.9',
+    model_mean: '18',
+    obs_mean: '20',
+    model_sd: '6',
+    obs_sd: '5',
+  })) {
+    assert.equal(row[header.indexOf(key)], expected);
+  }
 });

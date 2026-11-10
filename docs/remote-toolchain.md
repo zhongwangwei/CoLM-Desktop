@@ -54,3 +54,10 @@ References: [Rust installation flags](https://rust-lang.github.io/rustup/install
 [minimal profile](https://rust-lang.github.io/rustup/concepts/profiles.html),
 [CMake downloads](https://cmake.org/download/),
 [CMake aarch64 requirements](https://cmake.org/cmake/help/v4.4/release/4.3.html).
+
+## Spectral data execution options
+
+Remote runs currently reject materialized runs that include `--highres-params`
+or `--soil-hyper-albedo-dir`: these execution inputs do not yet have a supported
+server mapping. Run such cases locally; an ordinary `--map` does not enable
+these options. / 物化算例使用上述光谱数据选项时，请在本机运行；远程运行尚未支持这两类执行输入映射，普通 `--map` 不能解除该限制。

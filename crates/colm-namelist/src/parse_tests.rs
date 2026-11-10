@@ -223,3 +223,36 @@ fn assignments_and_terminators_must_belong_to_a_group() {
         assert!(parse(src).is_err(), "accepted invalid namelist {src:?}");
     }
 }
+
+#[test]
+fn repairs_legacy_real_kind_suffixes_without_changing_strings_or_comments() {
+    let source =
+        "&nl_colm\n  a = -1.0_r8 ! keep this note\n  b = 1D-3_R4, 2.0_r8\n  path = 'data_r8'\n/\n";
+    let parsed = doc(source);
+    let repaired = parsed.to_string();
+    assert!(repaired.contains("a = -1.0 ! keep this note"));
+    assert!(repaired.contains("b = 1D-3, 2.0"));
+    assert!(repaired.contains("path = 'data_r8'"));
+    assert_eq!(parsed.get("a").unwrap().as_f64(), Some(-1.0));
+    assert_eq!(doc(&repaired).to_string(), repaired);
+    assert!(parse("&nl_colm\n a=1.0_garbage\n/\n").is_err());
+}
+
+#[test]
+fn end_group_terminator_round_trips_and_supports_edits() {
+    let source = "&nl_colm\n a=1.0\n&END ! keep\n";
+    let mut parsed = doc(source);
+    assert_eq!(parsed.to_string(), source);
+    parsed.insert("b", Value::Int(2), "nl_colm").unwrap();
+    assert!(parsed.to_string().contains("b = 2"));
+    assert!(parsed.to_string().ends_with("&END ! keep\n"));
+    assert!(parse("&end\n").is_err());
+}
+
+#[test]
+fn repairing_real_kind_suffixes_preserves_null_slots_and_separators() {
+    let source = "&g\n a = 1.0_r8,, 3.D0_R8, 'site_r8' ! keep\n/\n";
+    let repaired = parse(source).unwrap().to_string();
+    assert_eq!(repaired, "&g\n a = 1.0,, 3.D0, 'site_r8' ! keep\n/\n");
+    assert_eq!(parse(&repaired).unwrap().to_string(), repaired);
+}

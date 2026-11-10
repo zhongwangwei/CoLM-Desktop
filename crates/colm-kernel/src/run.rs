@@ -79,6 +79,8 @@ fn retry_text_file_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std
 /// 一段跑完之后知道的一切。
 #[derive(Debug)]
 pub struct StageReport {
+    /// 实际启动的命令；由最终 Command 提取，不另行推测 launcher。
+    pub execution: serde_json::Value,
     pub stage: Stage,
     pub outcome: Outcome,
     /// 日志落盘的位置。失败时报给用户看的就是它。
@@ -309,6 +311,7 @@ fn run_stage_streaming_with_command(
         .current_dir(work)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let execution = execution_description(&cmd, stage, ranks, uses_mpi || external_launcher);
     let mut child = retry_text_file_busy(|| cmd.spawn())
         .with_context(|| format!("failed to spawn {}", program.display()))?;
     report_spawn(child.id(), &program);
@@ -385,6 +388,7 @@ fn run_stage_streaming_with_command(
         .with_context(|| format!("cannot write {}", log.display()))?;
 
     Ok(StageReport {
+        execution,
         stage,
         outcome: adjudicate(
             stage,
@@ -398,6 +402,36 @@ fn run_stage_streaming_with_command(
         ),
         log,
         overrides: extract(&text),
+    })
+}
+
+fn execution_description(
+    command: &Command,
+    stage: Stage,
+    ranks: usize,
+    launched: bool,
+) -> serde_json::Value {
+    let rayon = command
+        .get_envs()
+        .find(|(key, _)| *key == std::ffi::OsStr::new("RAYON_NUM_THREADS"))
+        .map(|(_, value)| value.map(|value| value.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| {
+            std::env::var_os("RAYON_NUM_THREADS").map(|value| value.to_string_lossy().into_owned())
+        });
+    let requested = rayon
+        .as_deref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0);
+    serde_json::json!({
+        "stage": stage.program(),
+        "program": command.get_program().to_string_lossy(),
+        "args": command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+        "launcher_used": launched,
+        "ranks": ranks,
+        "rayon_num_threads": rayon,
+        "thread_mode": if requested.is_some() { "explicit" } else { "auto" },
+        "requested_threads": requested,
+        "available_parallelism": std::thread::available_parallelism().ok().map(|count| count.get()),
     })
 }
 

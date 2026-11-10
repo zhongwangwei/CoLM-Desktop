@@ -49,7 +49,19 @@ pub(crate) fn options(args: &mut Vec<String>, version: Option<&VersionRef>) -> R
 }
 pub(crate) async fn cli(mut args: Vec<String>) -> Result<Value, String> {
     options(&mut args, None)?;
-    let output = with_model_activity(move || crate::sidecar::capture(&args)).await?;
+    let output = if args.first().is_some_and(|arg| arg == "model-migrate-case") {
+        let dir = args.get(1).ok_or("missing migration case")?.clone();
+        crate::sidecar::capture_migration(args, move || {
+            // 导入必须在迁移改绑前完成，也必须处于可取消的 pending 登记内。
+            colm_history::History::open_default()
+                .and_then(|h| h.import_case(&dir))
+                .map(|_| ())
+                .map_err(|e| format!("cannot import case history before migration: {e}"))
+        })
+        .await?
+    } else {
+        with_model_activity(move || crate::sidecar::capture(&args)).await?
+    };
     serde_json::from_str(output.trim()).map_err(|e| format!("invalid model CLI response: {e}"))
 }
 fn decode<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
@@ -954,10 +966,6 @@ pub async fn model_migrate_case(
             target.revision.to_string(),
         ]);
     }
-    // Import failures must not leave a changed binding on a case that cannot start.
-    colm_history::History::open_default()
-        .and_then(|h| h.import_case(&dir))
-        .map_err(|e| format!("cannot import case history before migration: {e}"))?;
     decode(cli(args).await?)
 }
 #[tauri::command]
@@ -3219,13 +3227,15 @@ pub fn model_configuration(
     kernel_dir: Option<String>,
     pft_selection: Option<PftSelection>,
     case_values: Option<std::collections::BTreeMap<String, String>>,
+    engine: Option<String>,
 ) -> Result<Value, String> {
-    crate::config::model_configuration::query(
+    crate::config::model_configuration::query_for_engine(
         &root()?,
         source,
         case_dir.as_deref(),
         kernel_dir.as_deref(),
         pft_selection,
         case_values,
+        engine.as_deref(),
     )
 }
