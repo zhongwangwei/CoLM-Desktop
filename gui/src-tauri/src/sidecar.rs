@@ -5129,7 +5129,7 @@ pub(crate) async fn capture_migration(
         if let Some(event) = &event {
             args.extend(["--operation-id".into(), event.operation_id.clone()]);
         }
-        let mut command = sidecar_command(&resolve_cli());
+        let mut command = sidecar_command(resolve_cli());
         command.args(&args);
         let result = capture_registered_command(&mut command, processes, &case, event.as_ref());
         let cancelled = processes.forget(&case)?;
