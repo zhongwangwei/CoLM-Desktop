@@ -84,6 +84,42 @@ fn summary(value: &Value) -> Value {
             out.insert(key.into(), value.clone());
         }
     }
+    for key in ["execution_environment", "execution_launches_status"] {
+        if let Some(value) = value.get(key) {
+            out.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(launches) = value["execution_launches"].as_array() {
+        out.insert(
+            "execution_launches".into(),
+            Value::Array(
+                launches
+                    .iter()
+                    .take(3)
+                    .map(|launch| {
+                        let fields = [
+                            "stage",
+                            "program",
+                            "launcher_used",
+                            "ranks",
+                            "rayon_num_threads",
+                            "thread_mode",
+                            "requested_threads",
+                            "available_parallelism",
+                        ];
+                        Value::Object(
+                            fields
+                                .into_iter()
+                                .filter_map(|key| {
+                                    launch.get(key).map(|value| (key.into(), value.clone()))
+                                })
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+    }
     // Errors and dependency maps stay in the verified file, not the bounded ledger row.
     out.insert("full_input_identity".into(), json!({"schema":value["full_input_identity"]["schema"],"algorithm":value["full_input_identity"]["algorithm"],"complete":value["full_input_identity"]["complete"],"data_sha256":value["full_input_identity"]["data_sha256"]}));
     Value::Object(out)

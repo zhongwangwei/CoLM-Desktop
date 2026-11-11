@@ -884,54 +884,62 @@ fn crop_planting_day_accepts_fortran_real_spellings() {
 }
 
 #[cfg(unix)]
+fn preprocessor_run_fixture(label: &str, script: &[u8]) -> (PathBuf, PathBuf, Kernel) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = test_directory(label);
+    let case = root.join("case");
+    let output = case.join("out/demo");
+    std::fs::create_dir_all(output.join("history")).unwrap();
+    let old_history = output.join("history/demo_hist_2000.nc");
+    std::fs::write(&old_history, b"old scientific result").unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        format!(
+            "&nl_colm\nDEF_CASE_NAME='demo'\nDEF_dir_output='{}'\n/\n",
+            case.join("out").display()
+        ),
+    )
+    .unwrap();
+    let kernel_dir = root.join("kernel");
+    std::fs::create_dir_all(&kernel_dir).unwrap();
+    let mut hashes = std::collections::BTreeMap::new();
+    for program in ["mksrfdata", "mkinidata", "colm"] {
+        let executable = kernel_dir.join(colm_kernel::program_file(program));
+        std::fs::write(&executable, script).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        hashes.insert(program, colm_kernel::sha256_hex(script));
+    }
+    let manifest = serde_json::json!({
+        "schema": colm_kernel::manifest::SCHEMA,
+        "preset": "test",
+        "platform": "test",
+        "colm_git_sha": "test",
+        "generator_args": "SinglePoint",
+        "macros": ["SinglePoint", "LULC_IGBP"],
+        "built_with": "fixture",
+        "netcdf_c": "",
+        "netcdf_fortran": "",
+        "hdf5": "",
+        "sha256": hashes,
+    });
+    std::fs::write(
+        kernel_dir.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let kernel =
+        Kernel::open(&kernel_dir).expect("all three fixture programs match their manifest hashes");
+    (case, old_history, kernel)
+}
+
+#[cfg(unix)]
 #[test]
 fn failed_preprocessor_reruns_invalidate_old_results_without_deleting_history() {
-    use std::os::unix::fs::PermissionsExt;
     for stage in [Stage::MkSrfData, Stage::MkIniData] {
-        let root = test_directory(&format!("stale-{}", stage.program()));
-        let case = root.join("case");
-        let output = case.join("out/demo");
-        std::fs::create_dir_all(output.join("history")).unwrap();
-        let old_history = output.join("history/demo_hist_2000.nc");
-        std::fs::write(&old_history, b"old scientific result").unwrap();
-        std::fs::write(
-            case.join("case.nml"),
-            format!(
-                "&nl_colm\nDEF_CASE_NAME='demo'\nDEF_dir_output='{}'\n/\n",
-                case.join("out").display()
-            ),
-        )
-        .unwrap();
-        let kernel_dir = root.join("kernel");
-        std::fs::create_dir_all(&kernel_dir).unwrap();
-        let script = b"#!/bin/sh\necho preprocessor-started\nexit 7\n";
-        let mut hashes = std::collections::BTreeMap::new();
-        for program in ["mksrfdata", "mkinidata", "colm"] {
-            let executable = kernel_dir.join(colm_kernel::program_file(program));
-            std::fs::write(&executable, script).unwrap();
-            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-            hashes.insert(program, colm_kernel::sha256_hex(script));
-        }
-        let manifest = serde_json::json!({
-            "schema": colm_kernel::manifest::SCHEMA,
-            "preset": "test",
-            "platform": "test",
-            "colm_git_sha": "test",
-            "generator_args": "SinglePoint",
-            "macros": ["SinglePoint", "LULC_IGBP"],
-            "built_with": "fixture",
-            "netcdf_c": "",
-            "netcdf_fortran": "",
-            "hdf5": "",
-            "sha256": hashes,
-        });
-        std::fs::write(
-            kernel_dir.join("manifest.json"),
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
-        let kernel = Kernel::open(&kernel_dir)
-            .expect("all three fixture programs match their manifest hashes");
+        let (case, old_history, kernel) = preprocessor_run_fixture(
+            &format!("stale-{}", stage.program()),
+            b"#!/bin/sh\necho preprocessor-started\nexit 7\n",
+        );
         let error = cmd_run(
             &case,
             &kernel.dir,
@@ -957,6 +965,39 @@ fn failed_preprocessor_reruns_invalidate_old_results_without_deleting_history() 
             std::fs::read(&old_history).unwrap(),
             b"old scientific result"
         );
-        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(case.parent().unwrap()).unwrap();
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn successful_preprocessing_is_not_failed_by_an_unwritable_launch_record() {
+    let (case, old_history, kernel) = preprocessor_run_fixture(
+        "launch-record-warning",
+        b"#!/bin/sh\necho 'Successful in surface data making.'\nexit 0\n",
+    );
+    let surface = case.join("out/demo/landdata/srfdata.nc");
+    std::fs::create_dir_all(surface.parent().unwrap()).unwrap();
+    std::fs::write(&surface, b"fixture surface artifact").unwrap();
+    std::fs::create_dir(case.join(provenance::EXECUTIONS_FILE)).unwrap();
+    cmd_run(
+        &case,
+        &kernel.dir,
+        false,
+        true,
+        Some(Stage::MkSrfData),
+        1,
+        PreprocessorMode::Fortran,
+        ModelEngine::Fortran,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    assert!(old_history.is_file());
+    assert_eq!(
+        std::fs::read(&surface).unwrap(),
+        b"fixture surface artifact"
+    );
+    std::fs::remove_dir_all(case.parent().unwrap()).unwrap();
 }

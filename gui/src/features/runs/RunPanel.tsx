@@ -2128,6 +2128,15 @@ export default function RunPanel({
             )}
           </p>
         )}
+      {!batchCases && persisted?.execution_environment && (
+        <p className="muted">
+          {t('本次启动的线程设置', 'Thread setting for this launch')} ·{' '}
+          {String(persisted.execution_environment.RAYON_NUM_THREADS ?? t('自动', 'Automatic'))}
+          {persisted.execution_environment.COLM_MPIEXEC
+            ? ` · ${t('启动器', 'Launcher')} ${String(persisted.execution_environment.COLM_MPIEXEC)}`
+            : ''}
+        </p>
+      )}
       {disabled && (
         <Notice tone="warning">
           {t(

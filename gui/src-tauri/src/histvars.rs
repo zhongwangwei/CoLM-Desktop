@@ -69,10 +69,10 @@ fn switch_writability(
         let Some(expr) = var.runtime else {
             return (Some(true), None);
         };
-        match colm_hist::eval_runtime_gate(expr, truth) {
+        match truth(expr).or_else(|| colm_hist::eval_runtime_gate(expr, truth)) {
             Some(true) => return (Some(true), None),
             Some(false) => {
-                blocked.get_or_insert_with(|| format!("需要 {expr}"));
+                blocked = Some(format!("需要 {expr}"));
             }
             None => {
                 unknown.get_or_insert_with(|| format!("条件 {expr} 需要人工判断"));
@@ -156,7 +156,7 @@ pub(crate) fn for_document(
             .or_else(|| overrides.get(path).copied())
             .unwrap_or_else(|| truth_value(doc, path).unwrap_or(false))
     };
-    let gate_truth = |path: &str| -> Option<bool> { truth_value(doc, path) };
+    let gate_truth = |path: &str| -> Option<bool> { runtime_truth(doc, path) };
 
     let mut out = Vec::new();
     for f in colm_schema::all() {
@@ -260,12 +260,42 @@ fn is_methane_diagnostic(var: &colm_hist::Var) -> bool {
             .is_some_and(|condition| condition.contains("DEF_USE_METHANE"))
 }
 
+// 当前源码仅声明或同步这些旧开关，没有任何 history writer 消费它们。
+const UNWRITTEN: &[&str] = &[
+    "alb_hires",
+    "reflectance_out",
+    "transmittance_out",
+    "cwdprod",
+    "cwddecomp",
+    "pdcorn",
+    "pdswheat",
+    "pdwwheat",
+    "pdsoybean",
+    "pdcotton",
+    "pdrice1",
+    "pdrice2",
+    "pdsugarcane",
+    "sol_dir_ln_hires",
+    "sol_dif_ln_hires",
+    "sr_dir_ln_hires",
+    "sr_dif_ln_hires",
+];
+
 fn configuration_writability(
     switch: &str,
     macros: &std::collections::BTreeSet<&str>,
     truth: &impl Fn(&str) -> Option<bool>,
     engine: Option<&str>,
 ) -> (Option<bool>, Option<String>) {
+    if UNWRITTEN
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(switch))
+    {
+        return (
+            Some(false),
+            Some("当前源码只声明或同步此开关，没有历史写出入口".into()),
+        );
+    }
     let regular = switch_writability(switch, colm_hist::generated::VARS, macros, truth);
     if regular.0 == Some(true) {
         return regular;
@@ -296,6 +326,23 @@ fn configuration_writability(
         );
     }
     evidence
+}
+
+// 只求值已对过 Fortran 实现的两个非逻辑条件，其他表达式仍保持未知。
+fn runtime_truth(doc: &colm_namelist::Document, expression: &str) -> Option<bool> {
+    match expression {
+        "DEF_Reservoir_Method > 0" => match doc.get("DEF_Reservoir_Method") {
+            Some(colm_namelist::Value::Int(value)) => Some(*value > 0),
+            Some(_) => None,
+            None => match colm_schema::find("DEF_Reservoir_Method").map(|field| field.default) {
+                Some(colm_schema::Default::Integer(value)) => Some(value > 0),
+                _ => None,
+            },
+        },
+        // MOD_MT_Defs 按此开关创建泥沙，Lifecycle 注册正索引；参数文件不控制启用。
+        "sediment_particle_enabled()" => truth_value(doc, "DEF_USE_SEDIMENT"),
+        _ => truth_value(doc, expression),
+    }
 }
 
 fn truth_value(doc: &colm_namelist::Document, path: &str) -> Option<bool> {

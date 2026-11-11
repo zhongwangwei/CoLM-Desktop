@@ -78,13 +78,13 @@ pub struct Field {
     /// 它属于哪个 namelist 组，也就是**该写进哪个文件**。
     pub group: Option<&'static str>,
     /// `true` 表示用户设了也没用 —— 有声明有默认值，但不在任何 namelist 组里。
-    /// 实测 6 个，其中 `DEF_dir_history` 在 `MOD_Namelist.F90:1406` 被无条件覆盖。
+    /// 例如输出子目录由 `read_namelist` 根据 `DEF_dir_output` 无条件派生。
     /// 界面该把它们显示成只读的派生值：给一个改了没用的输入框比不显示更糟。
     pub derived: bool,
-    /// 合法取值，非空时界面给下拉框而不是文本框。当前 30 个字段有。
+    /// 合法取值，非空时界面给下拉框而不是文本框。取值来自 schema 扫描与补全。
     pub values: Vec<&'static str>,
     /// 需要哪些编译期宏。与所选内核 `manifest.json` 的 `macros` 求交，
-    /// 交不上就说明这个字段在当前内核下**根本没用**。实测 68 个字段有依赖。
+    /// 交不上就说明这个字段在当前内核下**根本没用**。依赖来自 schema 的源码扫描。
     pub requires: &'static [&'static str],
     /// 从 CoLM 源码字段名与 namelist 组推导的功能分组。
     pub section: &'static str,

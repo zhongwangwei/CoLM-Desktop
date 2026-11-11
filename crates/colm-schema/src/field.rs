@@ -39,11 +39,12 @@ pub struct Field {
     pub owner: Option<&'static str>,
     /// 这个字段可以从**哪个 namelist 组**设置。
     ///
-    /// `None` 意味着它在 `MOD_Namelist.F90` 里有声明、有默认值，但不出现在
+    /// `None` 意味着它在上游 namelist 模块里有声明、有默认值，但不出现在
     /// 任何 `namelist /.../` 语句里，不能通过 namelist 修改。例如：
     /// `DEF_dir_history` / `DEF_dir_landdata` / `DEF_dir_restart` 由
     /// `DEF_dir_output` 派生（`read_namelist` 中无条件覆盖），
-    /// `DEF_USE_IGBP` / `DEF_USE_USGS` / `DEF_Wetland_finundation_scheme` 由宏决定。
+    /// `DEF_USE_IGBP` / `DEF_USE_USGS` 由编译宏决定；
+    /// `DEF_Wetland_finundation_scheme` 在 `MOD_MT_Namelist.F90` 中直接赋值。
     /// GUI 应当把它们显示成只读的派生值，而不是给一个改了没用的输入框。
     ///
     /// 派生类型成员继承容器所在的组，所以 `DEF_forcing%dataset` 是

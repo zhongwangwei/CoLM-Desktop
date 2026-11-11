@@ -788,3 +788,31 @@ test('only verified active routing methane modes close with river routing', asyn
   for (const mode of ['wetwat', 'satellite', 'giems', 'dynamic_wtd', 'dynamic-wtd', 'future', ''])
     assert.equal(result(mode).patch.DEF_USE_METHANE, undefined);
 });
+
+test('explicit removals remain distinct from absent settings without claiming an enabled family', async () => {
+  const { exclusionPatch } = await import('./model-settings');
+  const on = '.true.';
+  const context = { domain: 'region', grid: 'latlon', subgrid: 'PFT' };
+  const regional = { DEF_UnitCatchment_regional: on };
+  const current = { ...regional, DEF_USE_BGC: on, DEF_USE_METHANE: on };
+  assert.deepEqual(exclusionPatch(current, {}, context), { patch: {}, closed: [] });
+  const removed = exclusionPatch(current, { DEF_USE_BGC: null }, context);
+  assert.equal(removed.patch.DEF_USE_BGC, null);
+  assert.equal(removed.patch.DEF_USE_METHANE, '.false.');
+  const selected = exclusionPatch(
+    { ...regional, DEF_USE_BGC: on },
+    { DEF_USE_BGC: null, DEF_USE_LULCC: on },
+    context,
+  );
+  assert.equal(selected.patch.DEF_USE_BGC, null);
+  assert.equal(selected.patch.DEF_USE_LULCC, on);
+  assert.ok(!selected.closed.some((entry) => entry.key === 'DEF_USE_BGC'));
+  const urban = exclusionPatch(
+    { ...regional, DEF_USE_ISOTOPE: on, DEF_SOLUTE_NAMES: "'nitrate'" },
+    { DEF_URBAN_RUN: on, DEF_SOLUTE_NAMES: null },
+    context,
+  );
+  assert.equal(urban.patch.DEF_URBAN_RUN, on);
+  assert.equal(urban.patch.DEF_USE_ISOTOPE, '.false.');
+  assert.equal(urban.patch.DEF_SOLUTE_NAMES, null);
+});

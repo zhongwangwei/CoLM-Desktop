@@ -475,3 +475,35 @@ test('a field opening a dialog stops the remaining assistant writes', async () =
     else Reflect.deleteProperty(globalThis, 'document');
   }
 });
+
+test('scientific workflow routes recommended to the assistant are available guide aliases', () => {
+  const prompt = readFileSync(
+    new URL('../../../crates/colm-agent/src/prompt.md', import.meta.url),
+    'utf8',
+  );
+  const source = ts.createSourceFile(
+    'guide.ts',
+    readFileSync(new URL('./guide.ts', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const aliases = new Set<string>();
+  const visit = (node: ts.Node) => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.name.getText(source) === 'pageAliases' &&
+      node.initializer &&
+      ts.isObjectLiteralExpression(node.initializer)
+    ) {
+      for (const property of node.initializer.properties) {
+        if (property.name && ts.isStringLiteral(property.name)) aliases.add(property.name.text);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const recommended = [...prompt.matchAll(/\b(?:result|hybrid)-[a-z]+\b/g)].map(([step]) => step);
+  assert.ok(recommended.length > 0);
+  for (const step of recommended)
+    assert.ok(aliases.has(step), `${step} is not an available guide alias`);
+});

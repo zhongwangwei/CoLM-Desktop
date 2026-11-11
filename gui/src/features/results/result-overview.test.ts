@@ -152,3 +152,13 @@ test('unknown Chinese backend warnings retain their evidence with a language lab
   );
   assert.equal(metricWarningText('new diagnostic', true), 'new diagnostic');
 });
+
+test('translated warnings with Chinese evidence labels are not marked as untranslated', () => {
+  const result = metricWarningText(
+    'case.nml 声明 DEF_HIST_FREQ = 每天，history 标签显示是 每月；按 history 为准',
+    true,
+  );
+  assert.match(result, /case.nml declares/);
+  assert.match(result, /每天/);
+  assert.doesNotMatch(result, /Chinese original/);
+});

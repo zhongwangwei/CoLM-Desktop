@@ -54,3 +54,24 @@ test('blocked history variables explain themselves in English too', () => {
   );
   assert.equal(historyBlockedReason('需要 DEF_USE_BGC', false), '需要 DEF_USE_BGC');
 });
+
+test('spatial and unmapped writer reasons are translated without changing Chinese', () => {
+  for (const [reason, english] of [
+    [
+      '仅已核对 Fortran 空间写出点；当前运行引擎的输出能力尚未核对',
+      'Only the Fortran spatial writers have been verified; output support for the selected engine is unverified',
+    ],
+    [
+      '当前源码只声明或同步此开关，没有历史写出入口',
+      'The current source only declares or synchronizes this switch, with no history writer',
+    ],
+    [
+      '闸门表里没有这一条，写不写得出来未知',
+      'No writer mapping is available; output support is unknown',
+    ],
+    ['条件 DEF_Unknown > 0 需要人工判断', 'Condition DEF_Unknown > 0 requires manual verification'],
+  ]) {
+    assert.equal(historyBlockedReason(reason, true), english);
+    assert.equal(historyBlockedReason(reason, false), reason);
+  }
+});

@@ -663,3 +663,36 @@ test('projectSummary counts assistant and study terminal states as finished', as
   });
   assert.equal(summary.cases, 5);
 });
+
+test('history displays recorded stage resources and supports legacy thread evidence', () => {
+  const operation = {
+    detail: {
+      provenance: {
+        kind: 'provenance-reference',
+        summary: {
+          execution_environment: {
+            RAYON_NUM_THREADS: '6',
+            COLM_MPIEXEC: '/bin/mpiexec',
+            COLM_MPIEXEC_ARGS: '--bind-to core',
+          },
+          execution_launches: [
+            {
+              stage: 'colm',
+              program: '/bin/mpiexec',
+              ranks: 2,
+              requested_threads: 6,
+              thread_mode: 'explicit',
+            },
+          ],
+        },
+      },
+    },
+  } as unknown as import('../../lib/types').HistoryOperation;
+  const rows = historySections({ operation, events: [], related: [] }, true).flatMap(
+    (section) => section.rows,
+  );
+  assert.equal(rows.find((row) => row.en === 'Threads')?.value, '6');
+  assert.equal(rows.find((row) => row.en === 'Launcher')?.value, '/bin/mpiexec');
+  assert.equal(rows.find((row) => row.en === 'colm · Ranks')?.value, '2');
+  assert.equal(rows.find((row) => row.en === 'colm · Program')?.value, '/bin/mpiexec');
+});

@@ -393,7 +393,15 @@ export function historyPreset(
  */
 export function historyBlockedReason(reason: string, en: boolean): string {
   if (!en) return reason;
+  if (reason === '当前源码只声明或同步此开关，没有历史写出入口')
+    return 'The current source only declares or synchronizes this switch, with no history writer';
   if (reason === '需要 CH4 甲烷材料') return 'Requires the CH4 methane material';
+  if (reason === '仅已核对 Fortran 空间写出点；当前运行引擎的输出能力尚未核对')
+    return 'Only the Fortran spatial writers have been verified; output support for the selected engine is unverified';
+  if (reason === '闸门表里没有这一条，写不写得出来未知')
+    return 'No writer mapping is available; output support is unknown';
+  const condition = /^条件 (.+) 需要人工判断$/.exec(reason);
+  if (condition) return `Condition ${condition[1]} requires manual verification`;
   const kernel = /^本内核未编入：需要 (.+)$/.exec(reason);
   if (kernel) return `Not compiled into this kernel: requires ${kernel[1]}`;
   const needs = /^需要 (.+)$/.exec(reason);

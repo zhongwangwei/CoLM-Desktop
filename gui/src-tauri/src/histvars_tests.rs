@@ -139,18 +139,26 @@ fn a_runtime_switch_is_evaluated_against_this_case() {
 
 #[test]
 fn a_switch_the_gate_table_does_not_know_says_so() {
-    // 有几十个开关在闸门表里没有对应条目（多为 DA_*）。
-    // **不知道就说不知道** —— 当成能写会让人以为勾上就有输出。
+    let macros = std::collections::BTreeSet::new();
+    let unknown = configuration_writability("future_unmapped", &macros, &|_| None, Some("fortran"));
+    assert_eq!(unknown.0, None);
+    assert!(unknown.1.is_some());
     if !have_kernel("default") {
         return;
     }
     let v = hist_vars("&nl_colm\n/\n".into(), kernel("default"), None).expect("runs");
-    let unknown: Vec<&HistVar> = v.iter().filter(|x| x.writable.is_none()).collect();
-    assert!(!unknown.is_empty(), "一个未知都没有，判据大概失效了");
-    assert!(
-        unknown.iter().all(|x| x.blocked_by.is_some()),
-        "未知也要有说法"
-    );
+    for name in UNWRITTEN {
+        let field = v
+            .iter()
+            .find(|field| field.name.eq_ignore_ascii_case(name))
+            .unwrap();
+        assert_eq!(field.writable, Some(false));
+        assert!(field
+            .blocked_by
+            .as_deref()
+            .unwrap()
+            .contains("没有历史写出入口"));
+    }
     assert_eq!(v.len(), 586, "hist_vars 应当覆盖全部 586 个开关");
 }
 
@@ -378,12 +386,11 @@ fn river_switches_follow_output_mapping_and_kernel_runtime_gates() {
                 let var = vars.iter().find(|v| v.name == name).unwrap();
                 let fortran = fortran_vars.iter().find(|v| v.name == name).unwrap();
                 if preset == "latlon" {
-                    assert_eq!(var.writable, None);
-                    assert!(var.blocked_by.as_deref().unwrap().contains("当前运行引擎"));
-                    assert_eq!(fortran.writable, None);
+                    assert_eq!(var.writable, Some(false));
+                    assert_eq!(fortran.writable, Some(false));
                     assert_eq!(
                         fortran.blocked_by.as_deref(),
-                        Some("条件 DEF_Reservoir_Method > 0 需要人工判断")
+                        Some("需要 DEF_Reservoir_Method > 0")
                     );
                 } else {
                     assert_eq!(var.writable, Some(false));
@@ -478,4 +485,82 @@ fn spatial_writer_evidence_does_not_claim_rust_support() {
         configuration_writability("not_a_writer", &macros, &truth, Some("fortran")).0,
         None
     );
+}
+
+#[test]
+fn verified_spatial_runtime_atoms_follow_actual_configuration() {
+    let macros = std::collections::BTreeSet::from(["GridRiverLakeFlow"]);
+    for enabled in [false, true] {
+        let method = if enabled { 2 } else { 0 };
+        let logical = if enabled { ".true." } else { ".false." };
+        let doc = colm_namelist::parse(&format!(
+            "&nl_colm\n DEF_Reservoir_Method={method}\n/\n&nl_colm_material\n DEF_USE_SEDIMENT={logical}\n/\n"
+        )).unwrap();
+        for switch in [
+            "volresv",
+            "qresv_in",
+            "qresv_out",
+            "sedcon",
+            "sedout",
+            "bedout",
+            "sedinp",
+            "netflw",
+            "sedlayer",
+            "shearvel",
+        ] {
+            let truth = |expression: &str| runtime_truth(&doc, expression);
+            assert_eq!(
+                configuration_writability(switch, &macros, &truth, Some("fortran")).0,
+                Some(enabled),
+                "{switch}"
+            );
+            if enabled {
+                assert_eq!(
+                    configuration_writability(switch, &macros, &truth, Some("rust")).0,
+                    None
+                );
+            }
+        }
+        assert_eq!(runtime_truth(&doc, "DEF_Unknown > 0"), None);
+        assert_eq!(runtime_truth(&doc, "unverified_function()"), None);
+    }
+    let malformed = colm_namelist::parse("&nl_colm\n DEF_Reservoir_Method='bad'\n/\n").unwrap();
+    assert_eq!(runtime_truth(&malformed, "DEF_Reservoir_Method > 0"), None);
+}
+
+#[test]
+fn unwritten_switches_have_no_unsynchronized_fortran_consumers() {
+    let mut pending =
+        vec![std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vendor/CoLM202X")];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|extension| extension != "F90") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap().to_ascii_lowercase();
+            for line in text.lines().filter(|line| {
+                !line.trim_start().starts_with('!') && !line.contains("call sync_hist_vars_one")
+            }) {
+                for name in UNWRITTEN {
+                    assert!(
+                        !line.contains(&format!("def_hist_vars%{name}")),
+                        "{} now consumes {name}: {line}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    for name in UNWRITTEN {
+        assert!(!colm_hist::generated::VARS
+            .iter()
+            .chain(colm_hist::generated::SPATIAL_VARS)
+            .any(|writer| writer.switch == Some(*name)));
+    }
 }

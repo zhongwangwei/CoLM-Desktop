@@ -134,13 +134,19 @@ pub(crate) fn value(record: &Record<'_>, ok: bool, error: Option<&str>) -> Value
                 });
                 value["execution_launches"] = json!(executions);
             }
-            Err(error) => value["execution_launches_error"] = json!(error.to_string()),
+            Err(error) => {
+                value["execution_launches_status"] = json!("incomplete");
+                value["execution_launches_error"] = json!(error.to_string());
+            }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             value["execution_launches"] = json!([]);
             value["execution_launches_status"] = json!("not_recorded");
         }
-        Err(error) => value["execution_launches_error"] = json!(error.to_string()),
+        Err(error) => {
+            value["execution_launches_status"] = json!("unavailable");
+            value["execution_launches_error"] = json!(error.to_string());
+        }
     }
     match input_sources(record.case) {
         Ok(sources) => value["input_sources"] = sources,

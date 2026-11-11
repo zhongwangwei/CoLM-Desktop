@@ -145,6 +145,7 @@ export type RunState = {
   location?: 'local' | 'remote';
   run_id?: string;
   operation_id?: string;
+  execution_environment?: Record<string, unknown>;
   status: string;
   running: boolean;
   case: string;

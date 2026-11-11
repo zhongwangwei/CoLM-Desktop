@@ -5874,3 +5874,58 @@ for (const language of ['zh', 'en'])
       assert.equal(text.includes(notice), visible);
     }
   });
+
+test('an unselected engine requests configuration without an invalid empty engine', async () => {
+  const p = page('NewCasePage', undefined, [site], initialValues, {
+    configuration: async (args) => {
+      assert.equal(args.engine, null);
+      return { fields: [], history_variables: [] };
+    },
+  });
+  await p.mount();
+  const calls = p.calls.filter((call) => call.command === 'model_configuration');
+  assert.ok(calls.length > 0);
+  assert.ok(calls.every((call) => call.args.engine === null));
+});
+
+test('a capability change removes unsupported enabled history overrides from the creation payload', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, engine: 'fortran' },
+      sites: [site],
+      step: 5,
+      caseValues: { 'DEF_hist_vars%fsena': '.true.', 'DEF_hist_vars%volresv': '.true.' },
+    },
+    [site],
+    initialValues,
+    {
+      schema: ['fsena', 'volresv'].map((name) => ({
+        ...field(`DEF_hist_vars%${name}`, '输出变量', '.false.'),
+        kind: 'Logical',
+      })),
+      configuration: async (args) => ({
+        fields: [],
+        history_variables: [
+          { name: 'fsena', settable: true, writable: true },
+          { name: 'volresv', settable: true, writable: args.engine === 'fortran' },
+        ],
+      }),
+    },
+  );
+  await p.mount();
+  assert.equal(
+    (p.element('HistoryVariablesCard').props.values as Record<string, string>)[
+      'DEF_hist_vars%volresv'
+    ],
+    '.true.',
+  );
+  await p.click('new-step-1');
+  p.set('new-engine', 'rust');
+  await p.settle();
+  await p.goto('new-step-5');
+  await p.settle();
+  const values = p.element('HistoryVariablesCard').props.values as Record<string, string>;
+  assert.equal(values['DEF_hist_vars%volresv'], undefined);
+  assert.equal(values['DEF_hist_vars%fsena'], '.true.');
+});

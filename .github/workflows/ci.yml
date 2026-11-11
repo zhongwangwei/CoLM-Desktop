@@ -247,6 +247,8 @@ jobs:
         run: |
           cargo run -q -p xtask -- parameter-audit
           git diff --exit-code -- artifacts/parameter-audit
+          python scripts/generate-manual-appendices.py
+          git diff --exit-code -- docs/user-manual/appendices
           cargo run -q -p xtask -- check-gui
 
       - name: Clippy

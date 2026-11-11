@@ -161,7 +161,7 @@ export function metricWarningText(value: unknown, en: boolean): string {
       /^观测覆盖率均值 (.+)% 偏低（<(.+)%），整段均值代表的是部分时段$/,
       'Mean observation coverage is low ($1%, below $2%); interval means represent only part of each period',
     );
-  return /[\u3400-\u9fff]/.test(translated)
+  return translated === text && /[\u3400-\u9fff]/.test(text)
     ? `Backend warning (Chinese original): ${translated}`
     : translated;
 }

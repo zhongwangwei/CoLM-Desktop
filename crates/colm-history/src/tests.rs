@@ -1295,3 +1295,18 @@ fn imported_ui_terminal_states_are_not_pending_reconciliation() {
         .unwrap();
     assert_eq!(settled.total, 4, "{settled:?}");
 }
+
+#[test]
+fn provenance_summary_keeps_stage_resources_without_copying_unbounded_arguments() {
+    let dir = Temp::new();
+    let value = json!({"execution_environment":{"RAYON_NUM_THREADS":"6"},"execution_launches_status":"recorded","execution_launches":[{"stage":"colm","program":"/launcher","ranks":2,"requested_threads":6,"args":["x".repeat(100_000)]}]});
+    let path = dir.file("launches.json", &value);
+    let reference = capture_provenance(&path).unwrap();
+    assert_eq!(
+        reference["summary"]["execution_environment"]["RAYON_NUM_THREADS"],
+        "6"
+    );
+    assert_eq!(reference["summary"]["execution_launches"][0]["ranks"], 2);
+    assert!(reference["summary"]["execution_launches"][0]["args"].is_null());
+    assert!(serde_json::to_vec(&reference).unwrap().len() < 4096);
+}

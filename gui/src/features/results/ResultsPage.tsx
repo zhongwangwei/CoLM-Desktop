@@ -5,7 +5,7 @@ import uPlot from 'uplot';
 import { modelClockIso, timeTicks } from './time-ticks';
 import { utcSeconds } from '../../lib/dates';
 import 'uplot/dist/uPlot.min.css';
-import { hasBackend, invoke, invokeJson } from '../../lib/ipc';
+import { invoke, invokeJson } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { Card, Field, Input, Select, Notice, Advanced, Dialog } from '../../components/ui';
@@ -18,13 +18,9 @@ import {
   energyDiagnosticSeries,
   fullSeriesCsv,
   parentRuns,
-  printReport,
-  reportFile,
   type EnergyDiagnostic,
   type RecordedRun,
-  type ReportFormat,
   type ResultMetric,
-  type ResultReport,
   type SeriesData,
 } from './series';
 import {
@@ -231,6 +227,16 @@ async function comparisonSources(entries: ComparisonEntry[], knownRuns: Run[]): 
   }
   return sources;
 }
+/** Remote-only batches may use six SSH sessions; mixed batches keep the local CPU cap. */
+function comparisonConcurrency(entries: ComparisonEntry[], knownRuns: Run[]): number {
+  const remoteOnly = entries.every((entry) => {
+    const run = knownRuns.find((item) => item.run_case === entry.run.run_case) ?? entry.run;
+    return !!run.server && statusOf(run) !== 'complete';
+  });
+  if (remoteOnly) return 6;
+  const cpus = typeof navigator === 'undefined' ? 1 : navigator.hardwareConcurrency;
+  return Math.min(4, Math.max(1, Math.floor(cpus || 1)));
+}
 /**
  * 单个条目的比较指标。比较与「重试失败项」共用同一份参数构造：条件和窗口都读比较时的
  * `request` 快照，不读重试时界面上的新输入。成功的行带上站点与观测，供表格/CSV 用。
@@ -242,6 +248,13 @@ async function comparisonMetricsFor(
   window: (from: string, to: string) => { from: number | null; to: number | null },
   current: () => boolean = () => true,
 ): Promise<Metric[]> {
+  if (!entry.obs.trim())
+    throw new Error(
+      bilingual(
+        '该运行缺少观测文件，请填写后重新比较',
+        'This run needs an observation file; fill it and compare again',
+      ),
+    );
   sources = await comparisonSources([entry], sources);
   if (!current()) return [];
   if (!sources.some((run) => run.run_case === entry.run.run_case))
@@ -368,15 +381,7 @@ type Metric = ResultMetric & {
   correction_reason?: string | null;
   time_basis?: TimeBasis;
 };
-const tabs = [
-  'overview',
-  'catalog',
-  'series',
-  'evaluation',
-  'comparison',
-  'diagnostics',
-  'report',
-] as const;
+const tabs = ['overview', 'catalog', 'series', 'evaluation', 'comparison', 'diagnostics'] as const;
 /** 页签的中英文名称；页签按钮与助手契约共用一份，避免两处各写一遍再走样。 */
 const tabLabels = {
   en: [
@@ -386,14 +391,12 @@ const tabLabels = {
     'Observation evaluation',
     'Site comparison',
     'Diagnostics',
-    'Report',
   ],
-  zh: ['结果总览', '数据目录', '时序分析', '观测评估', '多站比较', '闭合诊断', '报告导出'],
+  zh: ['结果总览', '数据目录', '时序分析', '观测评估', '多站比较', '闭合诊断'],
 } as const;
 /**
  * 站点内的页签：随上面选中的站点/运行变化。多站点比较不是页签，而是"分析范围"里的另一个选项，
  * 由结果页上方的单站点/多站点选择器切换（2026-10-28 用户反馈：别把跨站点功能混进站点页签）。
- * 报告导出视图已从界面移除（用户要求），保留内部 tab 支持。
  */
 const stationTabs = ['overview', 'catalog', 'series', 'evaluation', 'diagnostics'] as const;
 const tabIndex = (name: (typeof tabs)[number]) => tabs.indexOf(name);
@@ -590,13 +593,12 @@ export default function ResultsPage({
   const [singleResult, setSingleResult] = useState<SingleResult<Metric> | null>(null);
   const [baseline, setBaseline] = useState<BaselineComparison | null>(null);
   const [baselineNote, setBaselineNote] = useState('');
-  const [reportFormat, setReportFormat] = useState<ReportFormat>('json');
   const [exportNotice, setExportNotice] = useState('');
   const [tab, setTab] = useState<(typeof tabs)[number]>('overview');
   // 单站点/多站点是"分析范围"，不是页签：多站点就是多运行比较页，页签只保留站点内视图。
   // 记住进多站点前看的是哪个站点内视图，切回单站点时回到原处。
   const lastStationTab = useRef<(typeof tabs)[number]>('overview');
-  if (tab !== 'comparison' && tab !== 'report') lastStationTab.current = tab;
+  if (tab !== 'comparison') lastStationTab.current = tab;
   const multiStation = tab === 'comparison';
   const [runs, setRuns] = useState<Run[]>([]);
   // 运行清单的读取状态要能区分「还在读」「真没有」「读失败」：原来三者都落到「尚无运行」或空白。
@@ -694,7 +696,6 @@ export default function ResultsPage({
   const metrics = multiStation ? comparisonMetrics : singleRows;
   const singleFresh = singleResult !== null && fresh(singleResult, selectionKey);
   const comparisonFresh = comparisonResult !== null && fresh(comparisonResult, comparisonFreshKey);
-  const singleExportGate = exportGate(singleResult, selectionKey);
   const comparisonExportGate = exportGate(comparisonResult, comparisonFreshKey);
   const timeBasisText = timeBasisLabel(timeBasisOf(catalog ?? series), en);
   const selectedSeriesKey = JSON.stringify({ source, variable, from, to });
@@ -839,7 +840,7 @@ export default function ResultsPage({
       cancelled = true;
       requestEpoch.current++;
     };
-  }, [source, caseDir, versionId, revision, completedRunCase]);
+  }, [source, caseDir, versionId, revision]);
   // 单站评估的输入条件变化：作废在途的单站请求，但**保留上一次的快照**并在表上方标「待更新」。
   // 直接清空会让「条件已改」和「从没算过」看起来一样；导出仍由 exportGate 按条件一致性挡住。
   useEffect(() => {
@@ -1237,13 +1238,6 @@ export default function ResultsPage({
             `Select 1–${MAX_COMPARISON_RUNS} runs to compare`,
           ),
         );
-      if (entries.some((entry) => !entry.obs.trim()))
-        throw new Error(
-          bilingual(
-            '每个运行都要有观测文件；可以先在上面填一个共用观测再点「应用到所有行」',
-            'Every run needs an observation file; fill the shared one and apply it to all rows',
-          ),
-        );
       const sources = projectRuns;
       // 进度绑定本次任务 id：旧任务既不能推进新任务的进度，也不能在 finally 里清掉它。
       comparisonTaskId.current++;
@@ -1255,11 +1249,11 @@ export default function ResultsPage({
           );
       };
       setComparisonProgress({ done: 0, total: entries.length });
-      // 远程每行一次 SSH；10 个会话的上限内 6 路并行，90 个站点时比 4 路更快。
+      // Remote-only batches use up to six SSH sessions; local/mixed batches respect CPU capacity.
       try {
         const settled = await boundedMapSettled(
           entries,
-          6,
+          comparisonConcurrency(entries, sources),
           async (entry) => {
             try {
               return await comparisonMetricsFor(entry, request, sources, windowArgs, live);
@@ -1329,7 +1323,7 @@ export default function ResultsPage({
       try {
         const settled = await boundedMapSettled(
           retryEntries,
-          6,
+          comparisonConcurrency(retryEntries, sources),
           async (entry) => {
             try {
               return await comparisonMetricsFor(entry, request, sources, windowArgs, live);
@@ -1389,82 +1383,6 @@ export default function ResultsPage({
       const result = await download(name, text, 'text/csv;charset=utf-8');
       if (current()) setExportNotice(exportMessage(result));
       return { ...result, n: data.n, source_n: data.source_n, downsampled: false };
-    });
-  function reportData(): ResultReport {
-    // 报告只描述一份结果：单站评估快照。条件与变量可用性都取自快照，而不是当前界面输入。
-    const snapshot = singleResult;
-    const rows = snapshot?.rows ?? [];
-    const request = snapshot?.request;
-    return {
-      generated_at: new Date().toISOString(),
-      source,
-      provenance: runs.find((r) => r.run_case === source) || null,
-      catalog,
-      evaluation: snapshot?.evaluation ?? [],
-      metrics: rows.map((metric) => {
-        const summary = { ...metric };
-        delete summary.time;
-        delete summary.model;
-        delete summary.obs;
-        return summary;
-      }),
-      diagnostic,
-      baseline,
-      baselineNote,
-      conditions: {
-        obs: request?.obs ?? obs,
-        from: request?.from ?? from,
-        to: request?.to ?? to,
-        spinup: request?.spinup ?? spinup,
-        corrected: request?.corrected ?? corrected,
-        comparisonSources: comparisonText(comparisonEntries),
-      },
-      notice: tr(
-        '输入或评估条件不一致时，不自动排名',
-        'No automatic ranking across unequal inputs or evaluation conditions',
-      ),
-    };
-  }
-  const report = () =>
-    task(async (current) => {
-      setExportNotice('');
-      if (!catalog)
-        throw new Error(
-          bilingual('请先读出一次运行的结果再导出', 'Load a recorded result before exporting'),
-        );
-      // 报告带条件列，只允许导出与当前条件一致的已完成评估；否则下游会拿旧结果当新条件的报告。
-      if (!singleExportGate.ok)
-        throw new Error(
-          singleExportGate.reason === 'none'
-            ? bilingual(
-                '请先完成一次观测评估再导出报告',
-                'Run an observation evaluation before exporting the report',
-              )
-            : bilingual(
-                '评估条件已改，请重新评估后再导出报告',
-                'Evaluation conditions changed; re-run the evaluation before exporting the report',
-              ),
-        );
-      const data = reportData();
-      if (reportFormat === 'pdf') {
-        const result = await printReport(
-          data,
-          en,
-          hasBackend() ? () => invoke('print_report') : undefined,
-        );
-        if (current())
-          setExportNotice(
-            tr(
-              '已请求打开打印对话框；请选择“另存为 PDF”。',
-              'Print dialog requested. Choose Save as PDF.',
-            ),
-          );
-        return result;
-      }
-      const file = reportFile(data, reportFormat, en);
-      const result = await download(file.filename, file.text, file.mime_type);
-      if (current()) setExportNotice(exportMessage(result));
-      return result;
     });
   async function chooseStation(dir: string) {
     if (lock.current || dir === caseDir) return;
@@ -1694,15 +1612,11 @@ export default function ResultsPage({
             id: 'result-tab',
             label: tr('分析视图', 'Analysis view'),
             type: 'choice',
-            // 报告导出视图不再出现在界面里（用户 2026-10-28：报告导出按钮不要）；保留内部 tab 支持，
-            // 因此这里只列出界面上真正能看到的页签。
             value: tab,
-            options: tabs
-              .filter((v) => v !== 'report')
-              .map((v) => ({
-                value: v,
-                label: en ? tabLabels.en[tabIndex(v)] : tabLabels.zh[tabIndex(v)],
-              })),
+            options: tabs.map((v) => ({
+              value: v,
+              label: en ? tabLabels.en[tabIndex(v)] : tabLabels.zh[tabIndex(v)],
+            })),
             disabled: busy,
             set: (v) => setTab(v as typeof tab),
           },
@@ -1823,22 +1737,6 @@ export default function ResultsPage({
         set: (v) => setCorrected(v === 'true'),
       },
     );
-  if (!runChooser && tab === 'report')
-    fields.push({
-      id: 'result-report-format',
-      label: tr('报告格式', 'Report format'),
-      value: reportFormat,
-      type: 'choice',
-      options: [
-        { value: 'json', label: 'JSON' },
-        { value: 'csv', label: 'CSV' },
-        { value: 'markdown', label: 'Markdown' },
-        { value: 'html', label: 'HTML' },
-        { value: 'pdf', label: 'PDF / Print' },
-      ],
-      disabled: busy,
-      set: (value) => setReportFormat(value as ReportFormat),
-    });
   // energy_summary 把基准放在顶层；诊断曲线用它，而不是只读 series（旧代码因此把区域 UTC 算例标成模型钟）。
   const displayedSeries = tab === 'diagnostics' ? energyDiagnosticSeries(diagnostic) : series;
   const truncatedGaps = displayedSeries?.downsampled && displayedSeries.gaps_truncated;
@@ -3239,91 +3137,93 @@ export default function ResultsPage({
               )}
             </Notice>
           )}
-          <table>
-            <thead>
-              <tr>
-                {[
-                  tr('站点', 'Site'),
-                  ...(tab === 'comparison'
-                    ? [tr('观测文件', 'Observation'), tr('时间基准', 'Time basis')]
-                    : []),
-                  tr('变量', 'Variable'),
-                  tr('单位', 'Units'),
-                  tr('配对数', 'n'),
-                  'RMSE',
-                  'MAE',
-                  tr('偏差', 'Bias'),
-                  'R²',
-                  'r',
-                  'NSE',
-                  'KGE',
-                  'α',
-                  'β',
-                  tr('模拟均值', 'Model mean'),
-                  tr('观测均值', 'Observed mean'),
-                  tr('模拟标准差', 'Model SD'),
-                  tr('观测标准差', 'Observed SD'),
-                  tr('QC 来源', 'QC source'),
-                  tr('订正', 'Correction'),
-                  tr('覆盖率', 'Coverage'),
-                ].map((s) => (
-                  <th key={s}>{s}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {metrics.map((m, i) => (
-                <tr key={i}>
-                  {/* 多运行比较的站点是运行目录（<算例>/runs/<编号>），整条路径占满一列：显示算例名和编号前 8 位。 */}
-                  <td title={m.site || source}>{runLabel(m.site || source)}</td>
-                  {tab === 'comparison' && (
-                    <td title={m.comparison_obs}>
-                      {m.comparison_obs?.split(/[\\/]/).at(-1) || '—'}
-                    </td>
-                  )}
-                  {tab === 'comparison' && (
-                    <td>
-                      {m.time_basis ? timeBasisLabel(m.time_basis, en) : tr('未知', 'Unknown')}
-                    </td>
-                  )}
-                  <td title={metricFrequencyTitle(m, en)}>{m.name}</td>
-                  <td
-                    title={
-                      m.units_assumed
-                        ? tr('未声明单位，按规范单位处理', 'No declared units; assumed canonical')
-                        : m.source_units && m.source_units !== m.units
-                          ? tr('源单位：', 'Source units: ') + m.source_units
-                          : undefined
-                    }
-                  >
-                    {m.units || '—'}
-                    {m.units_assumed ? '*' : ''}
-                  </td>
-                  <td>{m.n}</td>
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
                   {[
-                    m.rmse,
-                    m.mae,
-                    m.bias,
-                    m.r2,
-                    m.correlation,
-                    m.nse,
-                    m.kge,
-                    m.alpha,
-                    m.beta,
-                    m.model_mean,
-                    m.obs_mean,
-                    m.model_sd,
-                    m.obs_sd,
-                  ].map((v, j) => (
-                    <td key={j}>{number(v)}</td>
+                    tr('站点', 'Site'),
+                    ...(tab === 'comparison'
+                      ? [tr('观测文件', 'Observation'), tr('时间基准', 'Time basis')]
+                      : []),
+                    tr('变量', 'Variable'),
+                    tr('单位', 'Units'),
+                    tr('配对数', 'n'),
+                    'RMSE',
+                    'MAE',
+                    tr('偏差', 'Bias'),
+                    'R²',
+                    'r',
+                    'NSE',
+                    'KGE',
+                    'α',
+                    'β',
+                    tr('模拟均值', 'Model mean'),
+                    tr('观测均值', 'Observed mean'),
+                    tr('模拟标准差', 'Model SD'),
+                    tr('观测标准差', 'Observed SD'),
+                    tr('QC 来源', 'QC source'),
+                    tr('订正', 'Correction'),
+                    tr('覆盖率', 'Coverage'),
+                  ].map((s) => (
+                    <th key={s}>{s}</th>
                   ))}
-                  <td title={metricQcTitle(m)}>{metricQcLabel(m, en)}</td>
-                  <td title={metricCorrectionTitle(m)}>{metricCorrectionLabel(m, en)}</td>
-                  <td title={metricCoverageTitle(m, en)}>{metricCoverageText(m)}</td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {metrics.map((m, i) => (
+                  <tr key={i}>
+                    {/* 多运行比较的站点是运行目录（<算例>/runs/<编号>），整条路径占满一列：显示算例名和编号前 8 位。 */}
+                    <td title={m.site || source}>{runLabel(m.site || source)}</td>
+                    {tab === 'comparison' && (
+                      <td title={m.comparison_obs}>
+                        {m.comparison_obs?.split(/[\\/]/).at(-1) || '—'}
+                      </td>
+                    )}
+                    {tab === 'comparison' && (
+                      <td>
+                        {m.time_basis ? timeBasisLabel(m.time_basis, en) : tr('未知', 'Unknown')}
+                      </td>
+                    )}
+                    <td title={metricFrequencyTitle(m, en)}>{m.name}</td>
+                    <td
+                      title={
+                        m.units_assumed
+                          ? tr('未声明单位，按规范单位处理', 'No declared units; assumed canonical')
+                          : m.source_units && m.source_units !== m.units
+                            ? tr('源单位：', 'Source units: ') + m.source_units
+                            : undefined
+                      }
+                    >
+                      {m.units || '—'}
+                      {m.units_assumed ? '*' : ''}
+                    </td>
+                    <td>{m.n}</td>
+                    {[
+                      m.rmse,
+                      m.mae,
+                      m.bias,
+                      m.r2,
+                      m.correlation,
+                      m.nse,
+                      m.kge,
+                      m.alpha,
+                      m.beta,
+                      m.model_mean,
+                      m.obs_mean,
+                      m.model_sd,
+                      m.obs_sd,
+                    ].map((v, j) => (
+                      <td key={j}>{number(v)}</td>
+                    ))}
+                    <td title={metricQcTitle(m)}>{metricQcLabel(m, en)}</td>
+                    <td title={metricCorrectionTitle(m)}>{metricCorrectionLabel(m, en)}</td>
+                    <td title={metricCoverageTitle(m, en)}>{metricCoverageText(m)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
           {metrics
             .filter((m) => m.beta_warning)
             .map((m, i) => (
@@ -3453,53 +3353,6 @@ export default function ResultsPage({
               );
             })}
           </div>
-        </Card>
-      )}
-      {tab === 'report' && (
-        <Card title={tr('可追溯报告', 'Traceable report')}>
-          <p>
-            {tr(
-              '导出目录、真实指标、诊断、出处与评估条件。没有来源基准时不声称改进。',
-              'Export catalog, measured metrics, diagnostics, provenance and evaluation settings. No improvement claim without a valid baseline.',
-            )}
-          </p>
-          <Field label={tr('报告格式', 'Report format')}>
-            <Select
-              value={reportFormat}
-              disabled={busy}
-              onChange={(event) => setReportFormat(event.target.value as ReportFormat)}
-            >
-              {fields
-                .find((field) => field.id === 'result-report-format')
-                ?.options?.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-            </Select>
-          </Field>
-          <ActionButton
-            action="export-report"
-            label={
-              reportFormat === 'pdf'
-                ? tr('打印 / 另存为 PDF', 'Print / Save as PDF')
-                : tr('导出报告', 'Export report')
-            }
-            kind="commit"
-            disabled={!catalog || busy || !singleExportGate.ok}
-            run={report}
-          >
-            {reportFormat === 'pdf'
-              ? tr('打印 / 另存为 PDF', 'Print / Save as PDF')
-              : tr('导出报告', 'Export report')}
-          </ActionButton>
-          <pre className="overflow-auto">
-            {JSON.stringify(
-              runs.find((r) => r.run_case === source) || { run_case: source },
-              null,
-              2,
-            )}
-          </pre>
         </Card>
       )}
     </div>

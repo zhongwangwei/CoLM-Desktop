@@ -20,17 +20,17 @@ blockquote { margin: 4pt 0; padding: 5pt 7pt; border-left: 2pt solid #cfa15a; ba
 hr { border: none; border-top: 0.5pt solid #dbe5e2; }
 
 /* 附录宽表：按列分配宽度，避免字段名被挤成竖排 */
-table:has(thead th:nth-child(10)) { font-size: 6.9pt; }
-table:has(thead th:nth-child(10)) th:nth-child(1), table:has(thead th:nth-child(10)) td:nth-child(1) { width: 4.5%; }
-table:has(thead th:nth-child(10)) th:nth-child(2), table:has(thead th:nth-child(10)) td:nth-child(2) { width: 22%; }
-table:has(thead th:nth-child(10)) th:nth-child(3), table:has(thead th:nth-child(10)) td:nth-child(3) { width: 5%; }
-table:has(thead th:nth-child(10)) th:nth-child(4), table:has(thead th:nth-child(10)) td:nth-child(4) { width: 8%; }
-table:has(thead th:nth-child(10)) th:nth-child(5), table:has(thead th:nth-child(10)) td:nth-child(5) { width: 8%; }
-table:has(thead th:nth-child(10)) th:nth-child(6), table:has(thead th:nth-child(10)) td:nth-child(6) { width: 12%; }
-table:has(thead th:nth-child(10)) th:nth-child(7), table:has(thead th:nth-child(10)) td:nth-child(7) { width: 12%; }
-table:has(thead th:nth-child(10)) th:nth-child(8), table:has(thead th:nth-child(10)) td:nth-child(8) { width: 8%; }
-table:has(thead th:nth-child(10)) th:nth-child(9), table:has(thead th:nth-child(10)) td:nth-child(9) { width: 5%; }
-table:has(thead th:nth-child(10)) th:nth-child(10), table:has(thead th:nth-child(10)) td:nth-child(10) { width: 15.5%; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) { font-size: 6.9pt; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) th:nth-child(1), table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) td:nth-child(1) { width: 4.5%; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) th:nth-child(2), table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) td:nth-child(2) { width: 22%; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) th:nth-child(3), table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) td:nth-child(3) { width: 5%; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) th:nth-child(4), table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) td:nth-child(4) { width: 8%; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) th:nth-child(5), table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) td:nth-child(5) { width: 8%; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) th:nth-child(6), table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) td:nth-child(6) { width: 12%; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) th:nth-child(7), table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) td:nth-child(7) { width: 12%; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) th:nth-child(8), table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) td:nth-child(8) { width: 8%; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) th:nth-child(9), table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) td:nth-child(9) { width: 5%; }
+table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) th:nth-child(10), table:not(:has(thead th:nth-child(11))):has(thead th:nth-child(10)) td:nth-child(10) { width: 15.5%; }
 table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) { font-size: 6.9pt; }
 table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) th:nth-child(1), table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) td:nth-child(1) { width: 4.5%; }
 table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) th:nth-child(2), table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) td:nth-child(2) { width: 20%; }
@@ -41,3 +41,21 @@ table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) th:nth-child(
 table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) th:nth-child(7), table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) td:nth-child(7) { width: 8%; }
 table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) th:nth-child(8), table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) td:nth-child(8) { width: 8%; }
 table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) th:nth-child(9), table:not(:has(thead th:nth-child(10))):has(thead th:nth-child(9)) td:nth-child(9) { width: 17.5%; }
+
+/* 附录 B 增加写入目标与默认提供方后为 11 列，横向打印保留完整来源。 */
+@page tuning { size: A4 landscape; margin: 15mm 15mm 17mm 15mm; }
+.appendix-a, .appendix-b, .appendix-c { break-before: page; }
+.appendix-b { page: tuning; }
+.appendix-b table { font-size: 7pt; }
+.appendix-b table code { font-size: inherit; overflow-wrap: anywhere; }
+.appendix-b table th:nth-child(1), .appendix-b table td:nth-child(1) { width: 3%; }
+.appendix-b table th:nth-child(2), .appendix-b table td:nth-child(2) { width: 16%; }
+.appendix-b table th:nth-child(3), .appendix-b table td:nth-child(3) { width: 16%; }
+.appendix-b table th:nth-child(4), .appendix-b table td:nth-child(4) { width: 13%; }
+.appendix-b table th:nth-child(5), .appendix-b table td:nth-child(5) { width: 9%; }
+.appendix-b table th:nth-child(6), .appendix-b table td:nth-child(6) { width: 5%; }
+.appendix-b table th:nth-child(7), .appendix-b table td:nth-child(7) { width: 6%; }
+.appendix-b table th:nth-child(8), .appendix-b table td:nth-child(8) { width: 6%; }
+.appendix-b table th:nth-child(9), .appendix-b table td:nth-child(9) { width: 8%; }
+.appendix-b table th:nth-child(10), .appendix-b table td:nth-child(10) { width: 8%; }
+.appendix-b table th:nth-child(11), .appendix-b table td:nth-child(11) { width: 10%; }

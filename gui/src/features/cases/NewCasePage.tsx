@@ -882,7 +882,7 @@ export default function NewCasePage() {
     source: { kind: 'frozen', version: state.versionRef },
     caseDir: null,
     kernelDir: configurationKernel?.dir ?? null,
-    engine: form.engine,
+    engine: form.engine || null,
     pftSelection: null,
     caseValues: dataPatch,
   });
@@ -911,6 +911,20 @@ export default function NewCasePage() {
           setHistoryCapabilities({
             request: dataRequest,
             variables: result.history_variables ?? [],
+          });
+          const unavailable = new Set(
+            (result.history_variables ?? [])
+              .filter((variable) => !variable.settable || variable.writable !== true)
+              .map((variable) => `DEF_hist_vars%${variable.name}`),
+          );
+          setCaseValues((previous) => {
+            const obsolete = Object.keys(previous).filter(
+              (name) => unavailable.has(name) && previous[name].trim().toLowerCase() === '.true.',
+            );
+            if (!obsolete.length) return previous;
+            const next = { ...previous };
+            for (const name of obsolete) delete next[name];
+            return next;
           });
         }
       })

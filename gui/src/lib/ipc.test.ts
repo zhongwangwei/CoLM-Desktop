@@ -21,7 +21,9 @@ test('writes to a running case are refused whatever the directory argument is ca
   await assert.rejects(
     invoke('redirect_output_dir', { caseDir: '/p/running', targetDir: '/elsewhere' }),
   );
-  await assert.rejects(invoke('mark_results_stale', { dirs: ['/p/running'] }));
+  await assert.rejects(
+    invoke('set_field_batch', { dirs: ['/p/running'], path: 'DEF_USE_BGC', value: '.true.' }),
+  );
   await invoke('set_case_run_host', { dir: '/p/idle', host: null });
   assert.deepEqual(calls, ['set_case_run_host']);
 });

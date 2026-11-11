@@ -50,7 +50,10 @@ pub(crate) fn options(args: &mut Vec<String>, version: Option<&VersionRef>) -> R
 pub(crate) async fn cli(mut args: Vec<String>) -> Result<Value, String> {
     options(&mut args, None)?;
     let output = if args.first().is_some_and(|arg| arg == "model-migrate-case") {
-        let dir = args.get(1).ok_or("missing migration case")?.clone();
+        let dir = args
+            .get(1)
+            .ok_or("缺少迁移算例 / Missing migration case")?
+            .clone();
         crate::sidecar::capture_migration(args, move || {
             // 导入必须在迁移改绑前完成，也必须处于可取消的 pending 登记内。
             colm_history::History::open_default()

@@ -41,6 +41,12 @@ export function applyRunEvent(
     run_case: typeof payload.run_case === 'string' ? payload.run_case : base.run_case,
   };
   if (
+    payload.execution_environment &&
+    typeof payload.execution_environment === 'object' &&
+    !Array.isArray(payload.execution_environment)
+  )
+    next.execution_environment = payload.execution_environment as Record<string, unknown>;
+  if (
     next.running &&
     next.location === 'local' &&
     ['run://started', 'run://stage', 'run://progress'].includes(event)

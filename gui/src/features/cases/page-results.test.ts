@@ -17,7 +17,7 @@ import {
   sameParameterContextIdentity,
 } from '../studies/parameter-context-cache';
 import { boundedMap, boundedMapSettled } from '../results/series';
-import { comparisonCsv, comparisonKey, exportGate } from '../results/analysis-state';
+import { comparisonCsv, comparisonKey } from '../results/analysis-state';
 
 // Run the actual page callbacks with native IPC replaced; no duplicate task implementation.
 function callback(page: string, name: string, context: Record<string, unknown>) {
@@ -455,12 +455,14 @@ function comparisonPage(
     requestSeq?: { current: { single: number; multi: number } };
     unknown?: number;
     sourceError?: string;
+    missingObs?: number;
   } = {},
 ) {
   const page = '../results/ResultsPage.tsx';
   const indexes = options.entries ?? [0, 1, 2];
   const runs = indexes.map((index) => resultRun(index));
   const comparisonEntries = runs.map((run, at) => ({ run, obs: `/obs/${indexes[at]}.nc` }));
+  if (options.missingObs !== undefined) comparisonEntries[options.missingObs].obs = '';
   const requestSeq = options.requestSeq ?? { current: { single: 0, multi: 0 } };
   const published: Record<string, unknown>[] = [];
   const progress: unknown[] = [];
@@ -526,6 +528,7 @@ function comparisonPage(
     comparisonTaskId: { current: 0 },
     comparisonKey,
     boundedMapSettled,
+    comparisonConcurrency: () => 4,
     comparisonSources,
     comparisonMetricsFor,
     comparisonFailureReason,
@@ -662,14 +665,14 @@ test('cancelling a comparison stops claiming entries that have not started', asy
     { entries: [0, 1, 2, 3, 4, 5, 6, 7], requestSeq },
   );
   const pending = page.compare();
-  // 让 6 路并发把前 6 条都领走（已在飞）；后 2 条还没开始。
+  // 本机四路并发先领取四条，其余仍可被取消。
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(calls, 6, 'the concurrency limit claims six entries');
+  assert.equal(calls, 4, 'the local concurrency limit claims four entries');
   requestSeq.current.multi++;
   release();
   const rows = (await pending) as unknown[];
   assert.deepEqual(rows, []);
-  assert.equal(calls, 6, 'the remaining entries are never claimed after the conditions change');
+  assert.equal(calls, 4, 'the remaining entries are never claimed after the conditions change');
   assert.equal(page.published.length, 0);
   assert.equal(page.progress.at(-1), null, 'a cancelled task still clears its own progress');
 });
@@ -818,157 +821,6 @@ test('comparison export refuses a stale snapshot and writes the snapshot conditi
     'spinup/corrected/basis columns come from the compare-time snapshot',
   );
   assert.equal(notices.at(-1), 'saved');
-});
-
-test('Results report formats retain summary metrics and route native PDF through print_report', async () => {
-  const { reportFile } = await import('../results/series');
-  const page = '../results/ResultsPage.tsx',
-    noop = () => {};
-  const task = callback(page, 'task', {
-    lock: { current: false },
-    epoch: { current: 1 },
-    setBusy: noop,
-    setError: noop,
-  });
-  const metric = {
-    name: 'Qh',
-    n: 2,
-    rmse: 1,
-    mae: 1,
-    bias: 0,
-    r2: 0.81,
-    correlation: 0.9,
-    nse: 0.5,
-    kge: 0.7,
-    alpha: 1.1,
-    beta: 1,
-    time: [0, 1],
-    model: [1, 2],
-    obs: [1, 2],
-  };
-  const reportRequest = {
-    caseDir: '/case',
-    versionId: 'official',
-    revision: 1,
-    source: '/copy',
-    obs: '/obs.csv',
-    from: '',
-    to: '',
-    spinup: '0',
-    corrected: false,
-  };
-  const reportData = callback(page, 'reportData', {
-    tr: (zh: string) => zh,
-    source: '/copy',
-    runs: [],
-    catalog: { steps: 2 },
-    // 报告只描述单站评估快照；条件列取快照 request。
-    singleResult: {
-      scope: 'single',
-      key: 'report-key',
-      request: reportRequest,
-      rows: [metric],
-      evaluation: [],
-      completedAt: 1,
-    },
-    diagnostic: null,
-    baseline: null,
-    baselineNote: '',
-    obs: '/obs.csv',
-    from: '',
-    to: '',
-    spinup: '0',
-    corrected: false,
-    comparisonEntries: [],
-    comparisonText: () => '',
-  }) as unknown as () => Record<string, unknown>;
-  const snapshot = reportData();
-  const summary = (snapshot.metrics as Record<string, unknown>[])[0];
-  assert.equal(summary.correlation, 0.9);
-  assert.equal(summary.alpha, 1.1);
-  assert.equal(summary.time, undefined);
-  assert.equal(metric.time.length, 2);
-  const downloads: unknown[][] = [],
-    commands: string[] = [];
-  const common = {
-    task,
-    catalog: { steps: 2 },
-    reportData,
-    singleExportGate: exportGate(
-      {
-        scope: 'single',
-        key: 'report-key',
-        rows: [metric],
-      },
-      'report-key',
-    ),
-    en: true,
-    reportFile,
-    setExportNotice: noop,
-    exportMessage: callback(page, 'exportMessage', { tr: (zh: string) => zh }),
-    tr: (zh: string) => zh,
-    // 报告闸门的两条拒绝信息用 bilingual 拼；此前的用例从未走到抛错分支。
-    bilingual: (zh: string) => zh,
-    download: (...args: unknown[]) => {
-      downloads.push(args);
-      return { status: 'download_requested', filename: args[0], mime_type: args[2] };
-    },
-    hasBackend: () => true,
-    invoke: async (command: string) => {
-      commands.push(command);
-    },
-    printReport: async (_data: unknown, _en: boolean, native: () => Promise<unknown>) => {
-      await native();
-      return { status: 'printdialog_requested', format: 'pdf' };
-    },
-  };
-  for (const format of ['json', 'csv', 'markdown', 'html'])
-    assert.equal(
-      (
-        (await callback(page, 'report', { ...common, reportFormat: format })()) as Record<
-          string,
-          unknown
-        >
-      ).status,
-      'download_requested',
-    );
-  assert.equal(downloads.length, 4);
-  await assert.rejects(
-    callback(page, 'report', {
-      ...common,
-      singleExportGate: { ok: false, reason: 'conditions-changed' },
-    })(),
-    /重新评估/,
-    'a report never describes a stale single-station snapshot',
-  );
-  await assert.rejects(
-    callback(page, 'report', {
-      ...common,
-      singleExportGate: { ok: false, reason: 'none' },
-    })(),
-    /先完成一次观测评估/,
-  );
-  assert.equal(downloads.length, 4, 'stale report attempts do not download');
-  const result = await callback(page, 'report', { ...common, reportFormat: 'pdf' })();
-  assert.deepEqual(result, { status: 'printdialog_requested', format: 'pdf' });
-  assert.deepEqual(commands, ['print_report']);
-  assert.equal(downloads.length, 4, 'PDF uses the print dialog rather than claiming a saved file');
-  await assert.rejects(
-    callback(page, 'report', {
-      ...common,
-      reportFormat: 'pdf',
-      invoke: async () => {
-        throw new Error('native print failed');
-      },
-    })(),
-    /native print failed/,
-  );
-  const css = readFileSync(new URL('../../styles.css', import.meta.url), 'utf8');
-  assert.match(
-    css,
-    /body\s*>\s*\*:not\(#print-report\)\s*\{\s*display:\s*none\s*!important;?\s*\}/,
-  );
-  assert.match(css, /#print-report\s*\{\s*display:\s*block\s*!important/);
 });
 
 test('Results evaluation binds full metrics to the selected conditions and ignores stale responses', async () => {
@@ -1936,7 +1788,7 @@ test('automatic evaluation failures retain the manual evaluation retry action', 
     text,
     /action="evaluate-observations"[\s\S]*?disabled={!source \|\| !obs \|\| busy}[\s\S]*?run={evaluate}/,
   );
-  assert.match(text, /\[source, caseDir, versionId, revision, completedRunCase\]/);
+  assert.match(text, /\[source, caseDir, versionId, revision\]/);
 });
 
 test('a comparison cancelled during source lookup never starts metrics', async () => {
@@ -1972,4 +1824,41 @@ test('settled comparison defensively records empty fulfilled results as failures
   };
   assert.equal(result.rows.length, 0);
   assert.match(result.failures[0].error, /有效配对/);
+});
+
+test('comparison concurrency limits local and mixed work by CPU and remote-only work by SSH sessions', () => {
+  const page = '../results/ResultsPage.tsx';
+  const statusOf = callback(page, 'statusOf', {});
+  const local = { run: { run_case: '/local' }, obs: '/obs' };
+  const remote = {
+    run: { run_case: '/remote', server: 'cluster', outputs_local: false },
+    obs: '/obs',
+  };
+  for (const cpus of [1, 2, 8]) {
+    const concurrency = callback(page, 'comparisonConcurrency', {
+      statusOf,
+      navigator: { hardwareConcurrency: cpus },
+    });
+    assert.equal(concurrency([local], []), Math.min(4, cpus));
+    assert.equal(concurrency([local, remote], []), Math.min(4, cpus));
+    assert.equal(concurrency([remote], []), 6);
+    assert.equal(
+      concurrency([remote], [{ ...remote.run, outputs_local: true }]),
+      Math.min(4, cpus),
+    );
+  }
+});
+
+test('a missing observation fails only its own comparison row and never starts metrics for it', async () => {
+  const p = comparisonPage(async () => [resultMetric(0)], { missingObs: 1 });
+  await p.compare();
+  assert.equal(p.requests.filter((request) => request.command === 'metrics').length, 2);
+  const result = p.published[0] as {
+    rows: unknown[];
+    failures: { runCase: string; error: string }[];
+  };
+  assert.equal(result.rows.length, 2);
+  assert.equal(result.failures.length, 1);
+  assert.equal(result.failures[0].runCase, '/case/runs/1');
+  assert.match(result.failures[0].error, /观测/);
 });

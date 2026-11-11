@@ -4263,8 +4263,9 @@ fn run_case(
                 &mut forward,
             )?
         };
-        provenance::append_execution(case, &r.execution)
-            .context("cannot record the actual stage execution command")?;
+        if let Err(error) = provenance::append_execution(case, &r.execution) {
+            eprintln!("warning: 无法保存阶段启动记录 / Cannot record stage execution: {error:#}");
+        }
         notice(RunNotice::StageDone {
             stage: sname,
             ok: r.succeeded(),

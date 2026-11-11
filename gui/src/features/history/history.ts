@@ -233,6 +233,10 @@ export function historySections(detail: HistoryDetail, en = false): HistorySecti
         remote.parallel_plan ??
         provenance.parallel_plan,
     ),
+    environment = object(evidence.execution_environment ?? summary.execution_environment),
+    launches = (Array.isArray(summary.execution_launches) ? summary.execution_launches : []).map(
+      object,
+    ),
     status = object(evidence.status),
     identity = object(summary.full_input_identity),
     kernel = object(summary.kernel),
@@ -309,7 +313,20 @@ export function historySections(detail: HistoryDetail, en = false): HistorySecti
         row('核配置', 'Kernel', evidence.kernel ?? kernel.dir ?? summary.kernel),
         row('核身份', 'Kernel identity', kernel.identity),
         row('并行进程数', 'Parallel ranks', evidence.ranks ?? summary.ranks),
-        row('线程数', 'Threads', evidence.threads),
+        row('线程数', 'Threads', evidence.threads ?? environment.RAYON_NUM_THREADS),
+        row('启动记录状态', 'Launch record status', summary.execution_launches_status),
+        row('启动器', 'Launcher', environment.COLM_MPIEXEC),
+        row('启动器参数', 'Launcher arguments', environment.COLM_MPIEXEC_ARGS),
+        ...launches.flatMap((launch) => [
+          row(`${launch.stage} · 程序`, `${launch.stage} · Program`, launch.program),
+          row(`${launch.stage} · 进程数`, `${launch.stage} · Ranks`, launch.ranks),
+          row(
+            `${launch.stage} · 线程数`,
+            `${launch.stage} · Threads`,
+            launch.requested_threads ?? launch.rayon_num_threads,
+          ),
+          row(`${launch.stage} · 线程模式`, `${launch.stage} · Thread mode`, launch.thread_mode),
+        ]),
         // 自动预算的原始快照：重开运行页/查看历史时都要能核对提交时实际申请了什么（R-02）。
         row('自动并行预算（提交时）', 'Automatically resolved budget', parallelPlanText(parallel)),
       ],

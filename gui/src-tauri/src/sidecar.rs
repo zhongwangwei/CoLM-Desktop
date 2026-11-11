@@ -468,13 +468,17 @@ impl RunProcesses {
             .collect::<Result<Vec<_>, _>>()?;
         let mut unique = HashSet::with_capacity(keys.len());
         if let Some(key) = keys.iter().find(|key| !unique.insert(key.as_str())) {
-            return Err(format!("duplicate case in one run request: {key}"));
+            return Err(format!(
+                "一次运行请求中算例重复 / Duplicate case in one run request: {key}"
+            ));
         }
         if let Some(key) = keys
             .iter()
             .find(|key| state.pids.contains_key(*key) || state.pending.contains(*key))
         {
-            return Err(format!("{key} is already running"));
+            return Err(format!(
+                "{key} 正在运行或准备中 / {key} is already running or preparing"
+            ));
         }
         state.generation = state
             .generation
@@ -512,7 +516,9 @@ impl RunProcesses {
             return Ok(false);
         }
         if state.pids.contains_key(key) {
-            return Err(format!("{key} is already running"));
+            return Err(format!(
+                "{key} 正在运行或准备中 / {key} is already running or preparing"
+            ));
         }
         state.pending.remove(key);
         state.pids.insert(key.to_string(), pid);
@@ -1340,13 +1346,9 @@ pub async fn cancel_runs(
     cases: Option<Vec<String>>,
 ) -> Result<usize, String> {
     let processes = processes.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let migrations = migration_processes().cancel(cases.clone());
-        let runs = processes.cancel(cases);
-        Ok(migrations? + runs?)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || processes.cancel(cases))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// 不写本机运行状态、因而不在 `RunProcesses` 里的 `colm-cli` 子进程：远程提交/编引擎/取回，以及
@@ -1970,7 +1972,7 @@ fn validate_run_stage(stage: Option<&str>) -> Result<(), String> {
 pub(crate) fn validate_run_id(run_id: &str) -> Result<(), String> {
     (!run_id.trim().is_empty())
         .then_some(())
-        .ok_or_else(|| "run_id must not be empty".to_string())
+        .ok_or_else(|| "运行 ID 不能为空 / run_id must not be empty".to_string())
 }
 
 /// GUI 的单算例与批量路径必须构造完全相同的 sidecar 参数。
@@ -2111,7 +2113,8 @@ fn drain_stderr(err: std::process::ChildStderr) -> std::thread::JoinHandle<Vec<S
 fn failure_reason(err: &[String]) -> Option<String> {
     let tail: Vec<&str> = err.iter().rev().take(4).map(String::as_str).rev().collect();
     let s = tail.join(" / ");
-    (!s.trim().is_empty()).then_some(s)
+    (!s.trim().is_empty())
+        .then(|| format!("内核失败原因（原文） / Kernel failure reason (original): {s}"))
 }
 
 /// 读子进程的 stdout，边读边发事件，返回读完之后的统计与日志缓冲区。
@@ -2695,7 +2698,7 @@ fn run_one(
         let (out, err_pipe) = take_process_pipes(&mut child, processes, case)?;
         let _ = app.emit(
             "run://started",
-            serde_json::json!({ "run_id": run_id, "case": case, "source_case":case,"operation_id":event.as_ref().map(|event|&event.operation_id) }),
+            serde_json::json!({ "run_id": run_id, "case": case, "source_case":case,"operation_id":event.as_ref().map(|event|&event.operation_id), "execution_environment": execution_environment(&cmd) }),
         );
         let reader = pump(app, run_id, case, out);
         let error_app = app.clone();
@@ -5105,7 +5108,9 @@ pub async fn hybrid_fit(request: FitRequest) -> Result<serde_json::Value, String
 
 static MIGRATION_PROCESSES: OnceLock<RunProcesses> = OnceLock::new();
 fn migration_processes() -> &'static RunProcesses {
-    MIGRATION_PROCESSES.get_or_init(RunProcesses::default)
+    RUN_REGISTRY
+        .get()
+        .unwrap_or_else(|| MIGRATION_PROCESSES.get_or_init(RunProcesses::default))
 }
 
 /// 迁移属于具体算例，停止运行也要停止它；登记先于后台调度，避免启动间隙丢失取消。
@@ -5114,7 +5119,10 @@ pub(crate) async fn capture_migration(
     prepare_inputs: impl FnOnce() -> Result<(), String> + Send + 'static,
 ) -> Result<String, String> {
     let activity = crate::model::BindingChange::begin()?;
-    let case = args.get(1).ok_or("missing migration case")?.clone();
+    let case = args
+        .get(1)
+        .ok_or("缺少迁移算例 / Missing migration case")?
+        .clone();
     migration_processes().prepare(std::slice::from_ref(&case))?;
     tauri::async_runtime::spawn_blocking(move || {
         let _activity = activity;
@@ -5133,11 +5141,14 @@ pub(crate) async fn capture_migration(
         command.args(&args);
         let result = capture_registered_command(&mut command, processes, &case, event.as_ref());
         let cancelled = processes.forget(&case)?;
-        crate::history::command_finish(
-            event.as_ref(),
-            result,
-            if cancelled { "cancelled" } else { "succeeded" },
-        )
+        let phase = if result.is_ok() {
+            "succeeded"
+        } else if cancelled {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        crate::history::command_finish(event.as_ref(), result, phase)
     })
     .await
     .map_err(|e| e.to_string())?

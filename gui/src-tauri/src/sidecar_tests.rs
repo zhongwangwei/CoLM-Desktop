@@ -399,7 +399,7 @@ fn one_batch_cannot_schedule_the_same_case_twice() {
     let processes = RunProcesses::default();
     let case = "/tmp/duplicate".to_string();
     let error = processes.prepare(&[case.clone(), case]).unwrap_err();
-    assert!(error.contains("duplicate case"), "{error}");
+    assert!(error.to_lowercase().contains("duplicate case"), "{error}");
 }
 
 #[test]
@@ -1496,7 +1496,7 @@ fn stderr_capture_preserves_nonempty_lines_for_failure_reason() {
     assert_eq!(emitted, captured);
     assert_eq!(
         failure_reason(&captured).as_deref(),
-        Some("checking inputs / Error: missing data")
+        Some("内核失败原因（原文） / Kernel failure reason (original): checking inputs / Error: missing data")
     );
 }
 
@@ -1720,6 +1720,17 @@ fn config_writes_into_a_running_case_are_refused() {
     assert!(refuse_writes_into_running_cases(&[&roundabout]).is_err());
     refuse_writes_into_running_cases(&[&idle.join("case.nml")]).unwrap();
     processes.forget(&key).unwrap();
+    refuse_writes_into_running_cases(&[&running.join("case.nml")]).unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &migration_processes().inner,
+        &processes.inner
+    ));
+    migration_processes()
+        .prepare(std::slice::from_ref(&key))
+        .unwrap();
+    assert!(processes.prepare(std::slice::from_ref(&key)).is_err());
+    assert!(refuse_writes_into_running_cases(&[&running.join("case.nml")]).is_err());
+    migration_processes().forget(&key).unwrap();
     refuse_writes_into_running_cases(&[&running.join("case.nml")]).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }

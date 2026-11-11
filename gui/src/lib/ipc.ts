@@ -65,7 +65,6 @@ const caseWrites = new Set([
   'hybrid_climate',
   // 也改算例目录（GUI 审查 2026-10-22 发现漏在清单外）。参数是 `dirs`、单个 `dir` 或 `caseDir`。
   'set_case_run_host',
-  'mark_results_stale',
   'redirect_output_dir',
 ]);
 export async function invoke<T = unknown>(

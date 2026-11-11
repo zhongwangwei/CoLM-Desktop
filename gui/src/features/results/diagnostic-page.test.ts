@@ -691,10 +691,6 @@ test('an open run chooser lists the recorded runs and keeps the page buttons out
 test('每个结果 tab 的动作跟着该 tab 上真实的按钮走', async () => {
   const h = harness();
   await h.render();
-  await h.tab('report');
-  // 模型改进只留在结果总览的"下一步"卡片里，不再和其他页签的"返回总览"并列。
-  assert.deepEqual(actionIds(h), ['export-report', 'result-overview', 'result-runs']);
-  assert.equal(actionById(h, 'export-report')?.kind, 'commit');
   await h.tab('series');
   assert.deepEqual(actionIds(h), [
     'export-full-series-csv',
@@ -1523,4 +1519,20 @@ test('automatic evaluation keeps the settings dialog the user is editing open', 
   assert.ok(h.field('result-observation'), '自动重算完成后设置对话框仍然打开');
   assert.ok(h.field('result-advanced'), '高级设置折叠区也保持打开');
   assert.ok(evaluations() >= 2, '改条件触发了自动重算');
+});
+
+test('a newly completed background run preserves an explicitly selected older result', async () => {
+  const running: Record<string, { status: string; run_case: string }> = {};
+  const h = harness(false, undefined, '', '/case', { running });
+  await h.render();
+  await h.action('result-runs');
+  await h.action('result-run-0');
+  await h.tab('series');
+  const catalogs = () =>
+    h.requests.filter((request) => request.command === 'history_catalog').length;
+  const before = catalogs();
+  running['/case'] = { status: 'succeeded', run_case: '/case/.colm/runs/background-new' };
+  await h.render();
+  assert.equal(catalogs(), before, 'an immutable older run must not be reset or reloaded');
+  assert.ok(h.requests.some((request) => request.command === 'model_case_runs'));
 });

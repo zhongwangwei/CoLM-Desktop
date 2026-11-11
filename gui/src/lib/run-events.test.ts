@@ -220,3 +220,20 @@ test('cancelled and successful runs clear stale errors while real failures retai
     'actual failure',
   );
 });
+
+test('started run events retain the effective execution environment', () => {
+  const execution_environment = { RAYON_NUM_THREADS: '6', COLM_MPIEXEC: '/launcher' };
+  const run = applyRunEvent(undefined, 'run://started', {
+    case: '/case',
+    run_id: 'a',
+    execution_environment,
+  })!;
+  assert.deepEqual(run.execution_environment, execution_environment);
+  const next = applyRunEvent(run, 'run://stage', {
+    case: '/case',
+    run_id: 'a',
+    stage: 'colm',
+    state: 'running',
+  })!;
+  assert.deepEqual(next.execution_environment, execution_environment);
+});
