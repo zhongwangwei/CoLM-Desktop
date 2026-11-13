@@ -1968,6 +1968,35 @@ fn disabled_content_fetch_keeps_model_binding_and_checks_output_paths() {
 }
 
 #[test]
+fn disabled_unbound_fetch_requires_explicit_policy_and_remains_uncertified() {
+    let fixture = completed_output_fixture("disabled-unbound-fetch");
+    let (_, pending) = PendingFixture::new("disabled-unbound-submission");
+    let mut record = pending.record;
+    let mut provenance = crate::provenance::read(&fixture.0).unwrap().unwrap();
+    provenance["model_run"] = serde_json::Value::Null;
+    provenance["verification"] =
+        json!({"status":"disabled","input_fingerprints":false,"content_fingerprints":false});
+    let completion = fixture.0.join("out/fixture").join(crate::provenance::FILE);
+    std::fs::write(completion, serde_json::to_vec(&provenance).unwrap()).unwrap();
+    let proof = verify_completed_outputs(&fixture.0).unwrap();
+    assert!(record.provenance.as_ref().unwrap()["remote_model_run"].is_null());
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    record.provenance.as_mut().unwrap()["record_input_fingerprints"] = json!(true);
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    record.provenance.as_mut().unwrap()["record_input_fingerprints"] = json!(false);
+    verify_submitted_output_identity(&proof, &record).unwrap();
+    verify_fetched_history(&fixture.0.join("out/fixture/history"), &proof).unwrap();
+    let mut fetched = fetched_provenance(
+        record.provenance.as_ref().unwrap(),
+        Some(job::State::Finished { exit_code: 0 }),
+    );
+    fetch_certification(&mut fetched, Some(&proof), false);
+    assert_eq!(fetched["execution_ok"], true);
+    assert_eq!(fetched["ok"], false);
+    assert_eq!(fetched["output_verification"]["status"], "unavailable");
+}
+
+#[test]
 fn disabled_fetch_rejects_downgrade_or_ambiguous_disable_markers() {
     let (_, pending) = PendingFixture::new("disabled-downgrade");
     let mut record = pending.record;
