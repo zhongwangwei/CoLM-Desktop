@@ -46029,3 +46029,467 @@ mksrfdata 写出 704 个 land element、1542 个 land patch、4791 个 PFT tile�
 同一轮复核后补了四个边界：GUI 空间作物改用 `DEF_USE_CROP=.true.`（播种日保持 0），Tauri 物化层把该派生字段视为可写 `nl_colm` 并有保存测试；`colm-cli capabilities` 输出 `{"crop_runtime":true}`，冻结的旧 CLI 没有这个子命令，因此不会被仅凭 `--engine rust` 放行；远程研究接管改用引擎感知的 kernel 检查；Rust CROP 配合 Fortran 前处理但没有 CROP 内核时直接拒绝。多 block `pctshared` 的限制也已移除，空间 CROP 的真实 4 block 算例跑通。
 
 远端旧程序的能力闭环：`remote_study` 和普通远程运行在上传引擎后，额外在服务器执行 `bin/colm-cli capabilities`；旧 sidecar 没有该子命令时，CROP 内核要求不会被本地 `--engine rust` 放掉，错误在提交作业前出现。该探测只对已上传的引擎快照执行，不改变本地已经验证的路径。
+
+### 2026-11-12 四个内置示例的 GUI 实测与两处修复（AU-Preston runtime、AT-Neu CO2 单位）
+
+**来历**：用户要求用真实 GUI 跑通「新建模拟 → 自带 4 个示例」的 CN-Cng / AT-Neu / AU-Preston /
+US-Ne3，再决定修哪些问题。测试用 `--features e2e-driver,tauri/custom-protocol` 另编一份应用、
+隔离 HOME（`/tmp/colm4ex/home`）与 `COLM_E2E_PORT=18899`，全部操作都是 WKWebView 里对渲染控件的
+点击/填表（真实 IPC → 真实 `colm-cli` sidecar），验证后停掉测试实例；四例均为 Rust 引擎、
+自动内核 `default@4c36d17d`。
+
+**实测结果**（GUI 运行页/结果页 DOM 文本 + 落盘产物）：
+- CN-Cng：35088/35088 步，24 个 history；结果页 Qle bias 4.2 W/m²、RMSE 33.3、15881 对。
+- AT-Neu：52607/52607 步，74 个 history；运行成功，但结果页观测评估整页失败（见下）。
+- AU-Preston：208778/208778 步，144 个 history；结果页 Qle bias -4.6 W/m²、RMSE 39.5、5892 对。
+- US-Ne3：17520/17520 步，24 个 history；结果页 Qle bias 12.6 W/m²、RMSE 86.8、14742 对。
+- 旧文档（第 733 轮前后）记录的 CN-Cng Qle bias 17.4 / RMSE 56.3 与本次（4.2 / 33.3）不同，
+  配对数同为 15881；疑为此后观测配对/订正或默认配置变化，未判定为回归，留待作者确认。
+
+**缺陷 1（已修）**：内置示例给城市站自动填了 `examples/Runtime`，但城市算例的显式 `--runtime`
+必须自带 `urban/LUCY_rawdata.nc`，默认 GUI 流程建 AU-Preston 必失败
+（`explicit --runtime is incomplete for an urban case...`）。CLI 校验本身正确（`window_tests`
+锁定），`examples/README.md` 也写明城市示例不该给 runtime；根因是 `NewCasePage.example()` 无条件
+写入 `install_example` 的 runtimedir（2026-10-13 `0f92d33e9` 为 BGC/CROP 示例引入，城市站被连带）。
+修法：`NewCasePage.selectSite()` 按站点类型管理 runtime —— 城市站把“等于示例自动值”的 runtime
+清空（让 CLI 铺算例自带城市表），甲烷/作物站在 runtime 为空时补回（BGC 需要 ndep/nitrif），
+用户手填的自定义目录一律不动。否决：后端去掉 runtimedir（会弄坏 AT-Neu/US-Ne3）、往
+`examples/Runtime` 塞 LUCY 表（与 case-owned 内置表设计相悖）、放宽 CLI 校验（会静默放行不完整目录）。
+测试：`gui/src/features/cases/simulation-page.test.ts` 新增城市清空、切回作物/甲烷补回、手填保留三条。
+
+**缺陷 2（已修）**：AT-Neu 结果页观测评估整页失败：
+`observation target GPP cannot be decoded ... cannot convert source units "umol CO2 m-2 s-1" to "umol/m2/s"`。
+FLUXNET-CH4 的 GPP/NEE/Resp 观测带 CO2 物种前缀，而 `colm-forcing::units::TABLE` 只有裸
+`umol m-2 s-1`（CH4 变体有、CO2 变体没有）；CN-Cng/US-Ne3 观测恰好写 `umol/m2/s`，所以没暴露。
+修法：单位表补 `umol CO2 m-2 s-1` 等 CO2 变体，目标仍是 `umol/m2/s` —— 评估表
+（`colm-hist::obs::EVALUATION_VARIABLES`）里 GPP/NEE/Resp 的 `canonical_units` 本来就物种无关，
+而 CO2 前缀已确定摩尔数所指物质，属“改名不算换算”，与 CH4 变体映射到 `nmol CH4/m2/s` 的规则一致。
+测试：`units_tests::co2_species_prefix_from_fluxnet_ch4_is_a_rename`（含 -0.0 与反向换算）、
+`observation_input_tests::fluxnet_ch4_co2_species_units_are_decoded_as_the_canonical_target`
+（真实 FLUXNET-CH4 写法走完整解码）。
+
+**真实窗口复验**（重新 stage-sidecar + 另编 e2e 应用 + 隔离 HOME）：
+- AU-Preston 按默认路径直接创建（Runtime 字段实测为空、无错误通知），开始运行后
+  208778/208778 步完成、`CoLM Execution Completed.`、144 个 history。
+- AT-Neu 打开既有运行的结果页：单位错误消失，显示 Qle bias 12.4 W/m²、RMSE 39.4、14462 对。
+- 正式 GUI release 与 sidecar 已按打包布局同步重建（新 `colm-cli`/引擎快照放在主程序旁），
+  重启后 `backend reachable`、`colm-cli resolved to …/target/release/colm-cli`、17 个内核预设。
+
+**验证命令**：`npm --prefix gui run typecheck`、`format:check`、`lint`、`test`（1815 通过）、
+`build`；`cargo test --workspace --lib --bins -- --test-threads=1`（全通过；并行跑时 NetCDF
+测试会 HDF error，仓库历史命令本就串行）；`cargo clippy --workspace --all-targets -- -D warnings`；
+`cargo fmt --all --check`。注：`colm-agent` 的 PTY 测试在 DSH workspace-write 沙盒下报
+`out of pty devices`，完整权限下通过，属环境限制。
+
+### 2026-11-12 GUI 区域（区域 + 经纬度网格）实测（JRA3Q / IsoGSM / PFT / 河湖汇流）
+
+**方法**：同上一轮 GUI 实测口径（`--features e2e-driver` 另编应用、隔离 HOME、`COLM_E2E_PORT=18899`），
+全部操作是渲染控件点击；数据用本机 `/Volumes/Data` 的现成目录，未直接跑 CLI。
+
+**公共参数**：区域 96.25–104.25°E / 37.75–43.25°N、0.25°、2003-02-01→02-04，
+rawdata=`/Volumes/Data/CoLMrawdata`、runtime=`/Volumes/Data/CoLMruntime`：自动匹配
+`latlon@4c36d17d#production`（Rust，8 线程），四例三阶段全部 `mksrfdata ok` / `mkinidata ok` /
+`colm ok` + `CoLM Execution Completed.`。
+
+| 变体 | 下垫面 | 河湖汇流 | 强迫 | mksrfdata / mkinidata | 主模拟 |
+|---|---|---|---|---|---|
+| region-heihe | IGBP | 关闭 | JRA3Q | 704 land elements / 1336 LCT patches；9 文件 | 192 步 × 1336 patch × 4 block |
+| region-heihe-pft2 | PFT | 关闭 | JRA3Q | 875 PFT patch；17 文件 | 192 × 875 × 4 |
+| region-heihe-river | IGBP | 开启 | JRA3Q | 2390 unit catchments / 92 river systems；10 文件 | 192 × 1336 × 4 |
+| region-heihe-isogsm | IGBP | 关闭 | IsoGSM | 704 / 1336；9 文件 | 192 × 1336 × 4 |
+
+- 强迫目录识别：JRA3Q 超过探测上限时提示 “file inspection limit reached; enter dates manually”，
+  数据集仍识别为 JRA3Q；IsoGSM 平铺的 `IsoGSM_*_YYYY.nc` 识别为 IsoGSM。
+- 结果页（region-heihe）：`运行完成`、`本机结果完整`；区域量按纬度加权平均，空间分布图
+  2003-02-04 12:00、2.49–141.18 W/m²；区域算例不做站点观测配对（页面明确说明），符合设计。
+- 另：PFT + 河湖汇流默认开启的组合也跑通（192×875×4，2390 子流域/92 河系）。
+- 本轮未发现新缺陷。证据在 `tmp/gui4ex/evidence/regional/`（SUMMARY.md 与各步 JSON）。
+
+### 2026-11-12 GUI 流域（watershed）实测：经纬度网格 + Shapefile / 非结构网格
+
+**方法**：同前两轮 GUI 实测口径（e2e 驱动另编应用、隔离 HOME、真实控件点击）。数据用
+`/Volumes/Data` 现成目录，时段 2003-02-01→02-04，IGBP、河湖汇流默认开启、8 线程。
+
+| 变体 | 输入 | 自动内核 | mksrfdata / mkinidata | 主模拟 |
+|---|---|---|---|---|
+| 流域 + 经纬度网格 | 黑河边界 Shapefile `Heihe-shp/heihe_boundary_with_huahai.shp`（WGS84），0.25° | `latlon@4c36d17d` | 801 spatial patches；2175 unit catchments / 79 river systems | 192 步 × 801 patch × 4 block，1 history |
+| 流域 + 非结构网格 | `colm-cli mesh-new` 由同一边界生成 0.25° mesh（459 active cells，`equal-lat-lon-elmindex-v1`，window 32×22） | `unstructured@c8131032` | 801 spatial patches；2175 unit catchments / 79 river systems | 192 步 × 801 patch × 4 block，1 history |
+
+- 两例三阶段全部 `mksrfdata ok` / `mkinidata ok` / `colm ok` + `CoLM Execution Completed.`；
+  结果页均 `运行完成`、`本机结果完整`，区域平均 + 空间分布（latlon 2.49–78.17、非结构 27.44–72.58 W/m²）。
+- GUI 第 2 步边界校验通过；经纬度网格流域由边界外接框生成 `DEF_domain` 与算例内 `mesh.nc`，
+  非结构网格流域 `DEF_file_mesh` 指向所选网格。
+- **未测：流域 + 流域单元网格（catchment）** —— 需要 `DEF_CatchmentMesh_data`（catchment/HRU 字段），
+  本机没有该文件，`mesh-new` 也明确拒绝合成 CATCHMENT 数据；与既有记录一致，不是缺陷。
+- 未发现新缺陷。证据：`tmp/gui4ex/evidence/watershed/`。
+
+### 2026-11-12 GUI 非结构网格（ex07 珠江）与过程选项实测：河湖流/BGC/甲烷通过，材料启用两处阻断
+
+**网格**：真实 ex07 网格 `/Volumes/Data/Data/ex07_unstructured/PearlRiver_patchtype_NXP0144_mode6.nc`
+（3119×1319、~450 m、398 万活跃单元）本地不可全量跑，裁出 48×48 窗口
+（113.0–113.2°E / 22.904–23.104°N，2304 活跃单元，`elmindex` 重编号，`equal-lat-lon-elmindex-v1`、
+int32）后经 GUI 走完整流程；公共参数 JRA3Q、rawdata/runtime 本机路径、2000-01-01→04、8 线程、
+自动内核 `unstructured@c8131032`。
+
+| 变体 | 结果 |
+|---|---|
+| IGBP + 河湖汇流开 | 2304 elements / 2794 LCT patches；605 子流域/2 河系；192 步 × 2794；1 history ✅ |
+| 河湖汇流关 | 2794 patches，无子流域网络；192 步 ✅ |
+| PFT + BGC | 2754 patches / 1961 PFT tiles；8 restart 文件；192 步 ✅ |
+| 甲烷（创建时配 PFT+BGC+CH4，`standard_methane_parameter.nml`） | case.nml 有 `&nl_colm_material`、`DEF_USE_METHANE=.true.`；192 步、2 history ✅ |
+
+**发现（未修，待用户决定）**：
+1. **无材料组的算例事后启用材料族失败**：空间算例创建时若未配材料，case.nml 只有
+   `&nl_colm`/`&nl_colm_forcing`；之后在 GUI 启用甲烷/氯离子/泥沙会报
+   `this namelist has no group &nl_colm_material to put DEF_USE_SEDIMENT in`（英文原文直出）。
+   站点算例 CN-Cng 同样受影响；创建时就配材料（如 AT-Neu、本次甲烷变体）则正常。
+2. **水同位素首次启用死锁**：保存校验要求 `DEF_MT_AQUIFER_MIXING_WATER_MM > 0`，但该字段在
+   `DEF_USE_ISOTOPE` 尚未为 true 时被 hidden（“只有水同位素使用”），材料对话框不渲染输入框；
+   新建与事后两条路径都无法首次启用。历史设计里该字段预填 1000 mm 测试值（本轮之前已丢失）。
+
+证据：`tmp/gui4ex/evidence/unstr/`（SUMMARY.md、preflight、各步快照、甲烷运行、同位素拦截）。
+
+### 2026-11-12 材料启用路径修复：缺 `&nl_colm_material`（D1）与同位素含水层混合水量死锁（D2）
+
+**D1（已修）**：已有算例（空间算例默认只写 `&nl_colm`/`&nl_colm_forcing`，站点算例如 CN-Cng 也一样）
+事后启用甲烷/氯离子/泥沙/同位素时，保存与运行前预览会在 `colm-model` 物化路径撞
+`this namelist has no group &nl_colm_material to put DEF_USE_* in`（英文原文直出），
+只有创建时就带材料组的算例（AT-Neu 等）不受影响。修法：
+- `colm-namelist::Document::ensure_group` 新增显式建组 API（不改变 `insert` 不替调用方建组的契约）；
+- `colm-model` 物化路径 `put()` 与 GUI `config.rs` 的写入路径都改为「缺组先补空组再插入」；
+- 删掉 GUI 内重复的组判定实现。
+
+**D2（已修）**：水同位素首次启用死锁——保存校验要求 `DEF_MT_AQUIFER_MIXING_WATER_MM > 0`，
+但该字段被 `is_model_field` 归为模型系数、且在 `DEF_USE_ISOTOPE` 保存为 true 前被后端
+hidden（“只有水同位素使用”），材料对话框没有输入框，永远满足不了自己的校验。修法：
+- 把 `DEF_MT_AQUIFER_MIXING_WATER_MM` 明确归为**算例字段**（`is_model_field` 例外；它是本次模拟
+  的输入水量，历史设计里由用户在算例里填，运行前同位素校验也从算例文档读它）；
+- 材料对话框选中同位素族时渲染「含水层混合水量（mm）」输入框，默认预填 1000 mm 测试值并注明；
+- `applyMaterialSelection` 在选中同位素且该值缺失/非正时自动预填 1000，用户可改。
+  已有冻结修订理论上可把该值写在模型 overlay；本机模型库只有 official 一个修订（无此键），
+  未做旧版本迁移。
+
+**真实窗口复验**（重建 e2e 应用 + 重新 stage-sidecar）：
+- CN-Cng 站点算例首次启用同位素：对话框出现并预填 1000 mm；保存成功，`case.nml` 写入
+  `&nl_colm_material`、`DEF_USE_ISOTOPE=.true.`、`DEF_ISOTOPE_SPECIES='H2_18O,HDO'`、
+  `DEF_MT_AQUIFER_MIXING_WATER_MM=1000`，同位素参数文件铺进算例；三段运行完成
+  （35088 步、48 个 history、`CoLM Execution Completed.`）。
+- 已有非结构空间算例（unstr-ex07-base，原本无材料组）事后启用甲烷：保存成功，`case.nml`
+  生成 `&nl_colm_material` 并写入 `DEF_USE_METHANE=.true.`。
+
+**本轮另外暴露、未修的两个运行期问题**（不是启用路径缺陷，留给下一轮）：
+1. 空间流域算例（watershed-heihe，经纬度网格 + 河湖汇流）同位素 colm 阶段报
+   `TRC_SIG hard failure: fixed-signature flux differs from water flux times R_init`
+   （worst_abs 0.66e-9，tol 0.10e-11，evap 分量）——材料示踪与水量在空间路由路径上的
+   一致性容差/实现问题。
+2. 事后启用甲烷的空间算例（unstr-ex07-base，走 GUI 默认 hybrid 淹没方案 + 动态湿地 + 河湖汇流）
+   colm 早期报 `patch 2335: methane inundation exceeds host soil water`——hybrid 淹没有宿主
+   土壤水约束，当前案例配置/数据不满足；创建时生成默认走 wetwat（不写动态湿地）则可跑通。
+
+**门禁**：`cargo test --workspace --lib --bins -- --test-threads=1`、根与 GUI
+`clippy --all-targets -D warnings`、两边 `fmt --check`、GUI 后端测试（完整权限下全过）、
+前端 `typecheck/lint/format:check/test`（1816 通过）/`build` 全部通过。
+
+### 2026-11-12 上游 bf9ad007 对齐 + 材料预设扩展到 NH4/NO3（Cl 不再唯一）
+
+**上游核对**：vendor 已在 `6599b552` 收口到上游 `4c28107`（material host cleanup）。本次核对
+上游 `4c28107..bf9ad007` 共 8 个提交，真正改源码的只有：
+
+- `c545a96c`（3 个甲烷文件）：MPI 常量改从 `MOD_SPMD_Task` 取，不再直接 `USE MPI`；
+  已适配并入 vendor（`MOD_MT_Methane.F90` 的 USEMPI 常量列表、GIEMS/pH 两处局部 `USE MPI` 删除）。
+- `404eff99`（冠层卸雪按步长比例）：vendor 早已有语义等价实现（本地先修、上游后采纳），无需改。
+- `MOD_HistAccRestart.F90` 注释、其余 6 个 CI/Makefile/NetCDF 工具链提交：桌面内核构建
+  不走那条路径，未并入（理由记入 `vendor/PROVENANCE.md`）。
+- 编译验证：`build_kernel.sh default`（扁平）与 `latlon`（USEMPI 分支）重建成功。
+
+**材料预设不再只有氯离子**：上游 MaterialTransport 本来就有 Cl/NH4/NO3 三份标准溶质参数
+文件（`standard_{chloride,nh4,no3}_parameter.nml`），GUI 之前只暴露了 Cl。本轮：
+
+- 前端 `materialFamilies` 增加「铵根 NH4」「硝酸根 NO3」两张预设卡，自动填
+  `standard_nh4_parameter.nml` / `standard_no3_parameter.nml`；`appendMaterialFamily`
+  写入 `DEF_SOLUTE_NAMES`/`DEF_SOLUTE_PARAM_FILES`。
+- GUI 后端 `stage_solute_parameter` 从只认 chloride 泛化为按所选标准溶质模板落盘；
+  单溶质算例保留「初始浓度/降水浓度字段写进该文件」的旧语义，多溶质时各文件用上游
+  模板默认值（一个标量无法同时表达多物种），高级用户可在过程参数里分别改。
+- `materialSetupIssues` 按溶质名映射 family（cl/nh4/no3），不再把所有 solute 都归到 Cl。
+
+**Rust 引擎约束**：Fortran 的 `MOD_MT_NitrogenLeaching`/`MOD_MT_BGC_NH4` 把 BGC 矿质氮
+淋溶记成 NH4/NO3 溶质的外部输入；Rust 引擎还没有这条耦合（`colm-runtime` 的 material
+运行时里没有外部输入通路）。因此：
+
+- BGC 打开 + Rust 引擎：NH4/NO3 卡片显示中英文原因并阻止保存（「请改用 Fortran 引擎或
+  关闭 BGC」）；`colm-runtime` 的 `MaterialRuntime::from_document` 另加运行时守卫，
+  直接跑 CLI 也会拒绝，不会静默少源项。
+- BGC 关闭：两引擎都只是保守输运（与 Fortran 的 `IF (DEF_USE_BGC)` 守卫一致），允许。
+
+> 同日已把这条 BGC 氮淋溶耦合完整移植到 Rust，并撤销上面的 Fortran-only 限制；
+> 见下一小节「BGC 氮淋溶耦合完整移植到 Rust」。
+
+**验证**：
+
+- 门禁：`cargo test --workspace --lib --bins -- --test-threads=1`、根与 GUI
+  `clippy --all-targets -D warnings`、两边 `fmt --check`、GUI 后端 692 项、前端
+  typecheck/lint/format:check/test（**1819** 通过）/build，四张生成表 drift 与 namelist
+  roundtrip 全过。
+- 真实窗口（重建 e2e 应用 + stage-sidecar）：
+  - CN-Cng 站点算例（Rust 引擎、BGC 关）加 NH4：对话框出现「铵根 NH4」预设，保存后
+    `case.nml` 写入 `&nl_colm_material`、`DEF_SOLUTE_NAMES='NH4'`、
+    `DEF_SOLUTE_PARAM_FILES='NH4:standard_nh4_parameter.nml'`，模板已铺进算例；强制重跑
+    全部阶段完成（35088 步、48 个 history、`CoLM Execution Completed.`）。
+  - unstr-ex07-base（Rust 引擎、BGC 开）：NH4/NO3 卡片显示「尚未移植到 Rust 引擎」原因，
+    「保存并启用材料」禁用，取消后 `case.nml` 未被写入 NH4（没有静默保存）。
+- **未做**：Fortran 引擎 + BGC 打开 + NH4/NO3 的端到端数值验证。该耦合来自 4c28107
+  已并入的 vendor 代码，本轮未改动其逻辑；若要在桌面侧宣称 Fortran 路径完整可用，
+  下一轮应补一个 CN-Cng 11 天两引擎对比。
+
+### 2026-11-12（同日补充）BGC 氮淋溶耦合完整移植到 Rust：NH4/NO3 不再限 Fortran
+
+上一小节把 NH4/NO3 预设加进 GUI 时，Rust 引擎缺 Fortran 的 BGC 矿质氮淋溶耦合，曾按
+「BGC 开→仅 Fortran」限制。维护者要求完整移植，本轮落地：
+
+- **生成状态**：`oracle/scripts/gen_bgc_state.py` 与 `gen_bgc_zero_fluxes.py` 重跑，
+  补入 4c 重构在 Fortran 里新增的 `smin_nh4_leached_vr` / `smin_nh4_leached` 及清零项。
+- **开关**：`BgcSwitches.nh4_leaching` 由 `colm_runtime::material::resolve_nh4_leaching`
+  从材料 namelist 的 `DEF_NH4_LEACHING`（auto/on/off）与 `DEF_SOLUTE_NAMES` 里的独立
+  NH4 token 派生，语义照抄 `MOD_MT_Namelist.F90:365-410`（auto、大小写/逗号空格不敏感）。
+- **BGC 算式**：`bgc_n_leaching.rs` 在 NITRIF 开时逐层算 NH4 淋溶行（闭开关时该行清零），
+  `bgc_n_state_update.rs` 先从 `smin_nh4_vr` 扣淋溶损失再重算 `sminn_vr`，
+  `bgc_summary.rs` 按层累加 `smin_nh4_leached`，`bgc_balance.rs` 在 NITRIF 开时把该量
+  计入 `col_noutputs`——三处行序与 `MOD_BGC_*` 对应过程一致。
+- **材料记账**：`colm-runtime/src/material.rs` 新增
+  `bgc_nitrogen_leaching_masses`（gN m-2 s-1 × dz × deltim / 1000 → kg N m-2）与
+  `book_bgc_nitrogen_leaching`，在土壤 patch 的 `bgc.step` 之后（对应 `CoLMDRIVER` 的
+  `mt_land_after_bgc`）把 NH4/NO3 的淋溶质量记入 `a_mt_rsub`/`a_mt_rsur`/`a_mt_rnof`、
+  `a_mt_bgc_leach` 与 `mt_rnof_step`；非土壤 patch 直接返回。
+- **守恒**：`MaterialAccumulators.bgc_leach` + 步首快照，平衡检查把步内 BGC 淋溶增量
+  计入 `step_input_check`（像水汽交换一样），但不进固定签名（降水）核对；时序与
+  `MOD_MT_Conservation.F90:459-485` 的「注入在本次检查之后、下一步快照抵掉」一致。
+- **GUI**：去掉「NH4/NO3 只允许 Fortran」限制，只保留「需要 BGC」前提；Rust 运行时的
+  not-ported 守卫一并删除。现在两个引擎都允许 NH4/NO3（前提是 BGC 开）。
+
+**验证**：
+
+- 新单测：`DEF_NH4_LEACHING` auto/on/off 解析（含 NH4X 不误判）、NITRIF 开/关的
+  通量聚合与 gN→kg N 换算、累加器记账（`a_mt_rsub/rsur/rnof/bgc_leach`、`rnof_step`、
+  非正质量跳过）；`cargo test -p colm-runtime --lib material::` 22 项、
+  `cargo test -p colm-core --lib bgc` 22 项通过。
+- 真实 GUI + 新 sidecar：`nh4-bgc`（非结构 PFT + BGC，Rust 引擎）GUI 加 NH4、保存
+  （`&nl_colm_material` 写入 `DEF_SOLUTE_NAMES='NH4'` 并铺好参数文件），强制三段跑完
+  **192 步、2754 patch、2 个 history、`CoLM Execution Completed.`**。
+- **与 Fortran 同算例对拍**：用 `colm-cli run ... --engine fortran --preprocessors rust
+  --stage colm` 跑同一算例，对比 Rust/Fortran 的 material 与 BGC history。所选测试窗口
+  （ex07 珠江窗口 4 天、US-Ne3 1 月）里 `f_rsub ≡ 0`，即 `drain_tot = rnof − rsur = 0`，
+  Fortran 的 BGC 淋溶通量同样为 0，因此 on/off 结果一致——这本身与上游一致，但**没有**
+  覆盖非零通量路径。
+- **非零通量路径的隔离对拍**（2026-11-12 稍后补齐）：`DEF_Runoff_SCHEME=1`（VIC）+ 在运行数据目录
+  放一份 `vic/vic_para.txt` 后，`f_rsub ≈ 1.389e-4 mm/s > 0`，即 `drain_tot > 0`，BGC 的 NH4
+  淋溶行真正非零。用 US-Ne3（作物 PFT + BGC + NITRIF 开 + NH4）做两组对拍，**两边都用
+  `kernels/crop` 内核**（见下方教训）：
+  - **单步隔离**（同初值、只跑 1 步，排除反馈放大）：off 状态两侧 NH4 径流浓度都恰为 0；
+    on 状态 Rust = 3.1161964611048393e-7、Fortran = 3.116196461104839e-7 kg/kg，
+    绝对差 5.3e-23、相对差 **1.7e-16（1 ULP）**；即移植的淋溶质量计算在非零通量路径上
+    与 Fortran 一致到舍入级。
+  - **一个月窗口**（修正对拍设置后）：US-Ne3 是作物站点，`colm-cli` 会因
+    `DEF_TUNING_CROP_PLANTING_DAY > 0` 给 Rust 传 `--crop`；而 Fortran 的作物 `tsai_p`
+    覆盖是 `#ifdef CROP` 编译期代码。上一版对拍用 `kernels/default`（非 CROP）跑 Fortran，
+    于是「Rust 作物运行时 vs Fortran 非作物代码」被误判成跨引擎差异（`f_sai` 0.5/0、
+    `f_rsur` 约 2%、6 步后 tleaf 分叉）。两边都改用 `kernels/crop` 后重跑：
+    - 一个月内**所有宿主 history 变量逐位一致**（`maxabs = 0`），BGC 的
+      `smin_nh4_vr/smin_no3_vr/sminn_vr` 末态也逐位一致，on/off 改变量逐位相同；
+    - NH4 非零淋溶 on/off 信号：Rust 1.2219285555582437e-6 vs Fortran
+      1.2219285555582439e-6 kg/kg，绝对差 6.35e-22（相对 ~5e-16，约几 ULP）。
+  - **教训（写进流程）**：跨引擎对拍必须先对齐**内核宏**（尤其 `CROP`/`LULC_*`），
+    否则比较的是两套编译期分支，而不是同一套物理。这条比数值结果本身更值得记住。
+- **仍未覆盖**：NO3 溶质的非零淋溶路径未单独对拍（NH4 与 NO3 共用同一记账函数
+  `bgc_nitrogen_leaching_masses`，差异只在 nitrif 分支取的 BGC 通量字段）；作物内核下
+  非零淋溶的 GUI 端到端未重跑（CLI 已覆盖）。
+
+### 2026-11-13 补充：NO3 非零淋溶对拍与 GUI 多溶质（NH4+NO3）验证
+
+**NO3 非零淋溶**（同一 crop PFT + BGC + NITRIF + `kernels/crop` + VIC 非零基流设置，
+`f_rsub = 1.389e-4 mm/s > 0`，一个月窗口）：
+
+- 单 NO3 与 `NH4,NO3` 两种配置下：宿主 history **逐位一致**，BGC 氮池
+  `smin_nh4_vr`/`smin_no3_vr`/`sminn_vr` **逐位一致**；
+- NO3 径流浓度 `f_mt_conc_runoff_NO3`：Rust vs Fortran 最大绝对差 6.78e-21
+  （量级 1.95e-5，相对 ~3.5e-16，几 ULP）；NH4/NO3 组合配置里 NH4 同量级
+  （6.35e-22 对 1.22e-6）；
+- 深层土壤 NO3 浓度 `f_mt_conc_soisno_NO3` 在绝对 ~1e-6 kg/kg 量级上相对差 2–8%：
+  深层分母是窗口内极小的土壤水量，属于浓度比的舍入放大（绝对差 5e-8），不是质量记账差。
+
+**GUI 真实窗口（多溶质）**：`nh4-bgc`（非结构 PFT+BGC，Rust 引擎）在已保存 NH4 的
+定义表上通过材料对话框追加「硝酸根 NO3」，保存后 `case.nml` 写入
+`DEF_SOLUTE_NAMES='NH4,NO3'`、两份标准参数文件都铺进算例；强制三段重跑
+**192/192 步完成、2 个 history**，两侧 solute 各 14 个 material 变量；结果页变量选择器
+同时列出 NH4 与 NO3 的 material concentration 变量。
+
+**仍未覆盖**：GUI 里 Fortran 引擎 + BGC + 材料的端到端（CLI Fortran 路径已覆盖）；
+NO3 在 NITRIF 开时的 GUI 端到端（CLI crop/VIC 已覆盖）。证据：
+`tmp/gui4ex/evidence/materials/no3-parity.json`。
+
+### 2026-11-13 河湖流/水库选项 GUI 逐项实测
+
+对 `region-heihe-river`（latlon 内核、LCT + 变饱和流 + 区域单元汇流、2003-02-01→04、192 步）
+在 e2e 真窗口里逐项修改第 4 步「河湖流与水库设置」，保存后核对 `case.nml` 并强制重跑，
+再与 baseline history（含 `hist_unitcat`）逐变量比较：
+
+- **水库调度方案 1（河湖流改进）**：保存/运行成功；`hist_unitcat` 15 个变量全变
+  （`f_storge` 相对 98.6%、`f_fldsto` ~100%、`f_floodarea` 92.6%、`f_discharge` 25.8%）。
+- **水库调度方案 2（H22，需要 dam_upreal）**：保存成功、主模拟**显式失败**：
+  `colm-rs: .../grid_routing_data_15min.nc has no dam_upreal; DEF_Reservoir_Method needs it`
+  —— 本机单元流域数据缺 H22 参数，正确拒绝而不是静默跑错。
+- **启用堤防过程**：成功；`f_floodarea` 11.1%、`f_storge` 15.6%、`f_discharge` 11.2%。
+- **启用分汊河道**：成功；`f_floodarea` 47.0%、`f_storge` 19.8%、`f_discharge` 15.0%。
+- **按动量限制子步长（MAX_DT=1800）**：成功；变化小但非零（`f_floodarea` 0.77%）。
+- **关闭按蓄量限制子步长**：与 baseline **逐位相同**——分汊关闭时该开关本就不参与
+  （Rust `if bif.is_none() || storage_dt_limit`，与 Fortran 同条件），且 4 天窗口内限制未绑定；
+  分汊开时 on/off 也相同，属「限制未触发」而非缺陷。
+- **漫滩回馈**：原算例产流方案 = 3（SimpleVIC），保存被**正确拒绝**（要求网格河湖汇流 +
+  TOPMODEL 产流 0 + LCT + 变饱和流 + 非城市）。复制算例建 `region-heihe-topmodel`
+  （`DEF_Runoff_SCHEME = 0`）后保存成功、192 步跑完；与同变体 baseline 比较
+  **103 个 history 变量不同**，且陆面量也变（`f_vegwp` 0.49%、`f_rss` 1.79%）——
+  漫滩回馈确实作用回陆面。组合（水库方案 1 + 堤防 + 分汊 + 漫滩）在该变体上同样跑通。
+- **`DEF_GridRiverLake_FloodInfiltMax`** 属 `expert_coefficient`，常规河湖流对话框不显示，
+  在参数目录专家模式改，属设计。
+
+未覆盖：流域网格（CATCHMENT）专属的 `DEF_ElementNeighbour_file`/`DEF_USE_EstimatedRiverDepth`/
+流域水库调度——本机没有 catchment 网格算例；CaMa-Flood 字段未编入本机内核（hidden 正确）。
+证据：`tmp/gui4ex/evidence/river/SUMMARY.md` 与两个目录下的逐项 JSON。
+
+### 2026-11-13 河湖流选项 Rust↔Fortran 对拍：方法与两个阻塞问题
+
+目标：把昨天 GUI 逐项验证过的河湖流选项（水库方案 1、堤防、分汊、动量限制、漫滩回馈）
+从「能改、能跑、结果会变」推进到「与 Fortran 对拍同值」。
+
+**方法 1（Rust 预处理 + Fortran 只跑 colm）**：逐项跑完后发现 baseline 自身就有跨引擎
+差异（首记录河道量 `f_discharge` 4.46e-4、第 3 条记录 `f_rss` 50.6），因此这套混合
+组合不能作为选项对拍基线。
+
+**方法 2（纯流水线：Fortran 预处理+Fortran 主循环 vs Rust 预处理+Rust 主循环）**：
+
+- 区域网格算例 `region-heihe-river` 在 `DEF_UnitCatchment_regional = .true.` 下，
+  **Fortran `mksrfdata` 直接崩溃**：
+  `vendor/CoLM202X/mksrfdata/MOD_SrfdataRestart.F90:397: Attempting to allocate already
+  allocated variable 'mesh'`；把该开关置 `.false.` 后 mksrfdata 成功（本机 13.5 分钟）。
+  这是一个真实缺陷/限制：GUI 建的 regional 算例无法走 Fortran 预处理。
+- 非结构算例的 Fortran `mksrfdata` 在本机 SIGILL（`kernels/unstructured` 的预处理二进制
+  与本机 CPU 不兼容），这条路径不可用。
+- 在 regional=false 的纯流水线下，预处理**接近逐位**但仍有差异：
+  - `landdata` 只有 4 个文件不同：`htop_patches` 在 3 个非植被 patch（`settyp` 15/16/17）
+    Rust 写 0、Fortran 写 0.0755/3.97/17.0 m；其余是 1e-15 级求和顺序差。
+  - 初态/常数重启只有 ULP 级差（`z0m` ~1.3e-15、`ssoi` ~1.1e-16）。
+  - 但 colm history 从第 0 条记录起就出现差异（河道 `f_discharge` 4.46e-4），
+    第 2 条记录 `f_rss` 差到 50.6 —— 这台 LCT 算例对初值极敏感，预处理未逐位就不能
+    判定选项 parity。
+- **混合法下的初步信号（不作结论）**：堤防选项的「选项效应」两侧很接近
+  （最大相对差 3.4e-5）；水库方案 1 的效应差异明显（`f_veloc_riv` Rust Δ=0、
+  Fortran Δ≈+2.7；`f_rivsto` 相对差 0.10），但混合法本身不合法，需要在逐位预处理的
+  算例上复核。
+
+**下一步（按优先级）**：
+1. 先闭合预处理逐位：`htop` 对非植被 patch 的取值，以及 const restart 的 ULP 级求和顺序；
+   这是所有空间 LCT 对拍的前置条件。
+2. 排查 Fortran `mksrfdata` 在 `DEF_UnitCatchment_regional=.true.` 下的 `mesh` 二次分配
+   （真实 bug，影响 GUI regional 算例走 Fortran 预处理）。
+3. 预处理逐位后重做选项 effect parity；或改用第 571 轮已逐位验证的 PC/经纬度算例。
+4. 与对拍解耦、可先推进的：材料×河湖流耦合（Rust 端 + GUI 保存/运行/结果页）。
+
+### 2026-11-13 审计项复核：P1 旧模型含水层值被静默忽略（确认存在）
+
+**P1 确认存在。** `DEF_MT_AQUIFER_MIXING_WATER_MM` 在 D2 修复里从模型字段改为算例字段
+（`is_model_field` 返回 false）；但历史冻结版本的 `overlay.physics` 里可能仍存着它（旧代码
+按 `DEF_MT_*` Real 分类为模型字段，参数目录可写入）。读取/运行路径：
+
+- `validation.rs::model_overlay` 把「有 group 且非模型字段」的 physics/参数记录当算例控制
+  **直接过滤掉**，且没有像旧气孔标量那样的迁移（只有 `upgrade_legacy_stomatal_records`）；
+- `materialize_run_with_case_changes` 在物料化时先 `frozen.overlay = model_overlay(...)`，
+  于是历史模型的 2500 mm 被丢掉，运行用算例里的 1000 mm，全程无提示；
+- 同一冻结版本在旧代码下用 2500、现在用 1000 —— 冻结版本的「计算参数」变了。
+
+**复现**（用 Registry API 构造历史 revision.json：`overlay.physics` 加
+`DEF_MT_AQUIFER_MIXING_WATER_MM = "2500."`，重算 `overlay_sha256`/`fingerprint` 后能正常 `get`；
+算例 `DEF_MT_AQUIFER_MIXING_WATER_MM = 1000.0`，`materialize_run` 后读运行 case.nml）：
+
+```
+历史模型 2500 mm / 算例 1000 mm → 运行配置 1000 mm
+```
+
+结论：P1 成立。已按方案 A 修复（见下一小节）。
+
+### 2026-11-13 审计项复核：P2 NH4 淋溶漏 FMA（确认存在并修复，端到端已逐位）
+
+**P2 确认存在，有两处**（都是本轮 NH4 移植新增代码）：
+
+1. `bgc_n_state_update.rs::n_state_update3` 的
+   `max(smin_nh4_vr - smin_nh4_leached_vr*deltim, 0)` 没走 `Contract::contract`。
+   gfortran 16.1 在 `-O2 -fno-tree-vectorize`（默认 `-ffp-contract=fast`）的 arm64 上把该式
+   收缩成 `fmsub`（反汇编核实）；Rust 原式拆成乘、减两次舍入。用 gfortran 生成参考位：
+   fused = `0x3F72A696EEDBC62D`、unfused = `...2C`，修复前 Rust 输出 `...2C`，差 1 ULP。
+   已改为 `(-leach).contract(deltim, smin)`，与相邻 NO3 行同形。
+2. `colm-runtime/material.rs::bgc_nitrogen_leaching_masses` 的逐层累加
+   `sub_mass += flux*dz*deltim` 也漏了 FMA：gfortran 把 `(flux*dz)*deltim + acc` 收缩成
+   `fmul + fmadd`（反汇编核实）。这正是端到端 `f_mt_conc_runoff_NH4` 还差 1 ULP 的来源，
+   已改为 `(flux*dz).contract(deltim, sub)`。
+
+**修复后验证**：
+
+- 新增回归测试 `bgc_n_state_update_tests.rs::nitrif_nh4_leaching_loss_uses_the_upstream_fused_or_unfused_rounding`，
+  用 gfortran 参考位在两种目标上分别断言；修复前失败（`left ...2C` vs `right ...2D`），修复后通过。
+- 端到端对拍（crop + VIC 非零淋溶算例）：单步 `f_mt_conc_runoff_NH4` 从差 1 ULP 变为
+  **逐位一致**；一个月窗口的 on/off 淋溶信号与 on 态浓度从差 6.35e-22 变为
+  **最大绝对差 0（逐位）**，宿主 history 仍逐位一致。
+- 门禁：`cargo test --workspace --lib --bins -- --test-threads=1`、`clippy --workspace
+  --all-targets -D warnings`、两个 workspace 的 `fmt --check`、`material::` 22 项、`bgc` 23 项全过。
+
+### 2026-11-13 P1 修复落地（方案 A：保留并迁移历史值）
+
+- **迁移范围收窄到「旧 `is_model_field` 确实会认、现在归算例」的记录**：Real `DEF_ISO_*`/
+  `DEF_MT_*`（当前就是 `DEF_MT_AQUIFER_MIXING_WATER_MM`）与 `DEF_GridRiverLake_FloodInfiltMax`
+  （它现在仍是模型字段，所以实际不会进迁移表）。方案开关、材料参数文件引用等从来没有模型
+  所有权的算例控制记录仍按原策略丢弃——不改变既有语义。
+- `Overlay` 新增 `legacy_case_overrides: BTreeMap<String,String>`（为空时
+  `skip_serializing_if` 省略；旧 `revision.json` 的 `overlay_sha256`/`fingerprint` 可按原字节
+  继续验证）；`model_overlay` 把这类记录从 physics/case-scalar 参数迁入该表（幂等），
+  `validate_overlay` 只允许历史上确实是模型字段的算例字段，并按字段类型/取值校验。
+- **统一编辑与运行规则（2026-11-13 后续修正）**。未编辑的旧算例继续使用历史模型覆盖值，
+  模型 2500 与原算例 1000 的组合仍运行 2500。后续接受的编辑、删除记入现有 `case-data.json`
+  的 `case_field_edits`，与 `case.nml` 同批保存，重开后沿用。`Set` 使用算例当前值，
+  `Removed` 保持缺省。共享 `apply_legacy_case_overrides` 统一预览与运行，
+  新建算例绑定时记录向导输入。查询区分已加载原值与待保存编辑，包括主动输入原值 1000。
+- **派生入口修正**：`create_draft` 收到旧模型原始 overlay（实际入口会把整个旧 overlay 当
+  “改动”）时先 `model_overlay` 迁移/过滤再合并，已迁字段不会再以 physics 记录回到模型参数
+  （修复“从旧模型派生新版本报 field is not a writable model control”）。
+- **冻结去重修正**：`same_effect` 对 `legacy_case_overrides` 按「键存在 + 值（同意拼写/容差）
+  相等」比较，不再套用模型默认值等价规则；显式 `-1` 不会被当成“未覆盖”而去重成官方版本、
+  删除草稿。
+- **测试**覆盖旧模型 2500 与未编辑原算例 1000、保存 3000 后重开运行、删除后重开运行、
+  删除后重新设置、保存失败保留原文件、旧格式读取、损坏元数据报错、派生入口与冻结去重。
+  前端覆盖输入框显示历史有效值，以及主动输入原算例值后的编辑状态。
+- **兼容性**：旧版本文件不被改写；新版本序列化不含空的迁移表；除含水层混合水量外，其余
+  历史算例控制记录的行为与修复前一致。
+
+### 2026-11-13 远程主机实测（7920 成功；tms17l/bd 待凭据）
+
+按用户要求测三台远程主机。当前网络与 SSH 状态：
+
+- **7920**：直连别名 `7920`（172.16.100.17，agent 里已有 t7920 密钥）可用，
+  `remote-probe`：Ubuntu 26.04.1 LTS、x86_64、96 核、750 GB、cargo 1.95.0、gfortran 15.2、
+  根目录 `/media/zhwei/data02/zhwei/colm-desktop` 可写（22.8 TB 空闲）。
+  真实 `remote-run`（2 天 US-Ne3 作物 PFT+BGC 站点算例，`--scheduler bare --threads 8`）：
+  服务器从源码快照 `8dfa4c71aea9c2b0` 编出 Rust 引擎，三段全部成功，`colm-rs` 48 步，
+  `CoLM Execution Completed.`，作业 `run-afd3e310…` exit code 0；history
+  `US-Ne3-2d_hist_2002-01.nc`（1.4 MB、350 变量）已取回本地并读通。
+  证据：`tmp/gui4ex/remote-test/evidence-7920/`（probe JSON、job log/script/exit_code、
+  取回的 history 与 colm.log）。
+  - 注意 1：GUI 配置里的 `7920land` 走 `ProxyJump land`，当前 land 认证失败；直连别名 `7920` 可用。
+  - 注意 2：带 `--record-input-fingerprints 1` 重跑时，服务器 input-check 报缺
+    `/media/zhwei/data02/zhwei/CoLMrawdata/global_CFT_surface_data.nc`（服务器 rawdata 不全）；
+    不带该开关的提交成功。正常 GUI 运行不使用该开关。
+- **tms17l**：`ProxyJump land`（192.168.6.117），land 与 tms17l 都要
+  `~/.ssh/id_ed25519_land_20261106T140747` 的口令；当前 ssh-agent 只有 t7920 密钥，
+  无口令时 `Permission denied (publickey,password)`。
+- **bd**：直连 211.66.130.146，公钥被拒（用户已改为密码登录）；应用/CLI 的 password 认证是
+  会话内凭据（stdin → askpass），当前没有可用会话密码。
+
+待办：tms17l 需把 land 私钥解锁进 ssh-agent（或提供口令）；bd 需会话密码（或临时加公钥）。
+拿到后用同一套 `remote-run` 覆盖：tms17l（slurm/auto）+ bd（lsf）各跑一个小算例。

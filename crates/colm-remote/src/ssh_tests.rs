@@ -170,3 +170,61 @@ fn the_servers_environment_script_runs_first_without_touching_stdout() {
         assert_eq!(with_env_script(env, "echo hi\n"), "echo hi\n");
     }
 }
+
+#[test]
+fn shared_ssh_command_allows_gui_reply_time_without_changing_batch_timeout() {
+    const CHILD: &str = "COLM_SSH_TIMEOUT_TEST_CHILD";
+    let Ok(mode) = std::env::var(CHILD) else {
+        for mode in ["batch", "none", "config", "key", "password", "key-password"] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args([
+                "--exact",
+                "ssh::ssh_tests::shared_ssh_command_allows_gui_reply_time_without_changing_batch_timeout",
+                "--nocapture",
+            ]).env(CHILD, mode)
+                .env("COLM_SSH_AUTH_STDIN", if matches!(mode, "batch" | "none") { "0" } else { "1" })
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+            if mode == "batch" {
+                command
+                    .env_remove("COLM_SSH_GUI_BROKER")
+                    .env_remove("COLM_SSH_GUI_TOKEN");
+            } else {
+                command
+                    .env("COLM_SSH_GUI_BROKER", "127.0.0.1:1234")
+                    .env("COLM_SSH_GUI_TOKEN", "a".repeat(64));
+            }
+            let mut child = command.spawn().unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(format!("{{\"host\":\"server\",\"auth\":\"{mode}\"}}\n").as_bytes())
+                .unwrap();
+            let result = child.wait_with_output().unwrap();
+            assert!(
+                result.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        return;
+    };
+    crate::auth::initialize_from_stdin().unwrap();
+    let command = Ssh::new("server").unwrap().command().unwrap();
+    let timeouts: Vec<_> = command
+        .get_args()
+        .filter(|arg| arg.to_string_lossy().starts_with("ConnectTimeout="))
+        .collect();
+    assert_eq!(
+        timeouts,
+        [if mode == "batch" {
+            "ConnectTimeout=60"
+        } else {
+            "ConnectTimeout=660"
+        }]
+    );
+    assert!(command
+        .get_args()
+        .any(|arg| arg == "ServerAliveInterval=30"));
+}

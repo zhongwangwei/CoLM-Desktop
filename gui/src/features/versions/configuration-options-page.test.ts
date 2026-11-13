@@ -1278,7 +1278,8 @@ test('CN file picker stages a quoted path, cancels without edits and reports err
   h.picks[0].resolve("/data/O'Brien/cn.nc");
   await pending;
   assert.equal(patches[0].DEF_file_cn_init, "'/data/O''Brien/cn.nc'");
-  c = h.render();
+  h.render();
+  c = await h.settle();
   let next = c.actions.find((a) => a.id === browseId)!.run();
   h.picks.at(-1)!.resolve(null);
   await next;
@@ -1773,7 +1774,11 @@ test('material modal cannot save empty, malformed, or unapplied definitions', as
   assert.match(JSON.stringify(h.nodes), /unique|重复/);
 });
 
-test('isotope modal retains parameter-file metadata and requires positive aquifer mixing water', async () => {
+test('isotope modal prefills aquifer mixing water so first activation is possible', async () => {
+  // 修复前：保存校验要求 DEF_MT_AQUIFER_MIXING_WATER_MM > 0，而该字段在
+  // DEF_USE_ISOTOPE 保存为 true 之前被后端 hidden，对话框没有输入框 —— 首次启用
+  // 同位素必被自己的校验卡死（2026-11-12 实测）。现在选中同位素族会自动预填
+  // 1000 mm 测试值，并渲染可编辑输入框。
   const h = materialModalHarness();
   let ready = true;
   h.props.onReady = (value) => {
@@ -1783,7 +1788,7 @@ test('isotope modal retains parameter-file metadata and requires positive aquife
     name: 'DEF_MT_AQUIFER_MIXING_WATER_MM',
     section: '材料',
     kind: 'real',
-    default: '0',
+    default: '-1.',
     values: [],
     derived: false,
   });
@@ -1794,20 +1799,77 @@ test('isotope modal retains parameter-file metadata and requires positive aquife
   c.actions.find((action) => action.id === 'configuration-materials-apply')!.run();
   h.render();
   await h.settle();
-  assert.equal(ready, false);
-  assert.match(JSON.stringify(h.nodes), /含水层|aquifer/);
+  assert.equal(ready, true);
   assert.equal(helpers.materialRows(h.props.overlay)[0].TYPES, 'isotope');
+  assert.equal(h.props.overlay.physics.DEF_MT_AQUIFER_MIXING_WATER_MM, '1000');
+  c = h.render();
+  assert.equal(
+    c.fields.find((field) => field.id === 'configuration-aquifer-mixing')?.value,
+    '1000',
+  );
+  assert.match(JSON.stringify(h.nodes), /含水层|aquifer/);
+  // 输入框可改；非正值仍会被校验拦下。
+  c.fields.find((field) => field.id === 'configuration-aquifer-mixing')!.set('250');
   h.render();
   await h.settle();
-  assert.equal(ready, false);
-  h.props.overlay.physics.DEF_MT_AQUIFER_MIXING_WATER_MM = '1';
-  h.render();
-  await h.settle();
+  assert.equal(h.props.overlay.physics.DEF_MT_AQUIFER_MIXING_WATER_MM, '250');
   assert.equal(ready, true);
   h.props.overlay.physics.DEF_MT_AQUIFER_MIXING_WATER_MM = '-1';
   h.render();
   await h.settle();
   assert.equal(ready, false);
+});
+
+test('legacy aquifer value is shown over loaded case data and a subsequent edit stays editable', async () => {
+  const h = materialModalHarness();
+  const key = 'DEF_MT_AQUIFER_MIXING_WATER_MM';
+  h.props.fields.push({
+    name: key,
+    section: '材料',
+    kind: 'real',
+    default: '-1.',
+    values: [],
+    derived: false,
+  });
+  h.props.caseValues = { ...h.props.overlay.physics, [key]: '1000.0' };
+  h.props.onCaseChange = (patch) => {
+    Object.assign(h.props.caseValues!, patch);
+  };
+  h.render();
+  const response = h.response();
+  response.legacy_case_overrides = { [key]: '2500.' };
+  response.fields.find((field) => field.name === key)!.configured_value = '2500.';
+  h.requests.at(-1)!.resolve(response);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  const controls = h.render();
+  const mixing = controls.fields.find((field) => field.id === 'configuration-aquifer-mixing')!;
+  assert.equal(mixing.value, '2500.');
+  mixing.set('3000');
+  assert.equal(h.props.caseValues[key], '3000');
+  const updated = h.render();
+  assert.equal(
+    updated.fields.find((field) => field.id === 'configuration-aquifer-mixing')?.value,
+    '3000',
+  );
+  assert.deepEqual(h.requests.at(-1)!.args.caseEditedFields, [key]);
+  const editedResponse = h.response();
+  editedResponse.fields.find((field) => field.name === key)!.configured_value = '3000';
+  h.requests.at(-1)!.resolve(editedResponse);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  h.render()
+    .fields.find((field) => field.id === 'configuration-aquifer-mixing')!
+    .set('1000.0');
+  h.render();
+  assert.deepEqual(h.requests.at(-1)!.args.caseEditedFields, [key]);
+  assert.equal((h.requests.at(-1)!.args.caseValues as Record<string, string>)[key], '1000.0');
+  const matchingRawResponse = h.response();
+  matchingRawResponse.fields.find((field) => field.name === key)!.configured_value = '1000.0';
+  h.requests.at(-1)!.resolve(matchingRawResponse);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.equal(
+    h.render().fields.find((field) => field.id === 'configuration-aquifer-mixing')?.value,
+    '1000.0',
+  );
 });
 
 test('material modal uses context defaults but explicit dependency conflicts still block saving', async () => {
@@ -1959,6 +2021,57 @@ test('preset mixed with an existing solute row retains local rows for correction
   );
 });
 
+test('nitrogen solute preset cards prefill their standard files and need BGC', async () => {
+  const h = materialModalHarness();
+  h.props.overlay.physics.DEF_USE_BGC = '.false.';
+  h.render();
+  let c = await h.settle();
+  for (const [family, name, file] of [
+    ['nh4', 'NH4', 'standard_nh4_parameter.nml'],
+    ['no3', 'NO3', 'standard_no3_parameter.nml'],
+  ] as const) {
+    const action = c.actions.find((item) => item.id === `configuration-family-${family}`)!;
+    assert.ok(action, `${family} card is missing`);
+    action.run();
+    c = h.render();
+    assert.equal(
+      c.fields.find((field) => field.id === 'configuration-material-0-NAMES')!.value,
+      name,
+    );
+    assert.equal(
+      c.fields.find((field) => field.id === 'configuration-material-0-PARAM_FILES')!.value,
+      file,
+    );
+    c.actions.find((item) => item.id === 'configuration-materials-apply')!.run();
+    h.render();
+    await h.settle();
+    assert.deepEqual(helpers.materialRows(h.props.overlay), [
+      { NAMES: name, TYPES: 'solute', PARAM_FILES: file },
+    ]);
+    c.actions.find((item) => item.id === 'configuration-material-0-remove')!.run();
+    c = h.render();
+    c.actions.find((item) => item.id === 'configuration-materials-apply')!.run();
+    h.render();
+    await h.settle();
+  }
+  // BGC 打开后 Rust 引擎也可用（耦合已移植）：卡片因为已在定义表中而禁用，保存就绪。
+  h.props.overlay = helpers.setMaterialRows(
+    h.props.overlay,
+    h.props.fields,
+    helpers.appendMaterialFamily([], 'nh4'),
+  );
+  h.props.overlay.physics.DEF_USE_BGC = '.true.';
+  let ready = false;
+  h.props.onReady = (value) => {
+    ready = value;
+  };
+  h.render();
+  c = await h.settle();
+  const nh4 = c.actions.find((item) => item.id === 'configuration-family-nh4')!;
+  assert.equal(nh4.enabled, false);
+  assert.equal(ready, true);
+});
+
 test('nonmodal methane selection enables BGC only when definitions are applied', async () => {
   const h = materialModalHarness();
   h.props.modalActions = undefined;
@@ -2102,4 +2215,51 @@ test('engine changes invalidate the configuration query and refresh backend fiel
   assert.equal(p.requests.length, 2);
   assert.equal(p.requests[1].args.engine, 'fortran');
   assert.notEqual((await p.settle()).status, 'loading');
+});
+
+test('explicit flood infiltration edits back to the disk value override legacy preview values', async () => {
+  const h = harness();
+  const key = 'DEF_GridRiverLake_FloodInfiltMax';
+  h.props.fields.push({
+    name: key,
+    section: '河道与水库',
+    kind: 'real',
+    default: '5',
+    values: [],
+    derived: false,
+  });
+  h.props.process = 'DEF_USE_GridRiverLakeFlow';
+  h.props.modalActions = [];
+  h.props.caseValues = { ...h.props.overlay.physics, [key]: '5' };
+  const patches: helpers.CaseOptionPatch[] = [];
+  h.props.onCaseChange = (patch) => {
+    patches.push(patch);
+    Object.assign(h.props.caseValues!, patch);
+  };
+  h.render();
+  const legacy = h.response();
+  legacy.legacy_case_overrides = { [key]: '10' };
+  legacy.fields.find((field) => field.name === key)!.configured_value = '10';
+  h.requests.at(-1)!.resolve(legacy);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  const control = h.render().fields.find((field) => field.id === `configuration-${key}`)!;
+  assert.equal(control.value, '10');
+  control.set('5');
+  h.render();
+  assert.deepEqual(patches.at(-1), { [key]: '5' });
+  const query = h.requests.at(-1)!;
+  assert.deepEqual(query.args.caseEditedFields, [key]);
+  assert.equal((query.args.caseValues as Record<string, string>)[key], '5');
+  const preview = h.response();
+  preview.fields.find((field) => field.name === key)!.configured_value = '5';
+  query.resolve(preview);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  const updated = h.render();
+  assert.equal(updated.fields.find((field) => field.id === `configuration-${key}`)?.value, '5');
+  updated.actions.find((action) => action.id === `configuration-${key}-reset`)!.run();
+  assert.deepEqual(patches.at(-1), { [key]: null });
+  h.props.removedCaseKeys = [key];
+  h.render();
+  assert.deepEqual(h.requests.at(-1)!.args.caseEditedFields, []);
+  assert.deepEqual(h.requests.at(-1)!.args.caseRemovedFields, [key]);
 });

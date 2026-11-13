@@ -287,6 +287,29 @@ fn no_qc_contract_means_finite_only() {
 }
 
 #[test]
+fn fluxnet_ch4_co2_species_units_are_decoded_as_the_canonical_target() {
+    // 实测缺陷（2026-11-12）：内置 AT-Neu 观测的 GPP/NEE 写
+    // `umol CO2 m-2 s-1`，单位表没有这条别名，结果页整页观测评估失败。
+    // 这里用真实的 FLUXNET-CH4 写法锁住解码路径，不只测单位表。
+    let _guard = crate::netcdf_test_guard();
+    let dir = tmp_dir("co2-species");
+    let (path, mut file) = create(&dir, 2);
+    write_f64(&mut file, "GPP", Some("umol CO2 m-2 s-1"), &[1.0, -0.0]);
+    drop(file);
+
+    let decoded = decode_path(&path, "GPP", false).unwrap().unwrap();
+    assert_eq!(decoded.units, "umol/m2/s");
+    assert_eq!(
+        decoded.source_units.as_deref(),
+        Some("umol CO2 m-2 s-1"),
+        "源单位要原样保留，界面才说得清观测是从哪套单位换过来的"
+    );
+    assert_eq!(decoded.values, vec![1.0, -0.0], "改名不动数");
+    assert!(decoded.values[1].is_sign_negative(), "-0.0 的符号位不该丢");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn declared_qc_without_a_qc_variable_is_refused() {
     let _guard = crate::netcdf_test_guard();
     let dir = tmp_dir("missing-qc");

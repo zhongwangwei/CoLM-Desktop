@@ -68,6 +68,27 @@ pub fn soil_biogeochem_n_leaching(
         }
     } else {
         for j in 0..d.nl_soil {
+            // Species-resolved NH4 leaching（上游 `MOD_BGC_Soil_BiogeochemNLeaching.F90:112-127`）：
+            // 只有材料 namelist 打开 `DEF_USE_NH4_LEACHING` 才逐层算，否则该行清零；
+            // 这段在 NO3 之前执行，和上游的行顺序一致。
+            if sw.nh4_leaching {
+                disn_conc = 0.0;
+                if p.wliq_soisno[j] > 0.0 {
+                    disn_conc = (s.constants.sf * s.patch.smin_nh4_vr[j].max(0.0) * p.dz_soi[j])
+                        / (p.wliq_soisno[j]);
+                }
+                if tot_water > 0.0 {
+                    s.patch_flux.smin_nh4_leached_vr[j] =
+                        disn_conc * drain_tot * p.wliq_soisno[j] / (tot_water * p.dz_soi[j]);
+                } else {
+                    s.patch_flux.smin_nh4_leached_vr[j] = 0.0;
+                }
+                s.patch_flux.smin_nh4_leached_vr[j] = s.patch_flux.smin_nh4_leached_vr[j]
+                    .min((s.constants.sf * s.patch.smin_nh4_vr[j].max(0.0)) / p.deltim);
+                s.patch_flux.smin_nh4_leached_vr[j] = s.patch_flux.smin_nh4_leached_vr[j].max(0.0);
+            } else {
+                s.patch_flux.smin_nh4_leached_vr[j] = 0.0;
+            }
             disn_conc = 0.0;
             if p.wliq_soisno[j] > 0.0 {
                 disn_conc = (s.constants.sf_no3 * s.patch.smin_no3_vr[j] * p.dz_soi[j])

@@ -149,7 +149,16 @@ export type ConfigurationResult = {
   }[];
   warnings: string[];
   context_complete: boolean;
+  /** 历史版本的算例控制值迁移（`DEF_MT_AQUIFER_MIXING_WATER_MM` 等），面板要提示已按历史值应用。 */
+  legacy_case_overrides?: Record<string, string>;
 };
+/** 历史模型迁到算例拥有的参数（面板要提示已按历史值应用）；排序保证界面稳定。 */
+export function legacyCaseOverrideEntries(
+  result: Pick<ConfigurationResult, 'legacy_case_overrides'>,
+): [string, string][] {
+  return Object.entries(result.legacy_case_overrides ?? {}).sort(([a], [b]) => a.localeCompare(b));
+}
+
 export const materialColumns = ['NAMES', 'TYPES', 'PARAM_FILES'] as const;
 export const materialTypes = [
   ['isotope', '同位素', 'Isotope'],
@@ -408,6 +417,22 @@ export function setMaterialRows(
   write('DEF_SEDIMENT_PARAM_FILE', firstFile('particle') || 'null');
   return next;
 }
+/// 水同位素的地下含水层混合水量（mm）。首次启用同位素必须给正值，否则保存校验
+/// 会拦住；而这个字段在 `DEF_USE_ISOTOPE` 保存成 true 之前被后端标成 hidden
+/// （“只有水同位素使用”），材料对话框里没有输入框 —— 不预填就是死锁
+/// （实测 2026-11-12：新建与事后两条路径都无法首次启用同位素）。
+export const AQUIFER_MIXING_WATER = 'DEF_MT_AQUIFER_MIXING_WATER_MM';
+/// 历史设计里这个值是「1000 mm 测试值，正式模拟请用实测或率定值」。
+export const AQUIFER_MIXING_WATER_TEST_MM = '1000';
+
+function withAquiferMixingWater(overlay: Overlay, fields: ModelField[]): Overlay {
+  const current = fortranNumberInputValue(modelSettingValue(overlay, AQUIFER_MIXING_WATER) ?? '');
+  if (current !== null && Number(current) > 0) return overlay;
+  if (!fields.some((field) => field.name === AQUIFER_MIXING_WATER && !field.derived))
+    return overlay;
+  return setModelOption(overlay, fields, AQUIFER_MIXING_WATER, AQUIFER_MIXING_WATER_TEST_MM);
+}
+
 export function applyMaterialSelection(
   overlay: Overlay,
   fields: ModelField[],
@@ -418,6 +443,7 @@ export function applyMaterialSelection(
       ['ch4', 'methane'].includes(row.NAMES.trim().toLowerCase()) &&
       row.TYPES.trim().toLowerCase() === 'gas',
   );
+  const isotope = rows.some((row) => row.TYPES.trim().toLowerCase() === 'isotope');
   const lulcc =
     modelSettingValue(overlay, 'DEF_USE_LULCC') ??
     fields.find((field) => field.name === 'DEF_USE_LULCC')?.default;
@@ -428,8 +454,10 @@ export function applyMaterialSelection(
         'Methane requires BGC; disable land-cover change first',
       ),
     );
-  const next = setMaterialRows(overlay, fields, rows);
-  return methane ? setModelOption(next, fields, 'DEF_USE_BGC', '.true.') : next;
+  let next = setMaterialRows(overlay, fields, rows);
+  if (methane) next = setModelOption(next, fields, 'DEF_USE_BGC', '.true.');
+  // 同位素预填含水层混合水量：否则首次启用会被自身校验拦住（见上）。
+  return isotope ? withAquiferMixingWater(next, fields) : next;
 }
 export function processListValues(raw: string): string[] {
   const values: string[] = [];
@@ -544,6 +572,10 @@ export const materialFamilies = [
   },
   { id: 'methane', zh: '甲烷 CH4', en: 'Methane CH4', rows: [['CH4', 'gas']] },
   { id: 'chloride', zh: '氯离子 Cl', en: 'Chloride Cl', rows: [['Cl', 'solute']] },
+  // 上游 MaterialTransport 自带 NH4/NO3 溶质与 BGC 氮淋溶耦合（run/standard_nh4/no3_parameter.nml）。
+  // Fortran 内核已支持；Rust 侧还没移植源项，所以在 BGC 打开时由 family state 限回 Fortran。
+  { id: 'nh4', zh: '铵根 NH4', en: 'Ammonium NH4', rows: [['NH4', 'solute']] },
+  { id: 'no3', zh: '硝酸根 NO3', en: 'Nitrate NO3', rows: [['NO3', 'solute']] },
   { id: 'sediment', zh: '河道泥沙', en: 'River sediment', rows: [['SEDIMENT', 'particle']] },
 ] as const;
 export type MaterialFamily = (typeof materialFamilies)[number]['id'];
@@ -585,6 +617,8 @@ export function appendMaterialFamily(
           H2_18O: 'standard_isotope_parameter.nml',
           HDO: 'standard_isotope_parameter.nml',
           Cl: 'standard_chloride_parameter.nml',
+          NH4: 'standard_nh4_parameter.nml',
+          NO3: 'standard_no3_parameter.nml',
           SEDIMENT: 'standard_sediment_parameter.nml',
         }[NAMES],
       })),
@@ -677,6 +711,17 @@ export function materialFamilyState(
       reasons.push(['甲烷需要 PFT / PC', 'Methane requires PFT / PC']);
     else if (!context.subgrid) pending.push(['PFT / PC 结构待确认', 'PFT / PC structure pending']);
   }
+  if (family === 'nh4' || family === 'no3') {
+    // NH4/NO3 的物理意义来自 BGC 氮循环：BGC 算出的矿质氮淋溶通量由材料输运
+    // （Fortran `MOD_MT_NitrogenLeaching`，Rust `book_bgc_nitrogen_leaching`）记成溶质外部输入。
+    // 没有 BGC 时它们只是惰性保守示踪，作为氮溶质使用没有意义，所以 BGC 是这两种溶质的前提。
+    need(
+      'DEF_USE_BGC',
+      true,
+      'NH4/NO3 需要 BGC（氮循环源项）',
+      'NH4/NO3 require BGC (nitrogen-cycle source terms)',
+    );
+  }
   if (family === 'isotope')
     need(
       'DEF_USE_LULCC',
@@ -717,7 +762,8 @@ export function materialSetupIssues(overlay: Overlay, context: FamilyContext): [
     const name = row.NAMES.trim().toLowerCase(),
       type = row.TYPES.trim().toLowerCase();
     if (type === 'isotope') families.add('isotope');
-    else if (type === 'solute') families.add('chloride');
+    else if (type === 'solute')
+      families.add(name === 'nh4' ? 'nh4' : name === 'no3' ? 'no3' : 'chloride');
     else if (type === 'gas' && ['ch4', 'methane'].includes(name)) {
       families.add('methane');
       if (

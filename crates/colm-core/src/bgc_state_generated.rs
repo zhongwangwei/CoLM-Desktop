@@ -5825,6 +5825,8 @@ pub struct BgcPatchFluxes {
     pub fire_mortality_to_cwdn: Vec<f64>,
     /// `sminn_leached_vr(nl_soil, numpatch)`
     pub sminn_leached_vr: Vec<f64>,
+    /// `smin_nh4_leached_vr(nl_soil, numpatch)`
+    pub smin_nh4_leached_vr: Vec<f64>,
     /// `smin_no3_leached_vr(nl_soil, numpatch)`
     pub smin_no3_leached_vr: Vec<f64>,
     /// `smin_no3_runoff_vr(nl_soil, numpatch)`
@@ -5901,6 +5903,8 @@ pub struct BgcPatchFluxes {
     pub denit: Vec<f64>,
     /// `sminn_leached(numpatch)`
     pub sminn_leached: Vec<f64>,
+    /// `smin_nh4_leached(numpatch)`
+    pub smin_nh4_leached: Vec<f64>,
     /// `f_n2o_nit(numpatch)`
     pub f_n2o_nit: Vec<f64>,
     /// `smin_no3_leached(numpatch)`
@@ -6118,6 +6122,7 @@ impl BgcPatchFluxes {
             fire_mortality_to_lig_n: vec![MISSING; dims.nl_soil],
             fire_mortality_to_cwdn: vec![MISSING; dims.nl_soil],
             sminn_leached_vr: vec![MISSING; dims.nl_soil],
+            smin_nh4_leached_vr: vec![MISSING; dims.nl_soil],
             smin_no3_leached_vr: vec![MISSING; dims.nl_soil],
             smin_no3_runoff_vr: vec![MISSING; dims.nl_soil],
             net_nmin_vr: vec![MISSING; dims.nl_soil],
@@ -6156,6 +6161,7 @@ impl BgcPatchFluxes {
             soyfixn_to_sminn: vec![MISSING; 1],
             denit: vec![MISSING; 1],
             sminn_leached: vec![MISSING; 1],
+            smin_nh4_leached: vec![MISSING; 1],
             f_n2o_nit: vec![MISSING; 1],
             smin_no3_leached: vec![MISSING; 1],
             smin_no3_runoff: vec![MISSING; 1],
@@ -6378,6 +6384,7 @@ impl BgcPatchFluxes {
             "fire_mortality_to_lig_n" => Some(&self.fire_mortality_to_lig_n),
             "fire_mortality_to_cwdn" => Some(&self.fire_mortality_to_cwdn),
             "sminn_leached_vr" => Some(&self.sminn_leached_vr),
+            "smin_nh4_leached_vr" => Some(&self.smin_nh4_leached_vr),
             "smin_no3_leached_vr" => Some(&self.smin_no3_leached_vr),
             "smin_no3_runoff_vr" => Some(&self.smin_no3_runoff_vr),
             "net_nmin_vr" => Some(&self.net_nmin_vr),
@@ -6416,6 +6423,7 @@ impl BgcPatchFluxes {
             "soyfixn_to_sminn" => Some(&self.soyfixn_to_sminn),
             "denit" => Some(&self.denit),
             "sminn_leached" => Some(&self.sminn_leached),
+            "smin_nh4_leached" => Some(&self.smin_nh4_leached),
             "f_n2o_nit" => Some(&self.f_n2o_nit),
             "smin_no3_leached" => Some(&self.smin_no3_leached),
             "smin_no3_runoff" => Some(&self.smin_no3_runoff),
@@ -6646,6 +6654,7 @@ impl BgcPatchFluxes {
             "fire_mortality_to_lig_n" => Some(&mut self.fire_mortality_to_lig_n),
             "fire_mortality_to_cwdn" => Some(&mut self.fire_mortality_to_cwdn),
             "sminn_leached_vr" => Some(&mut self.sminn_leached_vr),
+            "smin_nh4_leached_vr" => Some(&mut self.smin_nh4_leached_vr),
             "smin_no3_leached_vr" => Some(&mut self.smin_no3_leached_vr),
             "smin_no3_runoff_vr" => Some(&mut self.smin_no3_runoff_vr),
             "net_nmin_vr" => Some(&mut self.net_nmin_vr),
@@ -6684,6 +6693,7 @@ impl BgcPatchFluxes {
             "soyfixn_to_sminn" => Some(&mut self.soyfixn_to_sminn),
             "denit" => Some(&mut self.denit),
             "sminn_leached" => Some(&mut self.sminn_leached),
+            "smin_nh4_leached" => Some(&mut self.smin_nh4_leached),
             "f_n2o_nit" => Some(&mut self.f_n2o_nit),
             "smin_no3_leached" => Some(&mut self.smin_no3_leached),
             "smin_no3_runoff" => Some(&mut self.smin_no3_runoff),
@@ -6957,6 +6967,7 @@ impl BgcPatchFluxes {
         ("fire_mortality_to_lig_n", &["nl_soil", "numpatch"]),
         ("fire_mortality_to_cwdn", &["nl_soil", "numpatch"]),
         ("sminn_leached_vr", &["nl_soil", "numpatch"]),
+        ("smin_nh4_leached_vr", &["nl_soil", "numpatch"]),
         ("smin_no3_leached_vr", &["nl_soil", "numpatch"]),
         ("smin_no3_runoff_vr", &["nl_soil", "numpatch"]),
         ("net_nmin_vr", &["nl_soil", "numpatch"]),
@@ -7001,6 +7012,7 @@ impl BgcPatchFluxes {
         ("soyfixn_to_sminn", &["numpatch"]),
         ("denit", &["numpatch"]),
         ("sminn_leached", &["numpatch"]),
+        ("smin_nh4_leached", &["numpatch"]),
         ("f_n2o_nit", &["numpatch"]),
         ("smin_no3_leached", &["numpatch"]),
         ("smin_no3_runoff", &["numpatch"]),

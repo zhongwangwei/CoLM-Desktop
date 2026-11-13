@@ -311,7 +311,6 @@ fn coefficients_are_frozen_but_all_scheme_controls_are_case_owned() {
         "DEF_GridRiverLake_FloodInfiltMax",
         "DEF_ISO_REF_RATIO_H2_18O",
         "DEF_ISO_INIT_DELTA_HDO",
-        "DEF_MT_AQUIFER_MIXING_WATER_MM",
         "DEF_MT_N2O_EF5_NH4",
     ] {
         assert!(is_model_field(key), "{key}");
@@ -344,6 +343,8 @@ fn coefficients_are_frozen_but_all_scheme_controls_are_case_owned() {
         "DEF_METHANE_PARAM_FILE",
         "DEF_SEDIMENT_PARAM_FILE",
         "DEF_MT_BALANCE_ABORT_NBAD",
+        // 含水层混合水量是每次模拟的输入水量，归算例而不是模型系数（2026-11-12）。
+        "DEF_MT_AQUIFER_MIXING_WATER_MM",
         "DEF_SOLO_PFT",
         "DEF_FAST_PC",
         "DEF_PC_CROP_SPLIT",
@@ -1043,6 +1044,67 @@ fn clearing_legacy_process_references_survives_reload_and_materialization() {
         Some(&colm_namelist::Value::Str(String::new()))
     );
     assert_eq!(reg.get(&binding.version).unwrap(), frozen);
+}
+
+#[test]
+fn materialization_adds_a_missing_material_group_for_new_material_fields() {
+    // 上游把材料拆进 `&nl_colm_material`，而建例（尤其空间算例）只写 `&nl_colm`；
+    // 用户第一次在已有算例上开材料时，物化路径必须补组再插，否则保存与运行前预览
+    // 都会撞 "this namelist has no group"（实测 2026-11-12）。
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let case = tmp.case();
+    let binding = reg.migrate_case(&case, code()).unwrap();
+    let run = reg
+        .materialize_run_with_case_changes(
+            &binding.version,
+            &case,
+            &tmp.0.join("material-group-run"),
+            "material-group",
+            &[(
+                "DEF_MT_AQUIFER_MIXING_WATER_MM".into(),
+                colm_namelist::Value::Real {
+                    text: "1000.".into(),
+                },
+            )],
+            &[],
+        )
+        .unwrap();
+    let text = fs::read_to_string(run.run_case.join("case.nml")).unwrap();
+    assert!(text.contains("&nl_colm_material"), "{text}");
+    assert_eq!(text.matches("&nl_colm_material").count(), 1, "{text}");
+    let doc = colm_namelist::parse(&text).unwrap();
+    assert_eq!(
+        doc.get("DEF_MT_AQUIFER_MIXING_WATER_MM")
+            .and_then(colm_namelist::Value::as_f64),
+        Some(1000.0)
+    );
+    // 第二个材料字段插进同一个组，不会再补一个空组。
+    let again = reg
+        .materialize_run_with_case_changes(
+            &binding.version,
+            &case,
+            &tmp.0.join("material-group-run-2"),
+            "material-group-2",
+            &[
+                (
+                    "DEF_MT_AQUIFER_MIXING_WATER_MM".into(),
+                    colm_namelist::Value::Real {
+                        text: "1000.".into(),
+                    },
+                ),
+                ("DEF_USE_ISOTOPE".into(), colm_namelist::Value::Bool(true)),
+            ],
+            &[],
+        )
+        .unwrap();
+    let text = fs::read_to_string(again.run_case.join("case.nml")).unwrap();
+    assert_eq!(text.matches("&nl_colm_material").count(), 1, "{text}");
+    let doc = colm_namelist::parse(&text).unwrap();
+    assert_eq!(
+        doc.get("DEF_USE_ISOTOPE"),
+        Some(&colm_namelist::Value::Bool(true))
+    );
 }
 
 #[test]
@@ -1988,5 +2050,381 @@ fn force_remove_keeps_baseline_and_sources_used_by_remaining_drafts_and_revision
     assert!(
         source.exists(),
         "draft deletion leaves code workspace cleanup to callers"
+    );
+}
+
+/// 历史 revision 把「当时算模型字段、现在归算例」的值存在 `overlay.physics` 里（例如含水层
+/// 混合水量 2500 mm）。`model_overlay` 不能再静默丢掉：迁到 `legacy_case_overrides`，
+/// 运行物料化按旧行为在模型设置之后应用，同一冻结版本的计算参数保持不变；派生版本继承迁移值。
+#[test]
+fn legacy_model_case_control_records_migrate_into_runs_instead_of_vanishing() {
+    let key = "DEF_MT_AQUIFER_MIXING_WATER_MM";
+    let mut legacy = Overlay::default();
+    legacy.physics.insert(key.into(), "2500.".into());
+    let migrated = model_overlay(&legacy);
+    assert!(migrated.physics.is_empty());
+    assert_eq!(
+        migrated.legacy_case_overrides.get(key).map(String::as_str),
+        Some("2500.")
+    );
+    validate_overlay(&migrated).unwrap();
+    // 读两次不能把迁移值再挪走或丢。
+    assert_eq!(model_overlay(&migrated), migrated);
+
+    // 落盘成旧冻结版本（旧代码会把该值写进 physics），再跑带 1000 mm 的算例。
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let official = reg.install_official(code()).unwrap();
+    let mut d = reg.create_draft(draft(official.version.clone())).unwrap();
+    d.overlay
+        .physics
+        .insert("DEF_TUNING_CSOILC".into(), "0.006".into());
+    let d = reg.save_draft(d, 1).unwrap();
+    let frozen = reg.freeze(&d.id, &tmp.0).unwrap();
+
+    let dir = reg.revision_dir(&frozen.version).unwrap();
+    let file = dir.join("revision.json");
+    let mut stored: FrozenRevision = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    stored.overlay.physics.insert(key.into(), "2500.".into());
+    stored.overlay_sha256 = crate::registry::digest_json(&stored.overlay).unwrap();
+    stored.fingerprint = crate::registry::revision_fingerprint(&stored).unwrap();
+    fs::write(&file, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+    let loaded = reg.get(&frozen.version).unwrap();
+    assert!(
+        loaded.overlay.physics.contains_key(key),
+        "revision.json 原样保留历史值"
+    );
+
+    // 派生版本继承迁移值：新 revision 的 legacy_case_overrides 里能读到 2500。
+    let mut child = draft(frozen.version.clone());
+    child.id = "legacy-child".into();
+    let child = reg.create_draft(child).unwrap();
+    assert_eq!(
+        child
+            .overlay
+            .legacy_case_overrides
+            .get(key)
+            .map(String::as_str),
+        Some("2500.")
+    );
+
+    // 原有算例值保留历史模型覆盖，后续编辑与删除由元数据明确记录。
+    let explicit_case = tmp.0.join("legacy-aquifer");
+    fs::create_dir(&explicit_case).unwrap();
+    fs::write(
+        explicit_case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'legacy-aquifer'\n SITE_fsitedata = 'site.nc'\n/\n\
+         &nl_colm_material\n DEF_MT_AQUIFER_MIXING_WATER_MM = 1000.0\n/\n",
+    )
+    .unwrap();
+    fs::write(explicit_case.join("site.nc"), b"fixture dataset").unwrap();
+    reg.migrate_case_to(&explicit_case, code(), Some(frozen.version.clone()))
+        .unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(explicit_case.join(CASE_DATA_FILE)).unwrap()).unwrap();
+    assert!(metadata.get("case_field_edits").is_none());
+    let run_doc = |dir: &str| {
+        let run = reg
+            .materialize_run(&frozen.version, &explicit_case, &tmp.0.join(dir), dir)
+            .unwrap();
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap()
+    };
+    // 未编辑的旧算例写着 1000，历史模型的 2500 仍然生效。
+    let doc = run_doc("run-explicit");
+    assert_eq!(
+        doc.get(key).and_then(|value| value.as_f64()),
+        Some(2500.0),
+        "旧模型的有效参数必须保留"
+    );
+    assert!(tmp.0.join("run-explicit").join(CASE_DATA_FILE).is_file());
+    // 界面编辑成 3000：运行必须用 3000。
+    let edited = reg
+        .materialize_run_with_case_fields(
+            &frozen.version,
+            &explicit_case,
+            &tmp.0.join("run-edited"),
+            "run-edited",
+            &[(
+                key.into(),
+                colm_namelist::Value::Real {
+                    text: "3000.".into(),
+                },
+            )],
+        )
+        .unwrap();
+    let doc = colm_namelist::parse(&fs::read_to_string(edited.run_case.join("case.nml")).unwrap())
+        .unwrap();
+    assert_eq!(
+        doc.get(key).and_then(|value| value.as_f64()),
+        Some(3000.0),
+        "用户修改的 3000 mm 必须生效"
+    );
+    // 显式删除：不能把历史默认值恢复回来。
+    let cleared = reg
+        .materialize_run_with_case_changes(
+            &frozen.version,
+            &explicit_case,
+            &tmp.0.join("run-cleared"),
+            "run-cleared",
+            &[],
+            &[key.into()],
+        )
+        .unwrap();
+    let doc = colm_namelist::parse(&fs::read_to_string(cleared.run_case.join("case.nml")).unwrap())
+        .unwrap();
+    assert!(doc.get(key).is_none(), "显式删除后不能再被迁移默认值恢复");
+    // 保存新值后重开普通运行，不能再依赖当次传入的 case_fields。
+    let mut saved =
+        colm_namelist::parse(&fs::read_to_string(explicit_case.join("case.nml")).unwrap()).unwrap();
+    saved
+        .set(
+            key,
+            colm_namelist::Value::Real {
+                text: "3000.".into(),
+            },
+        )
+        .unwrap();
+    let data = case_data_with_field_edits(&explicit_case, &[key.into()], &[])
+        .unwrap()
+        .unwrap();
+    crate::registry::write_json(&explicit_case.join(CASE_DATA_FILE), &data).unwrap();
+    fs::write(explicit_case.join("case.nml"), saved.to_string()).unwrap();
+    assert_eq!(
+        run_doc("run-saved-edit").get(key).and_then(|v| v.as_f64()),
+        Some(3000.0)
+    );
+    // 保存删除后再重开，元数据必须阻止旧覆盖恢复。
+    saved.remove(key).unwrap();
+    let data = case_data_with_field_edits(&explicit_case, &[], &[key.to_lowercase()])
+        .unwrap()
+        .unwrap();
+    crate::registry::write_json(&explicit_case.join(CASE_DATA_FILE), &data).unwrap();
+    fs::write(explicit_case.join("case.nml"), saved.to_string()).unwrap();
+    assert!(run_doc("run-saved-removal").get(key).is_none());
+    assert!(
+        case_data_with_field_edits(&explicit_case, &["DEF_CASE_NAME".into()], &[])
+            .unwrap()
+            .is_none()
+    );
+    assert!(run_doc("run-after-unrelated-edit").get(key).is_none());
+    // 删除后再次设置恢复算例值，不能被旧的 Removed 记录挡住。
+    saved
+        .insert(
+            key,
+            colm_namelist::Value::Real {
+                text: "1000.".into(),
+            },
+            "nl_colm_material",
+        )
+        .unwrap();
+    let data = case_data_with_field_edits(&explicit_case, &[key.into()], &[])
+        .unwrap()
+        .unwrap();
+    crate::registry::write_json(&explicit_case.join(CASE_DATA_FILE), &data).unwrap();
+    fs::write(explicit_case.join("case.nml"), saved.to_string()).unwrap();
+    assert_eq!(
+        run_doc("run-reset-after-removal")
+            .get(key)
+            .and_then(|v| v.as_f64()),
+        Some(1000.0)
+    );
+    // 算例完全没写：历史值作为默认迁移进来。
+    let absent_case = case_with(&tmp, "legacy-aquifer-absent", "");
+    let run = reg
+        .materialize_run(
+            &frozen.version,
+            &absent_case,
+            &tmp.0.join("run-absent"),
+            "run-absent",
+        )
+        .unwrap();
+    let doc =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
+    assert_eq!(
+        doc.get(key).and_then(|value| value.as_f64()),
+        Some(2500.0),
+        "算例没写时历史值仍是默认（迁移保留旧行为）"
+    );
+}
+
+#[test]
+fn legacy_case_edits_reject_corrupt_or_unsupported_metadata() {
+    let key = "DEF_MT_AQUIFER_MIXING_WATER_MM";
+    let tmp = Temp::new();
+    let case = tmp.case();
+    let reg = tmp.registry();
+    reg.migrate_case(&case, code()).unwrap();
+    let path = case.join(CASE_DATA_FILE);
+    let original = fs::read(&path).unwrap();
+    fs::write(&path, "{broken").unwrap();
+    assert!(case_data_with_field_edits(&case, &[key.into()], &[]).is_err());
+    let mut data: CaseData = serde_json::from_slice(&original).unwrap();
+    data.schema = SCHEMA + 1;
+    crate::registry::write_json(&path, &data).unwrap();
+    assert!(case_data_with_field_edits(&case, &[key.into()], &[]).is_err());
+    data.schema = SCHEMA;
+    data.case_field_edits
+        .insert("DEF_CASE_NAME".into(), CaseFieldEdit::Removed);
+    crate::registry::write_json(&path, &data).unwrap();
+    assert!(case_data_with_field_edits(&case, &[key.into()], &[]).is_err());
+}
+
+/// 实际派生入口会把旧 revision 的原始 overlay 当“改动”传给 `create_draft`；里面的
+/// 已迁移字段必须先迁走，不能再当模型参数塞回 physics（否则报不是可写模型字段）。
+#[test]
+fn deriving_from_a_legacy_model_migrates_the_raw_overlay_records() {
+    let key = "DEF_MT_AQUIFER_MIXING_WATER_MM";
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let official = reg.install_official(code()).unwrap();
+    let mut d = reg.create_draft(draft(official.version.clone())).unwrap();
+    d.overlay
+        .physics
+        .insert("DEF_TUNING_CSOILC".into(), "0.006".into());
+    let d = reg.save_draft(d, 1).unwrap();
+    let frozen = reg.freeze(&d.id, &tmp.0).unwrap();
+    // 旧代码时代：含水层混合水量（Real DEF_MT_*）与方案开关都被当成模型字段写进 physics。
+    let mut legacy_raw = reg.get(&frozen.version).unwrap();
+    legacy_raw.overlay.physics.insert(key.into(), "-1.".into());
+    legacy_raw
+        .overlay
+        .physics
+        .insert("DEF_USE_PFT".into(), ".true.".into());
+    legacy_raw.overlay_sha256 = crate::registry::digest_json(&legacy_raw.overlay).unwrap();
+    legacy_raw.fingerprint = crate::registry::revision_fingerprint(&legacy_raw).unwrap();
+    crate::registry::write_json(
+        &reg.revision_dir(&frozen.version)
+            .unwrap()
+            .join("revision.json"),
+        &legacy_raw,
+    )
+    .unwrap();
+
+    let legacy = reg.get(&frozen.version).unwrap();
+    let mut child = draft(frozen.version.clone());
+    child.id = "derived".into();
+    // 真实入口：直接传旧模型原始 overlay。
+    child.overlay = legacy.overlay.clone();
+    let child = reg.create_draft(child).unwrap();
+    assert!(
+        !child.overlay.physics.contains_key(key),
+        "已迁移字段不能再回到模型参数"
+    );
+    assert!(
+        !child.overlay.physics.contains_key("DEF_USE_PFT"),
+        "从无模型所有权的方案开关仍按原策略丢弃"
+    );
+    assert_eq!(
+        child
+            .overlay
+            .legacy_case_overrides
+            .get(key)
+            .map(String::as_str),
+        Some("-1.")
+    );
+    validate_overlay(&child.overlay).unwrap();
+    let frozen_child = reg.freeze(&child.id, &tmp.0).unwrap();
+    assert_ne!(frozen_child.version.id, "official");
+    // 去重可能返回旧的、原始 overlay 还存 physics 的 revision；按运行视图（model_overlay）断言。
+    assert_eq!(
+        model_overlay(&frozen_child.overlay)
+            .legacy_case_overrides
+            .get(key)
+            .map(String::as_str),
+        Some("-1.")
+    );
+}
+
+/// 显式 `-1` 与「没写」对算例所有权语义不同：冻结去重不能套用模型默认值的等价规则，
+/// 否则会把显式覆盖丢掉、删除草稿，运行改用算例值。
+#[test]
+fn explicit_legacy_case_override_is_not_equivalent_to_absence() {
+    let key = "DEF_MT_AQUIFER_MIXING_WATER_MM";
+    let mut explicit = Overlay::default();
+    explicit
+        .legacy_case_overrides
+        .insert(key.into(), "-1.".into());
+    assert!(!is_noop(&explicit));
+    assert!(!same_effect(&explicit, &Overlay::default()));
+
+    let mut spelled_differently = Overlay::default();
+    spelled_differently
+        .legacy_case_overrides
+        .insert(key.into(), "-1.0".into());
+    assert!(same_effect(&explicit, &spelled_differently));
+
+    let mut other_value = Overlay::default();
+    other_value
+        .legacy_case_overrides
+        .insert(key.into(), "2500.".into());
+    assert!(!same_effect(&explicit, &other_value));
+}
+
+#[test]
+fn freezing_an_explicit_legacy_override_does_not_reuse_official_and_still_migrates() {
+    let key = "DEF_MT_AQUIFER_MIXING_WATER_MM";
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let official = reg.install_official(code()).unwrap();
+    let mut d = draft(official.version.clone());
+    d.overlay
+        .legacy_case_overrides
+        .insert(key.into(), "-1.".into());
+    let d = reg.create_draft(d).unwrap();
+    let frozen = reg.freeze(&d.id, &tmp.0).unwrap();
+    assert_ne!(
+        frozen.version.id, "official",
+        "显式覆盖不能被当成 no-op 去重掉"
+    );
+    assert_eq!(
+        frozen
+            .overlay
+            .legacy_case_overrides
+            .get(key)
+            .map(String::as_str),
+        Some("-1.")
+    );
+
+    let absent = case_with(&tmp, "absent", "");
+    let run = reg
+        .materialize_run(
+            &frozen.version,
+            &absent,
+            &tmp.0.join("run-absent"),
+            "absent",
+        )
+        .unwrap();
+    let doc =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
+    assert_eq!(
+        doc.get(key).and_then(|value| value.as_f64()),
+        Some(-1.0),
+        "算例没写时显式迁移值要继续生效"
+    );
+
+    let explicit = tmp.0.join("explicit");
+    fs::create_dir(&explicit).unwrap();
+    fs::write(
+        explicit.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'explicit'\n SITE_fsitedata = 'site.nc'\n/\n\
+         &nl_colm_material\n DEF_MT_AQUIFER_MIXING_WATER_MM = 1000.0\n/\n",
+    )
+    .unwrap();
+    fs::write(explicit.join("site.nc"), b"fixture dataset").unwrap();
+    let run = reg
+        .materialize_run(
+            &frozen.version,
+            &explicit,
+            &tmp.0.join("run-explicit"),
+            "explicit",
+        )
+        .unwrap();
+    let doc =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
+    assert_eq!(
+        doc.get(key).and_then(|value| value.as_f64()),
+        Some(-1.0),
+        "未编辑的旧算例继续应用历史模型覆盖"
     );
 }

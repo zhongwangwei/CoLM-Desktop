@@ -34,6 +34,7 @@ mod sidecar;
 mod simulation_draft;
 mod sitedata;
 mod sites;
+mod ssh_credentials;
 mod workspace;
 mod xerj_manager;
 
@@ -67,6 +68,7 @@ fn print_report(window: tauri::WebviewWindow) -> Result<(), String> {
 /// 关窗与退出走同一套停止规则。原来两处各写一份，退出路径漏了 AI 助手（第 732 轮）。
 /// 两个事件在单窗口下都会触发；每一步都是幂等的，重复调用无害。
 pub(crate) fn stop_everything(app: &tauri::AppHandle, when: &str) {
+    crate::ssh_credentials::cancel_all();
     if let Err(error) = app.state::<RunProcesses>().cancel_on_shutdown() {
         eprintln!("failed to stop every run while {when}: {error}");
     }
@@ -92,8 +94,9 @@ pub fn run() {
     let run_processes = RunProcesses::default();
     crate::sidecar::install_run_registry(&run_processes);
     let builder = tauri::Builder::default();
-    #[cfg(feature = "e2e-driver")]
     let builder = builder.setup(|app| {
+        ssh_credentials::initialize(app.handle());
+        #[cfg(feature = "e2e-driver")]
         e2e_driver::start(app.handle());
         Ok(())
     });
@@ -308,6 +311,8 @@ pub fn run() {
             assistant::assistant_api_models,
             hybrid_studies,
             hybrid_fit,
+            ssh_credentials::remote_auth_pending,
+            ssh_credentials::remote_auth_respond,
             remote_config,
             remote_save_config,
             remote_cases,

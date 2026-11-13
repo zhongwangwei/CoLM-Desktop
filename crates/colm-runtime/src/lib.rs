@@ -1546,6 +1546,17 @@ fn advance_patch(
             state,
             &output,
         )?;
+        // `mt_land_after_bgc`（`CoLMDRIVER.F90:238-240`）：BGC 这一步算出的矿质氮淋溶
+        // 质量在 `bgc_driver` 之后记进材料径流累加器；只有 NH4/NO3 材料参与。
+        if let Some((material, _)) = &template.material {
+            crate::material::book_bgc_nitrogen_leaching(
+                material,
+                state,
+                bgc.switches,
+                template.patch_type,
+                deltim,
+            )?;
+        }
     }
     Ok(PatchOutput::Soil(Box::new(output)))
 }

@@ -78,6 +78,21 @@ const TABLE: &[(&str, &str, f64, f64)] = &[
     ("umol m^-2 s^-1", "umol/m2/s", 1.0, 0.0),
     ("µmol m^-2 s^-1", "umol/m2/s", 1.0, 0.0),
     ("umol m**-2 s**-1", "umol/m2/s", 1.0, 0.0),
+    // 带 CO2 物种前缀的碳通量：FLUXNET-CH4 的 GPP/NEE/Resp 写
+    // `umol CO2 m-2 s-1`。规范目标仍是 `umol/m2/s` —— 评估表里
+    // GPP/NEE/Resp 本来就定义为 CO2 通量，目标单位物种无关（见
+    // colm-hist::obs 的 EvaluationVariable）。缺这几条，AT-Neu 内置
+    // 示例的观测评估会整页失败（实测 2026-11-12）。
+    ("umol CO2 m-2 s-1", "umol/m2/s", 1.0, 0.0),
+    ("µmol CO2 m-2 s-1", "umol/m2/s", 1.0, 0.0),
+    ("μmol CO2 m-2 s-1", "umol/m2/s", 1.0, 0.0),
+    ("umol CO2 m^-2 s^-1", "umol/m2/s", 1.0, 0.0),
+    ("µmol CO2 m^-2 s^-1", "umol/m2/s", 1.0, 0.0),
+    ("μmol CO2 m^-2 s^-1", "umol/m2/s", 1.0, 0.0),
+    ("umol CO2 m**-2 s**-1", "umol/m2/s", 1.0, 0.0),
+    ("umol CO2/m2/s", "umol/m2/s", 1.0, 0.0),
+    ("umol CO2/m^2/s", "umol/m2/s", 1.0, 0.0),
+    ("umol CO2/m²/s", "umol/m2/s", 1.0, 0.0),
     // 甲烷通量：FLUXNET-CH4 的规范量是 nmol CH4/m²/s，写法定尺标明 CH4。
     // **不收录裸 `nmol m-2 s-1`**：单看单位无法确认摩尔数指的是甲烷，
     // 与「认识才换」的规则一致。

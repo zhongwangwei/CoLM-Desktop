@@ -3788,31 +3788,6 @@ fn is_removable_placeholder(name: &str) -> bool {
     )
 }
 
-/// 旧算例的 case.nml 往往只有 `&nl_colm`，没有 `&nl_colm_material`。迁移或写入新 family
-/// 字段时要往新组里写，先补一个空组再插入；`Document` 的 insert 约定不替调用方建组。
-fn ensure_namelist_group(doc: &mut colm_namelist::Document, group: &str) {
-    let text = doc.to_string();
-    // 与 `colm-namelist` 的组判定一致：忽略 `!` 之后的注释与大小写。
-    // 不这么做的话 `&nl_colm_material ! 用户笔记` 会被当成缺组，补出重复的空组。
-    let present = text.lines().any(|line| {
-        line.split('!')
-            .next()
-            .unwrap_or(line)
-            .trim()
-            .trim_start_matches('&')
-            .trim()
-            .eq_ignore_ascii_case(group)
-            && line.trim_start().starts_with('&')
-    });
-    if present {
-        return;
-    }
-    let combined = format!("{text}\n&{group}\n/\n");
-    if let Ok(parsed) = colm_namelist::parse(&combined) {
-        *doc = parsed;
-    }
-}
-
 /// 旧算例迁移：上游把 materials 子系统改成 MaterialTransport，`@@DEF_USE_MATERIAL@@` 拆成
 /// isotope / methane / sediment 三个 family 开关，`@@DEF_MATERIAL_@@*` 改名或拆成按 family 的字段。
 /// 这里把读取到的旧 namelist 就地改写；已有的新字段优先，不覆盖。
@@ -3902,7 +3877,7 @@ pub(crate) fn migrate_legacy_material(doc: &mut colm_namelist::Document) -> bool
         if movable && doc.get(new).is_none() {
             let group = colm_schema::find(new).and_then(|field| field.group);
             if let Some(group) = group {
-                ensure_namelist_group(doc, group);
+                let _ = doc.ensure_group(group);
                 let _ = doc.insert(new, value, group);
             }
         }
@@ -3981,7 +3956,7 @@ pub(crate) fn migrate_legacy_material(doc: &mut colm_namelist::Document) -> bool
                   changed: &mut bool| {
         if doc.get(name).is_none() {
             if let Some(group) = colm_schema::find(name).and_then(|field| field.group) {
-                ensure_namelist_group(doc, group);
+                let _ = doc.ensure_group(group);
                 let _ = doc.insert(name, value, group);
             }
             *changed = true;
@@ -5022,7 +4997,7 @@ fn put(
             // 老算例更没有这些组。缺组时补一个空组再插，否则向导打开第一个 family
             // 开关就会撞上 "this namelist has no group"。`Document::insert` 坚持
             // 不替调用方建组，所以这里显式补。
-            ensure_namelist_group(doc, g);
+            doc.ensure_group(g).map_err(|e| format!("{e:#}"))?;
             doc.insert(path, v, g).map_err(|e| format!("{e:#}"))
         }
         None => doc.set(path, v).map_err(|e| format!("{e:#}")),
@@ -5233,11 +5208,26 @@ fn stage_material_parameters(
     if methane.as_deref() == Some("standard_methane_parameter.nml") {
         stage_methane_parameter(dir, mode)?;
     }
-    if solutes
+    // 上游从 MaterialTransport 起就有 Cl/NH4/NO3 三份标准溶质参数文件；逐个按模板落盘。
+    // 单溶质算例保留“浓度字段写进该文件”的旧语义；多溶质时各文件用自己的模板默认值
+    // （单个 init_conc/precip_default_conc 无法同时表达多种溶质），用户可在过程参数里分别改。
+    let solute_templates: Vec<_> = solutes
         .iter()
-        .any(|file| file.trim() == "standard_chloride_parameter.nml")
-    {
-        stage_solute_parameter(dir, solute)?;
+        .filter_map(|file| {
+            STANDARD_PARAM_TEMPLATES
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(file.trim()))
+                .filter(|(name, _)| is_solute_template(name))
+        })
+        .collect();
+    let single_solute = solutes.len() == 1;
+    for (name, text) in &solute_templates {
+        stage_solute_parameter(
+            dir,
+            name,
+            text,
+            if single_solute { solute } else { (None, None) },
+        )?;
     }
     if sediment.as_deref() == Some("standard_sediment_parameter.nml") {
         let path = std::path::Path::new(dir).join("standard_sediment_parameter.nml");
@@ -5363,12 +5353,18 @@ pub(crate) fn material_parameter_template(file: &str) -> Option<&'static str> {
     }
 }
 
-fn forcing_input_snapshot(
+fn case_save_input_snapshot(
     dirs: &[String],
     fields: &[FieldChange],
 ) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, String> {
     let mut snapshot = Vec::new();
     for (dir, text) in read_all(dirs)? {
+        let metadata = std::path::Path::new(&dir).join(colm_model::CASE_DATA_FILE);
+        match std::fs::read(&metadata) {
+            Ok(bytes) => snapshot.push((metadata, bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
         let mut doc = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
         let mut files = vec![character(&doc, "DEF_forcing_namelist")];
         for field in fields
@@ -5719,13 +5715,25 @@ fn isotope_parameter_text(template: &str, fractionation: bool) -> Result<String,
     ))
 }
 
-/// Cl 溶质参数文件：上游模板的初始浓度与降水浓度都是 0（溶质什么也不做），换成向导填的值。
-/// 没给的保持模板值；浓度必须是非负有限数（kg Cl / kg 水）。
+/// 内置溶质参数文件模板（Cl / NH4 / NO3）的判定；后两份是上游 MaterialTransport 的
+/// BGC 氮淋溶载体（NH4/NO3），模板与 Cl 的字段集合相同。
+fn is_solute_template(file: &str) -> bool {
+    matches!(
+        file,
+        "standard_chloride_parameter.nml"
+            | "standard_nh4_parameter.nml"
+            | "standard_no3_parameter.nml"
+    )
+}
+
+/// 溶质参数文件：上游模板的初始浓度与降水浓度都是缺省值（保守输运），换成向导填的值。
+/// 没给的保持模板值；浓度必须是非负有限数（kg 溶质 / kg 水）。
 fn stage_solute_parameter(
     dir: &str,
+    file: &str,
+    template: &str,
     (init, precip): (Option<&str>, Option<&str>),
 ) -> Result<(), String> {
-    let template = include_str!("../../../vendor/CoLM202X/run/standard_chloride_parameter.nml");
     let mut doc = colm_namelist::parse(template).map_err(|e| format!("内置溶质参数模板：{e:#}"))?;
     for (name, value) in [(SOLUTE_INIT_CONC, init), (SOLUTE_PRECIP_CONC, precip)] {
         let Some(value) = value else { continue };
@@ -5745,7 +5753,7 @@ fn stage_solute_parameter(
         )
         .map_err(|e| format!("内置溶质参数模板：{e:#}"))?;
     }
-    let path = std::path::Path::new(dir).join("standard_chloride_parameter.nml");
+    let path = std::path::Path::new(dir).join(file);
     let changed_fields = [(SOLUTE_INIT_CONC, init), (SOLUTE_PRECIP_CONC, precip)]
         .into_iter()
         .filter_map(|(name, value)| value.map(|_| name))
@@ -5823,14 +5831,42 @@ pub fn reset_field_batch(
     let kernel = kernel_facts(kernel_dir.as_deref())?;
     let all = read_all(&dirs)?;
     let mut done = Vec::with_capacity(all.len());
+    let mut files = Vec::new();
     for (dir, text) in all {
         let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{dir}: {e:#}"))?;
         doc.remove(&path).map_err(|e| format!("{dir}: {e:#}"))?;
         validate_runtime_contract(&doc, std::path::Path::new(&dir), kernel)
             .map_err(|e| format!("{dir}: {e}"))?;
+        if let Some(metadata) = colm_model::case_data_with_field_edits(
+            std::path::Path::new(&dir),
+            &[],
+            std::slice::from_ref(&path),
+        )
+        .map_err(|e| e.to_string())?
+        {
+            files.push((
+                std::path::Path::new(&dir).join(colm_model::CASE_DATA_FILE),
+                serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?,
+            ));
+        }
         done.push((dir, doc.to_string()));
     }
-    write_all(&done)
+    if files.is_empty() {
+        return write_all(&done);
+    }
+    files.extend(
+        done.iter()
+            .map(|(dir, text)| (std::path::Path::new(dir).join("case.nml"), text.clone())),
+    );
+    let changed = write_files_atomic(&files)?;
+    Ok(BatchWrite {
+        written: done.len(),
+        changed,
+        text: done
+            .first()
+            .map(|(_, text)| text.clone())
+            .unwrap_or_default(),
+    })
 }
 
 /// 把一组有关联的字段原子地写进整批算例。
@@ -5989,6 +6025,22 @@ fn set_fields_with_forcing(
             &mut extra,
         )?;
         stage_isotope_fields(&mut doc, std::path::Path::new(&d), &mut extra)?;
+        let edited_fields = fields
+            .iter()
+            .map(|field| field.path.clone())
+            .collect::<Vec<_>>();
+        if let Some(metadata) = colm_model::case_data_with_field_edits(
+            std::path::Path::new(&d),
+            &edited_fields,
+            remove_fields,
+        )
+        .map_err(|e| e.to_string())?
+        {
+            extra.push((
+                std::path::Path::new(&d).join(colm_model::CASE_DATA_FILE),
+                serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?,
+            ));
+        }
         done.push((d, doc.to_string()));
     }
     if extra.is_empty() {
@@ -6446,7 +6498,7 @@ pub async fn case_data_save(
         .map(|field| Ok((field.path.clone(), typed(&field.path, &field.value)?)))
         .collect::<Result<Vec<_>, String>>()?;
     let before = read_all(&dirs)?;
-    let forcing_before = forcing_input_snapshot(&dirs, &fields)?;
+    let forcing_before = case_save_input_snapshot(&dirs, &fields)?;
     let mut contexts = Vec::new();
     let result = async {
         for dir in &dirs {
@@ -6484,7 +6536,7 @@ pub async fn case_data_save(
                 .await?;
             }
         }
-        if read_all(&dirs)? != before || forcing_input_snapshot(&dirs, &fields)? != forcing_before {
+        if read_all(&dirs)? != before || case_save_input_snapshot(&dirs, &fields)? != forcing_before {
             return Err("case data changed while validating; reload before saving".into());
         }
         let saved = set_fields_with_forcing(

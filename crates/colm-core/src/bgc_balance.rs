@@ -122,6 +122,7 @@ pub fn n_balance_check(
     if sw.nitrif {
         col_noutputs = col_noutputs
             + s.patch_flux.f_n2o_nit[0]
+            + s.patch_flux.smin_nh4_leached[0]
             + s.patch_flux.smin_no3_leached[0]
             + s.patch_flux.smin_no3_runoff[0];
     } else {

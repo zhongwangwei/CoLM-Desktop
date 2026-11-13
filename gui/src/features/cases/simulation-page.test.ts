@@ -2769,6 +2769,51 @@ test('switching bundled examples to own data clears example bindings but preserv
   assert.equal(own.fields.find((f) => f.id === 'new-runtime')?.value, '');
 });
 
+test('bundled urban example drops the BGC runtime that the city CLI rejects', async () => {
+  // CLI 对城市算例的显式 --runtime 要求目录里有 urban/LUCY_rawdata.nc；内置示例自动填的
+  // examples/Runtime 只有 ndep/nitrif，拿它建 AU-Preston 会直接失败（2026-11-12 实测：
+  // 默认 GUI 流程建不出城市示例）。城市站要清回空，让 CLI 铺算例自带的内置城市表；
+  // 切回甲烷/作物站时再把 BGC 需要的那份 runtime 补回来。
+  const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
+  const urban = { ...site, name: 'AU-Preston', site_file: '/urban/site.nc', urban: true };
+  const crop = { ...site, name: 'US-Ne3', site_file: '/crop/site.nc', crop: true };
+  const p = page(
+    'NewCasePage',
+    { form, sites: [site, methane, urban, crop], step: 3 },
+    [site, methane, urban, crop],
+    initialValues,
+    { schema: methaneSchema, kernels: setupKernels },
+  );
+  await p.mount();
+  await p.click('new-example');
+  let contract = await p.click('new-select-AU-Preston');
+  assert.equal(
+    contract.fields.find((f) => f.id === 'new-runtime')?.value,
+    '',
+    '城市站不能把 BGC runtime 当成自己的显式 --runtime',
+  );
+  contract = await p.click('new-select-US-Ne3');
+  assert.equal(contract.fields.find((f) => f.id === 'new-runtime')?.value, '/bundled/runtime');
+  contract = await p.click('new-select-AT-Neu');
+  assert.equal(contract.fields.find((f) => f.id === 'new-runtime')?.value, '/bundled/runtime');
+  contract = await p.click('new-select-AU-Preston');
+  assert.equal(contract.fields.find((f) => f.id === 'new-runtime')?.value, '');
+});
+
+test('bundled urban example keeps a hand-entered runtime directory', async () => {
+  const urban = { ...site, name: 'AU-Preston', site_file: '/urban/site.nc', urban: true };
+  const p = page('NewCasePage', { form, sites: [urban], step: 3 }, [urban]);
+  await p.mount();
+  await p.click('new-example');
+  p.set('new-runtime', '/custom/complete-urban-runtime');
+  const contract = await p.click('new-select-AU-Preston');
+  assert.equal(
+    contract.fields.find((f) => f.id === 'new-runtime')?.value,
+    '/custom/complete-urban-runtime',
+    '用户明确填写的 runtime 不能被示例清理逻辑覆盖',
+  );
+});
+
 test('research round trips preserve manual overrides while clearing remaining bundled bindings', async () => {
   const p = page('NewCasePage', { multiSiteEnabled: false, form, step: 3 });
   await p.mount();

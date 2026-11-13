@@ -382,6 +382,7 @@ impl Registry {
                 original_case_sha256: original_case_sha256.clone(),
                 fields,
                 process_file_bindings,
+                case_field_edits: BTreeMap::new(),
             };
             if case.join(CASE_DATA_FILE).exists() {
                 let old: CaseData = read_json(&case.join(CASE_DATA_FILE))?;
@@ -721,6 +722,16 @@ impl Registry {
                     _ => anyhow::bail!("unsupported scope"),
                 }
             }
+            apply_legacy_case_overrides(
+                &mut doc,
+                &frozen.overlay,
+                Some(&destination),
+                &case_fields
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>(),
+                remove_fields,
+            )?;
             let isotope_file = stage_run_isotope(
                 &mut doc,
                 &source,
@@ -982,6 +993,10 @@ fn stage_run_isotope(
 
 fn put(doc: &mut Document, key: &str, value: Value) -> Result<()> {
     let group = external_group(key).context("field has no writable namelist group")?;
+    // 上游把材料拆到 `&nl_colm_material` 等新组后，建例只写 `&nl_colm`，已有算例
+    // 更没有这些组。用户第一次开启材料时这里会插 family 开关，缺组就补一个空组，
+    // 否则动画面的“启用材料”会撞 `this namelist has no group`（实测 2026-11-12）。
+    doc.ensure_group(group)?;
     doc.insert(key, value, group)
 }
 fn prepare_asset_path(root: &Path, name: &str) -> Result<PathBuf> {
@@ -1033,7 +1048,8 @@ fn copy_case(
                 );
                 fs::write(destination.join(&name).join(item.file_name()), bytes)?;
             }
-        } else if path.extension().and_then(|s| s.to_str()) == Some("nml") {
+        } else if path.extension().and_then(|s| s.to_str()) == Some("nml") || name == CASE_DATA_FILE
+        {
             ensure!(
                 entry.file_type()?.is_file(),
                 "configuration must be a regular file: {}",

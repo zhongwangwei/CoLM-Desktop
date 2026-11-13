@@ -288,3 +288,20 @@ T7920 作业 `codex-96964c60c86e4ee0ad352de22f2768a7` 成功编译三个空间 F
 独有的 14 个 Python 工具（hist_acc_restart_fields、CaMa dam/preprocess、
 GDAS_GPCP step2_Merge_Data），未接入运行或自动测试；脚本来源仍为该备份，
 不代表当前内核的受验证执行路径。全部通过 Python AST 检查，数据流程未运行。
+
+## 2026-11-12：上游基线核对到 bf9ad007（补入 c545a96c 甲烷 MPI 清理）
+
+- 现状：vendor 已在 `6599b552` 收口到上游 `4c28107`（material host cleanup）。
+  2026-11-12 核对上游 HEAD `bf9ad007`（`4c28107..bf9ad007` 共 8 个提交）：
+  真正改源码的只有 `c545a96c`（3 个甲烷文件：MPI 常量改从 `MOD_SPMD_Task` 取，
+  不再直接 `USE MPI`）与 `MOD_HistAccRestart.F90` 的注释；`404eff99` 冠层卸雪
+  修复 vendor 早已有语义等价实现（本地先修、上游后采纳）；其余 6 个是 CI /
+  Makefile / NetCDF 工具链改动，桌面内核构建不走那条路径，不并。
+- 已并入：`c545a96c` 三个文件，适配 vendor 的「宏→运行期开关」写法
+  （`main/MATERIAL/FAMILY_GAS/MOD_MT_Methane.F90` 的 USEMPI 常量列表、
+  `MOD_MT_Methane_GIEMS.F90` 与 `MOD_MT_Methane_pH.F90` 删除局部 `USE MPI`）。
+- 未并入：`MOD_HistAccRestart.F90` 纯注释差异（避免无意义 churn）；
+  CI / Makefile / tools 工具链（桌面构建脚本自管，见上一节的取舍）。
+- 验证：`oracle/scripts/build_kernel.sh default` 与 `latlon` 重建成功（后者启用
+  USEMPI，覆盖改动的 MPI 分支）；四张生成表 drift、namelist roundtrip 与两个
+  workspace 的测试/clippy/fmt 按仓库标准套件通过。

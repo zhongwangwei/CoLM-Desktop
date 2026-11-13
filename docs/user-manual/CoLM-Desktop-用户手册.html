@@ -179,8 +179,8 @@ body{margin:0;font-family:"PingFang SC","Hiragino Sans GB","Songti SC",sans-seri
  </div>
  <div class="cover-info">
   <table class="cover-table">
-   <tr><th>适用版本</th><td>v0.3.0-beta.9（测试版）</td></tr>
-   <tr><th>编写日期</th><td>2026-11-11</td></tr>
+   <tr><th>适用版本</th><td>v0.3.0-beta.10（测试版）</td></tr>
+   <tr><th>编写日期</th><td>2026-11-13</td></tr>
    <tr><th>适用平台</th><td>macOS · Windows · Linux</td></tr>
    <tr><th>截图来源</th><td>真实窗口截图：GUI 全页面、区域/流域、AI 助手等 48 张</td></tr>
    <tr><th>内容构成</th><td>23 章 + 3 个附录（964 字段 · 1369 参数 · CLI 68 组）</td></tr>
@@ -190,7 +190,8 @@ body{margin:0;font-family:"PingFang SC","Hiragino Sans GB","Songti SC",sans-seri
 </section>
 
 <h1 id="colm-desktop-用户手册">CoLM Desktop 用户手册</h1>
-<p><strong>适用版本：</strong> <code>0.3.0-beta.9</code>（测试版）<br />
+<p><strong>适用版本：</strong>
+<code>0.3.0-beta.10</code>（测试版）<br />
 <strong>平台：</strong> macOS（Apple Silicon / Intel）、Windows
 x86_64、Linux x86_64<br />
 <strong>手册截图：</strong> 2026-11-07/08 在 macOS
@@ -250,8 +251,7 @@ x86_64、Linux x86_64<br />
 </tr>
 <tr>
 <td><a href="CoLM-Desktop-用户手册.pdf"><code>CoLM-Desktop-用户手册.pdf</code></a></td>
-<td>PDF（约 203 页，含封面、全部附录与 48
-张标注截图，适合分发/打印）</td>
+<td>PDF（含封面、全部附录与 48 张标注截图，适合分发/打印）</td>
 </tr>
 <tr>
 <td><a href="CoLM-Desktop-用户手册.md"><code>CoLM-Desktop-用户手册.md</code></a></td>
@@ -880,13 +880,19 @@ MB，需要联网）。三个状态全部显示&quot;已安装&quot;后，&quot;
 </thead>
 <tbody>
 <tr>
-<td>名称</td>
-<td>显示名，也是 <code>remote.json</code> 里的 host 别名</td>
+<td>显示名称</td>
+<td>便于识别这条服务器连接的名称</td>
 </tr>
 <tr>
 <td>SSH 别名/主机</td>
 <td><code>~/.ssh/config</code> 里的 Host，或
-<code>user@host</code>；需要密码时可用一次性登录缓存</td>
+<code>user@host</code>；land 集群当前使用登录节点别名
+<code>land</code></td>
+</tr>
+<tr>
+<td>认证方式</td>
+<td>SSH
+config、密钥、密码或密钥与密码；按当前用户的服务器登录要求选择</td>
 </tr>
 <tr>
 <td>工作根目录</td>
@@ -900,7 +906,7 @@ MB，需要联网）。三个状态全部显示&quot;已安装&quot;后，&quot;
 </tr>
 <tr>
 <td>节点与核数</td>
-<td>每节点核数用于站点打包与并行预算</td>
+<td>设置节点数量和每节点核数，用于站点打包与并行预算</td>
 </tr>
 <tr>
 <td>环境准备（env script）</td>
@@ -920,6 +926,14 @@ PLUMBER2s/Sitedata）</td>
 </tr>
 </tbody>
 </table>
+<p>需要私钥口令或登录密码时，应用会弹出输入框。按提示输入后按 Enter
+或点击“继续”，当前操作会接着执行。经过跳板机或需要多项认证时，按每次弹窗的提示依次输入。</p>
+<p>默认数据路径可以点击“选择目录”浏览服务器，强迫场也可以选择单个文件。选择集群预设或成功检查连接后，空着的路径会先填入预设值，项目目录可采用已填写的服务器工作目录。已有自定义路径会保留，填入后可继续修改和检查。</p>
+<p>Slurm 用户先点击“检查连接”，再到“高级设置”中的“分区 /
+队列”下拉框选择分区。LSF
+用户在同一位置填写队列名称。节点数量和每节点核数决定申请的计算资源，调度器据此分配计算节点。需要指定具体节点时，可在“调度指令（每行一条）”中填写
+Slurm 的 <code>--nodelist=节点名</code> 或 LSF 的
+<code>-m &quot;节点名&quot;</code>，提交时由调度器核验节点和权限。</p>
 <blockquote>
 <p>关键规则：</p>
 <ol type="1">
@@ -1633,7 +1647,7 @@ ID、原始键、默认值、作用域、可见性、源码位置）。</li>
 </tr>
 </tbody>
 </table>
-<p><em>手册生成日期：2026-11-11；软件版本 0.3.0-beta.9。</em></p>
+<p><em>手册生成日期：2026-11-13；软件版本 0.3.0-beta.10。</em></p>
 <div class="appendix-a">
 
 <p><a id="appendix-a"></a></p>

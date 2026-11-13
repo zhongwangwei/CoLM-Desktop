@@ -123,10 +123,32 @@ pub fn model_overlay(overlay: &Overlay) -> Overlay {
     let is_case_control = |key: &str| {
         colm_schema::find(key).is_some_and(|f| f.group.is_some()) && !is_model_field(key)
     };
-    overlay.physics.retain(|key, _| !is_case_control(key));
-    overlay.parameters.retain(|record| {
-        record.scope_instance.kind != "case-scalar" || !is_case_control(&record.raw_key)
+    // 历史 revision 里这些记录还当模型控制存着；现在字段归算例。**不要直接丢**：
+    // 迁到 `legacy_case_overrides`，物料化与配置面板在模型设置之后应用，同一冻结版本
+    // 的运行参数保持不变（issue: 旧模型含水层混合水量 2500 mm 被静默改回算例的 1000）。
+    let mut legacy = std::mem::take(&mut overlay.legacy_case_overrides);
+    overlay.physics.retain(|key, value| {
+        if legacy_model_case_control(key) {
+            legacy.entry(key.clone()).or_insert_with(|| value.clone());
+            false
+        } else {
+            !is_case_control(key)
+        }
     });
+    overlay.parameters.retain(|record| {
+        if record.scope_instance.kind != "case-scalar" {
+            return true;
+        }
+        if legacy_model_case_control(&record.raw_key) {
+            legacy
+                .entry(record.raw_key.clone())
+                .or_insert_with(|| record.value.clone());
+            false
+        } else {
+            !is_case_control(&record.raw_key)
+        }
+    });
+    overlay.legacy_case_overrides = legacy;
     overlay
 }
 
@@ -172,10 +194,30 @@ pub fn is_model_field(key: &str) -> bool {
     {
         return true;
     }
+    // 含水层混合水量是这次模拟的输入水量（mm），不是模型物理系数：历史设计里由用户
+    // 在算例里填写（预填 1000 mm 测试值），运行前的同位素校验也从算例文档读它。
+    // 若按下面 `DEF_MT_*` Real 的规则归到模型，GUI 的材料对话框既不能写、后端又要求
+    // >0，首次启用同位素就成死锁（实测 2026-11-12）。
+    if key.eq_ignore_ascii_case("DEF_MT_AQUIFER_MIXING_WATER_MM") {
+        return false;
+    }
     colm_schema::find(key).is_some_and(|field| {
         field.group.is_some()
             && ((field.name.starts_with("DEF_ISO_") || field.name.starts_with("DEF_MT_"))
                 && matches!(field.kind, colm_schema::FieldKind::Real)
+                || field.name == "DEF_GridRiverLake_FloodInfiltMax")
+    })
+}
+
+/// 旧版 `is_model_field` 会认、现在归算例的字段：`DEF_ISO_*`/`DEF_MT_*` 的 Real 系数
+/// （含水层混合水量）与 `DEF_GridRiverLake_FloodInfiltMax`。历史 revision 里这些记录要
+/// 迁移；其他算例控制记录（方案开关、材料参数文件引用）从来没有模型所有权，仍按原策略丢弃。
+pub(crate) fn legacy_model_case_control(key: &str) -> bool {
+    colm_schema::find(key).is_some_and(|field| {
+        field.group.is_some()
+            && !is_model_field(key)
+            && (((field.name.starts_with("DEF_ISO_") || field.name.starts_with("DEF_MT_"))
+                && matches!(field.kind, colm_schema::FieldKind::Real))
                 || field.name == "DEF_GridRiverLake_FloodInfiltMax")
     })
 }
@@ -225,6 +267,21 @@ pub(crate) fn schema_value(key: &str, text: &str) -> Result<Value> {
         is_model_field(key),
         "field is not a writable model control: {key}"
     );
+    checked_case_value(key, field, text)
+}
+
+/// 历史 revision 里被误存成模型字段的算例控制值：只允许写算例文档的字段，
+/// 类型/取值检查与模型字段相同（但不要求 `is_model_field`）。
+pub(crate) fn legacy_case_value(key: &str, text: &str) -> Result<Value> {
+    let field = colm_schema::find(key).context("unknown legacy case field")?;
+    ensure!(
+        legacy_model_case_control(key),
+        "legacy override is not a historically model-owned case field: {key}"
+    );
+    checked_case_value(key, field, text)
+}
+
+fn checked_case_value(key: &str, field: &colm_schema::Field, text: &str) -> Result<Value> {
     let value = literal(text)?;
     let values = match &value {
         Value::List(values) => {
@@ -417,6 +474,23 @@ pub fn validate_overlay(overlay: &Overlay) -> Result<()> {
             "duplicate physics field"
         );
         schema_value(key, value)?;
+    }
+    for (key, text) in &overlay.legacy_case_overrides {
+        ensure!(
+            !overlay
+                .physics
+                .keys()
+                .any(|field| field.eq_ignore_ascii_case(key)),
+            "legacy case override duplicated in physics"
+        );
+        ensure!(
+            !overlay
+                .parameters
+                .iter()
+                .any(|record| record.raw_key.eq_ignore_ascii_case(key)),
+            "legacy case override duplicated in parameters"
+        );
+        legacy_case_value(key, text)?;
     }
     let mut assets = BTreeSet::new();
     for asset in overlay

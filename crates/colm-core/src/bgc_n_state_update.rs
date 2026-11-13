@@ -535,6 +535,16 @@ pub fn n_state_update3(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, s
         }
     } else {
         for j in 0..d.nl_soil {
+            // 可选的 NH4 淋溶损失先扣，再重算总矿质氮（`MOD_BGC_CNNStateUpdate3.F90:110-116`）。
+            // 开关关闭时不扣，与上游逐位一致。
+            if sw.nh4_leaching {
+                // `max(smin_nh4_vr - smin_nh4_leached_vr*deltim, 0)`：上游 GIMPLE 把
+                // `a - b*dt` 收缩成一条 `fmsub`（与相邻 NO3 行同形），照 arm64 gfortran
+                // 的 `-ffp-contract=fast` 用 `Contract::contract` 表达；x86-64 上不收缩。
+                s.patch.smin_nh4_vr[j] = (-s.patch_flux.smin_nh4_leached_vr[j])
+                    .contract(p.deltim, s.patch.smin_nh4_vr[j])
+                    .max(0.0);
+            }
             s.patch.smin_no3_vr[j] = ((-(s.patch_flux.smin_no3_leached_vr[j]
                 + s.patch_flux.smin_no3_runoff_vr[j]))
                 .contract(p.deltim, s.patch.smin_no3_vr[j]))
@@ -752,3 +762,7 @@ pub fn n_state_update3(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, s
         }
     }
 }
+
+#[cfg(test)]
+#[path = "bgc_n_state_update_tests.rs"]
+mod bgc_n_state_update_tests;

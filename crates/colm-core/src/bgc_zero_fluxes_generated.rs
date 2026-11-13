@@ -329,12 +329,14 @@ pub fn cn_zero_fluxes(s: &mut BgcState, ctx: ZeroFluxSwitches) {
         for j in 0..d.nl_soil {
             s.patch_flux.sminn_to_denit_excess_vr[j] = 0.0;
             s.patch_flux.sminn_leached_vr[j] = 0.0;
+            s.patch_flux.smin_nh4_leached_vr[j] = 0.0;
             s.patch_flux.sminn_to_plant_fun_vr[j] = 0.0;
         }
     } else {
         for j in 0..d.nl_soil {
             s.patch_flux.f_nit_vr[j] = 0.0;
             s.patch_flux.f_denit_vr[j] = 0.0;
+            s.patch_flux.smin_nh4_leached_vr[j] = 0.0;
             s.patch_flux.smin_no3_leached_vr[j] = 0.0;
             s.patch_flux.smin_no3_runoff_vr[j] = 0.0;
             s.patch_flux.n2_n2o_ratio_denit_vr[j] = 0.0;
@@ -369,6 +371,7 @@ pub fn cn_zero_fluxes(s: &mut BgcState, ctx: ZeroFluxSwitches) {
     s.patch_flux.denit[0] = 0.0;
     s.patch_flux.f_n2o_nit[0] = 0.0;
     s.patch_flux.smin_no3_leached[0] = 0.0;
+    s.patch_flux.smin_nh4_leached[0] = 0.0;
     s.patch_flux.smin_no3_runoff[0] = 0.0;
     s.patch_flux.sminn_leached[0] = 0.0;
     s.patch_flux.som_n_leached[0] = 0.0;

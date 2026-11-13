@@ -185,6 +185,9 @@ pub fn land_physics_parameters(
             topmod_method: i32::try_from(integer(document, "DEF_TOPMOD_method")?)?,
             variably_saturated: logical(document, "DEF_USE_VariablySaturatedFlow")?
                 || !logical(document, "DEF_USE_Campbell_SOIL_MODEL")?,
+            // 材料 namelist 的 `DEF_NH4_LEACHING` 模式 → BGC 读的逻辑开关；非 NH4 算例
+            // 保持关闭，BGC 结果与上游逐位一致。
+            nh4_leaching: crate::material::resolve_nh4_leaching(document)?,
         };
         Some(switches)
     } else {

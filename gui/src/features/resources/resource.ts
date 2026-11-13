@@ -129,8 +129,8 @@ export const SERVER_PRESETS: ServerPreset[] = [
   },
   {
     id: 'land',
-    zh: 'land 集群 land02（Slurm）',
-    en: 'land cluster, land02 (Slurm)',
+    zh: 'land 集群（Slurm）',
+    en: 'land cluster (Slurm)',
     fields: {
       scheduler: 'slurm',
       partition: 'first',
@@ -210,6 +210,16 @@ export function applyServerCase(server: Server, saved: Server): Server {
 
 const PRESET_DATA_KEYS = ['project_dir', 'rawdata_dir', 'runtime_dir', 'forcing_dir'] as const;
 
+/** Only explicit preset choices or successful probes may suggest defaults; never replace user paths. */
+export function prefillServerPaths(server: Server, preset?: ServerPreset | null): Server {
+  const next = { ...server };
+  for (const key of PRESET_DATA_KEYS) {
+    if (!next[key]?.trim() && preset?.fields[key]) next[key] = preset.fields[key];
+  }
+  if (!next.project_dir?.trim() && server.root.trim()) next.project_dir = server.root;
+  return next;
+}
+
 /**
  * A server with a preset applied: scheduling settings follow the preset; data folders are only
  * filled where still empty; address, account, authentication and work root are never touched.
@@ -217,10 +227,10 @@ const PRESET_DATA_KEYS = ['project_dir', 'rawdata_dir', 'runtime_dir', 'forcing_
 export function applyServerPreset(server: Server, preset: ServerPreset): Server {
   const next: Server = { ...server };
   for (const [key, value] of Object.entries(preset.fields) as [keyof Server, unknown][]) {
-    if ((PRESET_DATA_KEYS as readonly string[]).includes(key) && next[key]) continue;
+    if ((PRESET_DATA_KEYS as readonly string[]).includes(key)) continue;
     (next as Record<string, unknown>)[key] = value;
   }
-  return next;
+  return prefillServerPaths(next, preset);
 }
 
 export function replaceServer(servers: Server[], original: string | null, next: Server) {

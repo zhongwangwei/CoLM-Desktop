@@ -330,8 +330,8 @@ pub(crate) fn validate_connection(server: &Server) -> Result<(), String> {
         return Err(format!("服务器名不合法：{host:?}"));
     }
     validate_login(&server.username)?;
-    if !["config", "key", "password"].contains(&server.auth.as_str()) {
-        return Err("认证方式只能是 SSH 配置、密钥或密码".into());
+    if !["config", "key", "password", "key-password"].contains(&server.auth.as_str()) {
+        return Err("认证方式只能是 SSH 配置、密钥、密码或密钥加密码".into());
     }
     if !server.identity_file.is_empty()
         && (!std::path::Path::new(&server.identity_file).is_absolute()
@@ -457,7 +457,7 @@ pub fn remote_save_config(app: tauri::AppHandle, config: RemoteConfig) -> Result
         .map_err(|_| "密码会话不可用")?
         .retain(|(host, username, port), _| {
             config.servers.iter().any(|s| {
-                s.auth == "password"
+                matches!(s.auth.as_str(), "password" | "key-password")
                     && &s.host == host
                     && &s.username == username
                     && &s.port == port
@@ -744,21 +744,33 @@ pub(crate) fn resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 }
 
 fn auth_payload(server: &Server) -> Result<Value, String> {
-    let password = if server.auth == "password" {
-        Some(
-            passwords()
-                .lock()
-                .map_err(|_| "密码会话不可用")?
-                .get(&(server.host.clone(), server.username.clone(), server.port))
-                .cloned()
-                .ok_or_else(|| format!("请在服务器设置中为 {} 的登录账号 {}（端口 {}）重新输入密码；密码只保留到应用关闭", server.host, if server.username.is_empty() { "SSH 配置中的账号" } else { &server.username }, if server.port == 0 { "SSH 配置或 22".to_owned() } else { server.port.to_string() }))?,
-        )
+    let password = if matches!(server.auth.as_str(), "password" | "key-password") {
+        let password = passwords()
+            .lock()
+            .map_err(|_| "密码会话不可用")?
+            .get(&(server.host.clone(), server.username.clone(), server.port))
+            .cloned();
+        if password.is_none() && !crate::ssh_credentials::available() {
+            return Err(format!(
+                "请在服务器设置中为 {} 的登录账号 {}（端口 {}）重新输入密码；密码只保留到应用关闭",
+                server.host,
+                if server.username.is_empty() {
+                    "SSH 配置中的账号"
+                } else {
+                    &server.username
+                },
+                if server.port == 0 {
+                    "SSH 配置或 22".to_owned()
+                } else {
+                    server.port.to_string()
+                }
+            ));
+        }
+        password
     } else {
         None
     };
-    // 旧配置可能保留了切到 config/password 前选过的密钥路径；CLI 的 Auth::validate
-    // 只在 key 模式接受 identity_file，这里必须按当前认证方式重新决定是否发送。
-    let identity_file = if server.auth == "key" {
+    let identity_file = if matches!(server.auth.as_str(), "key" | "key-password") {
         server.identity_file.as_str()
     } else {
         ""
@@ -1098,9 +1110,25 @@ async fn ssh_cli_json_untracked(
         .as_ref()
         .and_then(|p| p["password"].as_str())
         .map(str::to_owned);
+    let host = server
+        .map(|server| server.host.clone())
+        .or_else(|| {
+            args.iter()
+                .position(|arg| arg == "--host")
+                .and_then(|at| args.get(at + 1).cloned())
+        })
+        .or_else(|| {
+            let (record, _, _) = run_record(args.get(1)?).ok()??;
+            record["host"].as_str().map(str::to_owned)
+        })
+        .unwrap_or_else(|| "SSH".into());
+    let session = crate::ssh_credentials::Session::begin(host)?;
     let payload = payload.map(|p| p.to_string());
     let mut command = std::process::Command::new(crate::sidecar::resolve_cli());
     command.args(&args).env("COLM_AUDIT_BY_PARENT", "1");
+    if let Some(session) = &session {
+        session.attach(&mut command);
+    }
     // The server's environment preparation (module load, PATH) applies to every command run there.
     if let Some(server) = server.filter(|server| !server.env_script.trim().is_empty()) {
         command.env("COLM_REMOTE_ENV_SCRIPT", &server.env_script);
@@ -1130,6 +1158,13 @@ async fn ssh_cli_json_untracked(
             .spawn()
             .map_err(|e| format!("无法启动 colm-cli：{e}"))?;
         let remote_child = crate::sidecar::register_child(child.id(), owner);
+        let session = session;
+        if let Some(session) = &session {
+            session.bind(&remote_child);
+        }
+        if remote_child.stopped() {
+            crate::ssh_credentials::cancel_pid(child.id());
+        }
         if let Some(payload) = payload {
             let result = child.stdin.take().ok_or("no stdin").and_then(|mut stdin| {
                 writeln!(stdin, "{payload}").map_err(|_| "无法传递 SSH 登录信息")
@@ -1152,6 +1187,9 @@ async fn ssh_cli_json_untracked(
             let mut error = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
             if let Some(password) = &password {
                 error = error.replace(password, "[redacted]");
+            }
+            if let Some(session) = &session {
+                error = session.redact(&error);
             }
             return Err(error);
         }

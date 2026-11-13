@@ -24,9 +24,12 @@ pub(crate) fn query(
         selection,
         case_values,
         None,
+        None,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn query_for_engine(
     root: &Path,
     source: ConfigurationSource,
@@ -35,6 +38,8 @@ pub(crate) fn query_for_engine(
     selection: Option<PftSelection>,
     case_values: Option<BTreeMap<String, String>>,
     engine: Option<&str>,
+    case_edited_fields: Option<Vec<String>>,
+    case_removed_fields: Option<Vec<String>>,
 ) -> Result<Value, String> {
     // Registry::open creates these directories; a read query requires an existing registry.
     if !root.join("versions").is_dir() || !root.join("drafts").is_dir() {
@@ -56,7 +61,29 @@ pub(crate) fn query_for_engine(
     }
     // 旧算例打开配置面板前先迁移材料字段，界面直接显示新 family 字段。
     crate::config::migrate_legacy_material(&mut doc);
-    for (key, raw) in case_values.unwrap_or_default() {
+    let case_values = case_values.unwrap_or_default();
+    let mut edited_fields = case_edited_fields.unwrap_or_default();
+    let removed_fields = case_removed_fields.unwrap_or_default();
+    super::validate_case_removals(&[], &removed_fields)?;
+    for key in &removed_fields {
+        if edited_fields
+            .iter()
+            .any(|field| field.eq_ignore_ascii_case(key))
+        {
+            return Err(format!("{key} cannot be set and removed together"));
+        }
+    }
+    for key in &edited_fields {
+        if !case_values
+            .keys()
+            .any(|field| field.eq_ignore_ascii_case(key))
+        {
+            return Err(format!(
+                "caseEditedFields requires a caseValues entry: {key}"
+            ));
+        }
+    }
+    for (key, raw) in case_values {
         let field = colm_schema::find(&key).ok_or_else(|| format!("unknown case field: {key}"))?;
         // DEF_USE_CROP 是 CROP 宏的派生投影；Rust 合并后它作为运行时标记允许从
         // 新建向导/已有算例回读，不能因为 group=None 被当成模型字段拒绝。
@@ -67,7 +94,25 @@ pub(crate) fn query_for_engine(
             ));
         }
         let value = super::typed(&key, &raw)?;
+        let original = doc
+            .get(field.name)
+            .map(|value| super::typed(field.name, &value.to_string()))
+            .transpose()?;
+        let unchanged = original.as_ref().is_some_and(|original| {
+            original == &value
+                || matches!((original.as_f64(), value.as_f64()), (Some(a), Some(b)) if a == b)
+        });
+        if !unchanged {
+            edited_fields.push(field.name.to_owned());
+        }
         put(&mut doc, field.name, &value.to_string())?;
+    }
+    for key in &removed_fields {
+        if super::is_removable_placeholder(key) {
+            put(&mut doc, key, "''")?;
+        } else {
+            doc.remove(key).map_err(|e| e.to_string())?;
+        }
     }
     // 四个 family 的参数文件字段各自把算例选的路径解析成冻结资产。
     // 只写回溶质列表会漏掉同位素/甲烷/泥沙三条（上游 7d2fca93 拆表后的新字段）。
@@ -91,6 +136,14 @@ pub(crate) fn query_for_engine(
             put(&mut doc, &record.raw_key, &record.value)?;
         }
     }
+    let applied_legacy = colm_model::apply_legacy_case_overrides(
+        &mut doc,
+        &overlay,
+        case.as_deref(),
+        &edited_fields,
+        &removed_fields,
+    )
+    .map_err(|e| e.to_string())?;
     let kernel = kernel_dir
         .filter(|p| !p.trim().is_empty())
         .map(|p| colm_kernel::Kernel::open_manifest(Path::new(p)).map_err(|e| e.to_string()))
@@ -192,6 +245,7 @@ pub(crate) fn query_for_engine(
         .collect();
     Ok(
         json!({"identity":identity,"fields":fields,"process_files":files,"pft_parameters":pft,"crop_defaults":crop_defaults,"history_switches":history_switches,"history_variables":history_variables,
+        "legacy_case_overrides":applied_legacy,
         "context_complete":false,"warnings":["当前目录用于发现配置；未读取所选冻结源码的默认值，最终适用性仍需运行前检查。"]}),
     )
 }
@@ -745,6 +799,231 @@ mod tests {
             .iter()
             .find(|f| f["name"] == name)
             .unwrap()
+    }
+
+    /// 历史 revision 把当时的模型字段（现在归算例）存在 overlay 里。配置面板与运行物料化
+    /// 同规则：未编辑的旧算例保留历史模型值，显式编辑优先。
+    #[test]
+    fn legacy_case_overrides_follow_the_case_owned_precedence() {
+        let (root, _, draft) = fixture();
+        let mut overlay = Overlay::default();
+        overlay
+            .legacy_case_overrides
+            .insert("DEF_MT_AQUIFER_MIXING_WATER_MM".into(), "2500.".into());
+
+        let explicit = root.join("case-explicit");
+        std::fs::create_dir(&explicit).unwrap();
+        std::fs::write(
+            explicit.join("case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'legacy'\n/\n\
+             &nl_colm_material\n DEF_MT_AQUIFER_MIXING_WATER_MM = 1000.0\n/\n",
+        )
+        .unwrap();
+        let result = query(
+            &root,
+            source(&draft, overlay.clone()),
+            explicit.to_str(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            field(&result, "DEF_MT_AQUIFER_MIXING_WATER_MM")["override_value"],
+            "2500."
+        );
+        for (value, expected) in [("1000.0", "2500."), ("1000", "2500."), ("3000", "3000")] {
+            let result = query(
+                &root,
+                source(&draft, overlay.clone()),
+                explicit.to_str(),
+                None,
+                None,
+                Some(BTreeMap::from([(
+                    "DEF_MT_AQUIFER_MIXING_WATER_MM".into(),
+                    value.into(),
+                )])),
+            )
+            .unwrap();
+            assert_eq!(
+                field(&result, "DEF_MT_AQUIFER_MIXING_WATER_MM")["override_value"],
+                expected
+            );
+        }
+
+        let key = "DEF_MT_AQUIFER_MIXING_WATER_MM";
+        let marked = query_for_engine(
+            &root,
+            source(&draft, overlay.clone()),
+            explicit.to_str(),
+            None,
+            None,
+            Some(BTreeMap::from([(key.into(), "1000".into())])),
+            None,
+            Some(vec![key.into()]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(field(&marked, key)["override_value"], "1000");
+        assert_eq!(marked["legacy_case_overrides"], json!({}));
+        let error = query_for_engine(
+            &root,
+            source(&draft, overlay.clone()),
+            explicit.to_str(),
+            None,
+            None,
+            None,
+            None,
+            Some(vec![key.into()]),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("caseValues entry"), "{error}");
+
+        let removed = query_for_engine(
+            &root,
+            source(&draft, overlay.clone()),
+            explicit.to_str(),
+            None,
+            None,
+            Some(BTreeMap::from([(key.into(), "1000".into())])),
+            None,
+            None,
+            Some(vec![key.into()]),
+        )
+        .unwrap();
+        assert!(field(&removed, key)["override_value"].is_null());
+        assert_eq!(removed["legacy_case_overrides"], json!({}));
+        let conflict = query_for_engine(
+            &root,
+            source(&draft, overlay.clone()),
+            explicit.to_str(),
+            None,
+            None,
+            Some(BTreeMap::from([(key.into(), "1000".into())])),
+            None,
+            Some(vec![key.into()]),
+            Some(vec![key.into()]),
+        )
+        .unwrap_err();
+        assert!(
+            conflict.contains("cannot be set and removed together"),
+            "{conflict}"
+        );
+
+        let absent = root.join("case-absent");
+        std::fs::create_dir(&absent).unwrap();
+        std::fs::write(
+            absent.join("case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'legacy-absent'\n/\n",
+        )
+        .unwrap();
+        let result = query(
+            &root,
+            source(&draft, overlay),
+            absent.to_str(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            field(&result, "DEF_MT_AQUIFER_MIXING_WATER_MM")["override_value"],
+            "2500."
+        );
+        assert_eq!(
+            result["legacy_case_overrides"]["DEF_MT_AQUIFER_MIXING_WATER_MM"],
+            "2500."
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_case_decisions_survive_gui_save_reopen_and_failed_save() {
+        let key = "DEF_MT_AQUIFER_MIXING_WATER_MM";
+        let (root, registry, mut draft) = fixture();
+        let case = root.join("case");
+        std::fs::create_dir(&case).unwrap();
+        std::fs::write(case.join("case.nml"),
+            "&nl_colm\n DEF_CASE_NAME='case'\n/\n&nl_colm_material\n DEF_MT_AQUIFER_MIXING_WATER_MM=1000.0\n/\n").unwrap();
+        draft
+            .overlay
+            .legacy_case_overrides
+            .insert(key.into(), "2500.".into());
+        let generation = draft.generation;
+        let draft = registry.save_draft(draft, generation).unwrap();
+        let frozen = registry.freeze(&draft.id, &case).unwrap();
+        registry
+            .migrate_case_to(&case, frozen.code.clone(), Some(frozen.version.clone()))
+            .unwrap();
+        let dirs = vec![case.to_string_lossy().into_owned()];
+        let metadata = case.join(colm_model::CASE_DATA_FILE);
+        let before = std::fs::read(&metadata).unwrap();
+        let namelist_before = std::fs::read(case.join("case.nml")).unwrap();
+        let mut permissions = std::fs::metadata(&metadata).unwrap().permissions();
+        let original_permissions = permissions.clone();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&metadata, permissions).unwrap();
+        let edit = || {
+            vec![FieldChange {
+                path: key.into(),
+                value: "3000".into(),
+            }]
+        };
+        assert!(set_fields_with_forcing(dirs.clone(), edit(), &[], None, None, None).is_err());
+        assert!(reset_field_batch(dirs.clone(), key.into(), None).is_err());
+        assert_eq!(std::fs::read(&metadata).unwrap(), before);
+        assert_eq!(
+            std::fs::read(case.join("case.nml")).unwrap(),
+            namelist_before
+        );
+        std::fs::set_permissions(&metadata, original_permissions).unwrap();
+        for (step, removed) in [false, true, false].into_iter().enumerate() {
+            if removed {
+                reset_field_batch(dirs.clone(), key.into(), None).unwrap();
+            } else {
+                set_fields_with_forcing(dirs.clone(), edit(), &[], None, None, None).unwrap();
+            }
+            let reopened =
+                colm_namelist::parse(&std::fs::read_to_string(case.join("case.nml")).unwrap())
+                    .unwrap();
+            let loaded = reopened
+                .get(key)
+                .map(|value| BTreeMap::from([(key.into(), value.to_string())]));
+            let preview = query(
+                &root,
+                ConfigurationSource::Frozen {
+                    version: frozen.version.clone(),
+                },
+                case.to_str(),
+                None,
+                None,
+                loaded,
+            )
+            .unwrap();
+            let run = registry
+                .materialize_run(
+                    &frozen.version,
+                    &case,
+                    &root.join(format!("run-{step}")),
+                    "decision",
+                )
+                .unwrap();
+            let effective = colm_namelist::parse(
+                &std::fs::read_to_string(run.run_case.join("case.nml")).unwrap(),
+            )
+            .unwrap();
+            if removed {
+                assert!(reopened.get(key).is_none());
+                assert!(effective.get(key).is_none());
+                assert!(field(&preview, key)["override_value"].is_null());
+            } else {
+                assert_eq!(effective.get(key).unwrap().as_f64(), Some(3000.));
+                assert_eq!(field(&preview, key)["override_value"], "3000");
+            }
+            assert_eq!(preview["legacy_case_overrides"], json!({}));
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

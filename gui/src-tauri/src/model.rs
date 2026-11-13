@@ -1615,6 +1615,7 @@ pub(crate) async fn bind_new_case(
     dir: &str,
     version: Option<VersionRef>,
     creation: &crate::sidecar::CaseCreation,
+    fields: &[crate::config::FieldChange],
 ) -> Result<(), String> {
     let Some(version) = version else {
         return Ok(());
@@ -1635,6 +1636,19 @@ pub(crate) async fn bind_new_case(
     let _: CaseBinding =
         serde_json::from_str(output.trim()).map_err(|e| format!("invalid case binding: {e}"))?;
     creation.check()?;
+    let edited_fields = fields
+        .iter()
+        .map(|field| field.path.clone())
+        .collect::<Vec<_>>();
+    if let Some(metadata) =
+        colm_model::case_data_with_field_edits(Path::new(dir), &edited_fields, &[])
+            .map_err(|e| e.to_string())?
+    {
+        crate::config::write_files_atomic(&[(
+            Path::new(dir).join(colm_model::CASE_DATA_FILE),
+            serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?,
+        )])?;
+    }
     colm_history::History::open_default()
         .and_then(|h| h.import_case(dir))
         .map_err(|e| format!("case binding succeeded, but importing its history failed: {e}"))?;
@@ -3194,6 +3208,20 @@ pub(crate) fn creation_fields(
                 value: record.value,
             }),
     );
+    // 旧版本把当时的模型字段（现在归算例）存进 overlay；新建算例时按历史值写入作为默认，
+    // 但向导里显式设置了同一字段时以用户输入为准（与运行物料化同一规则）。
+    let explicit: std::collections::BTreeSet<String> = fields
+        .iter()
+        .map(|field| field.path.to_ascii_uppercase())
+        .collect();
+    fields.extend(
+        frozen
+            .overlay
+            .legacy_case_overrides
+            .into_iter()
+            .filter(|(path, _)| !explicit.contains(&path.to_ascii_uppercase()))
+            .map(|(path, value)| crate::config::FieldChange { path, value }),
+    );
     for field in &mut fields {
         if let Some(known) = colm_schema::find(&field.path) {
             field.path = known.name.to_string();
@@ -3224,6 +3252,7 @@ pub struct PftSelection {
 
 /// A read-only view of unsaved configuration; never materializes or edits a case.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn model_configuration(
     source: ConfigurationSource,
     case_dir: Option<String>,
@@ -3231,6 +3260,8 @@ pub fn model_configuration(
     pft_selection: Option<PftSelection>,
     case_values: Option<std::collections::BTreeMap<String, String>>,
     engine: Option<String>,
+    case_edited_fields: Option<Vec<String>>,
+    case_removed_fields: Option<Vec<String>>,
 ) -> Result<Value, String> {
     crate::config::model_configuration::query_for_engine(
         &root()?,
@@ -3240,5 +3271,7 @@ pub fn model_configuration(
         pft_selection,
         case_values,
         engine.as_deref(),
+        case_edited_fields,
+        case_removed_fields,
     )
 }

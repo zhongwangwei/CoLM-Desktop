@@ -1,9 +1,11 @@
 //! Immutable model revisions, case migration and isolated run materialization.
 //! No engine, NetCDF, GUI, or remote-execution dependency is required.
+mod case_data;
 mod equivalence;
 mod materialize;
 mod registry;
 mod validation;
+pub use case_data::{apply_legacy_case_overrides, case_data_with_field_edits};
 pub use equivalence::{is_noop, minimize_physics, same_effect};
 pub use materialize::{
     case_land_cover_scheme, case_process_reference_fields, case_process_references,
@@ -78,6 +80,13 @@ pub struct Overlay {
     pub physics: BTreeMap<String, String>,
     pub hybrid: Option<HybridBundle>,
     pub process_files: Vec<ProcessFile>,
+    /// 历史 revision 把「当时算模型字段、现在归算例」的值存在 `physics`/case-scalar
+    /// 参数记录里（例如 `DEF_MT_AQUIFER_MIXING_WATER_MM`）。`model_overlay` 读时把它们
+    /// 迁到这里，物料化与配置面板按旧行为在模型设置之后应用——同一冻结版本的计算参数
+    /// 不因字段归属调整而改变。新版本没有这种记录，序列化时为空则省略字段，旧
+    /// `revision.json` 的 `overlay_sha256`/`fingerprint` 仍可按原字节验证。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub legacy_case_overrides: BTreeMap<String, String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -168,6 +177,15 @@ pub struct CaseData {
     pub fields: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub process_file_bindings: BTreeMap<String, String>,
+    /// 区分历史原值与用户后来接受的修改、删除，避免重开时恢复旧模型覆盖。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub case_field_edits: BTreeMap<String, CaseFieldEdit>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaseFieldEdit {
+    Set,
+    Removed,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
