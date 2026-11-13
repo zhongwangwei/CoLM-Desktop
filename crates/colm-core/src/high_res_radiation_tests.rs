@@ -87,15 +87,15 @@ fn leafless_high_resolution_cold_start_reduces_ground_absorption_once() {
 
     let state = high_resolution_pft_cold_start_state(None, &ground, &fractions).unwrap();
 
-    for band in 0..2 {
-        assert!((state.albedo[band][0] - 0.2).abs() < 1.0e-12);
-        assert!((state.albedo[band][1] - 0.3).abs() < 1.0e-12);
+    for band in &state.albedo {
+        assert!((band[0] - 0.2).abs() < 1.0e-12);
+        assert!((band[1] - 0.3).abs() < 1.0e-12);
     }
     assert_eq!(state.sunlit_absorption, [[0.0; 2]; 2]);
     assert_eq!(state.shaded_absorption, [[0.0; 2]; 2]);
-    for band in 0..2 {
-        assert!((state.soil_absorption[band][0] - 0.8).abs() < 1.0e-12);
-        assert!((state.soil_absorption[band][1] - 0.7).abs() < 1.0e-12);
+    for band in &state.soil_absorption {
+        assert!((band[0] - 0.8).abs() < 1.0e-12);
+        assert!((band[1] - 0.7).abs() < 1.0e-12);
     }
     assert_eq!(state.snow_absorption, [[0.0; 2]; 2]);
     assert_eq!(state.transmission, None);

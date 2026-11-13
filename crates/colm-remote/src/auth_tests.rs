@@ -463,7 +463,7 @@ fn gui_registered_password_is_target_bound_and_used_only_once() {
             let ssh = root.join("ssh");
             std::fs::write(
                 &ssh,
-                &format!(
+                format!(
                     "#!/bin/sh\nprintf 'user scientist\\nhostname target\\n{}'\n",
                     if mode == "direct" {
                         "".to_owned()
