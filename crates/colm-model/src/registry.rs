@@ -338,7 +338,11 @@ impl Registry {
             "model ID already exists"
         );
         let parent = self.get(&draft.parent)?;
-        let changes = draft.overlay;
+        // 实际入口（从已有模型派生新版本）会把旧 revision 的原始 overlay 当“改动”传进来，
+        // 里面可能还带着旧规则下属于模型字段、现在归算例的记录（如含水层混合水量）。
+        // 先按当前归属迁移/过滤，否则合并时会把它们当模型参数塞回 physics，触发
+        // “field is not a writable model control”。
+        let changes = model_overlay(&draft.overlay);
         check_expected_values(&changes, &parent.overlay)?;
         draft.overlay = model_overlay(&parent.overlay);
         for record in changes.parameters {
@@ -353,6 +357,10 @@ impl Registry {
             draft.overlay.parameters.push(record);
         }
         draft.overlay.physics.extend(changes.physics);
+        draft
+            .overlay
+            .legacy_case_overrides
+            .extend(changes.legacy_case_overrides);
         if changes.hybrid.is_some() {
             draft.overlay.hybrid = changes.hybrid;
         }

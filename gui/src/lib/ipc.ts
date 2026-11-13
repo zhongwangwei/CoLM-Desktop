@@ -120,6 +120,7 @@ export async function invokeJson<T = unknown>(
   return (typeof result === 'string' ? JSON.parse(result) : result) as T;
 }
 export type AppEvent =
+  | 'ssh-auth://changed'
   | 'run://started'
   | 'run://stage'
   | 'run://progress'

@@ -29,6 +29,7 @@ import { GuideBinding, usePageContract } from './lib/guide';
 import { Button, Notice } from './components/ui';
 import AboutDialog, { betaNote } from './components/AboutDialog';
 import ConfirmHost from './components/ConfirmHost';
+import SshCredentialDialog from './components/SshCredentialDialog';
 import StartCover from './components/StartCover';
 import { readStored, writeStored } from './lib/storage';
 import { useBenchTasks } from './lib/bench-task-context';
@@ -553,6 +554,7 @@ export default function App() {
       <GuideBinding />
       <AboutDialog fallbackVersion={appManifest.version} />
       <ConfirmHost />
+      <SshCredentialDialog />
       <AppShell
         layout={layout}
         language={state.language}

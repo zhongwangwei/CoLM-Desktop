@@ -155,15 +155,15 @@ pub fn build_crop_land_patches(
     }
 
     let mut first = Vec::new();
-    for patch in 0..land_patches.len() {
+    for (patch, &set_type) in land_patches.set_type.iter().enumerate() {
         ensure!(
             patches.wmo_source_for(patch).is_none(),
             "crop sharing needs the upstream land2mWMO topology"
         );
-        if land_patches.set_type[patch] != 1 {
+        if set_type != 1 {
             first.push(Child {
                 source: patch,
-                set_type: land_patches.set_type[patch],
+                set_type,
                 pctshared: 1.0,
                 crop_class: None,
             });

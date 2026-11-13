@@ -24,6 +24,7 @@ import {
   setMaterialRows,
   materialKeys,
   fieldLiteral,
+  legacyCaseOverrideEntries,
 } from './configuration-options';
 const empty = (): Overlay => ({ physics: {}, parameters: [], process_files: [] });
 const field = (name: string, kind = 'logical'): ModelField => ({
@@ -373,6 +374,19 @@ test('family prerequisites distinguish explicit conflicts from unresolved condit
   overlay.physics.DEF_USE_LULCC = '.true.';
   assert.equal(materialFamilyState(overlay, 'isotope', context).status, 'blocked');
   assert.equal(materialFamilyState(overlay, 'chloride', context).status, 'ready');
+  // NH4/NO3 的源项来自 BGC 氮淋溶，BGC 是前提；BGC 打开后两个引擎都已支持
+  // （Rust 的 book_bgc_nitrogen_leaching，2026-11-12）。
+  const rust = { ...context, engine: 'rust' as const };
+  for (const family of ['nh4', 'no3'] as const) {
+    assert.equal(materialFamilyState(overlay, family, rust).status, 'ready');
+    assert.equal(materialFamilyState(overlay, family, context).status, 'ready');
+  }
+  // 没有 BGC 时 NH4/NO3 只是惰性保守示踪，作为氮溶质没有意义：BGC 是前提。
+  overlay.physics.DEF_USE_BGC = '.false.';
+  assert.equal(materialFamilyState(overlay, 'nh4', rust).status, 'blocked');
+  assert.match(JSON.stringify(materialFamilyState(overlay, 'nh4', rust).reasons), /需要 BGC/);
+  assert.equal(materialFamilyState(overlay, 'nh4', context).status, 'blocked');
+  overlay.physics.DEF_USE_BGC = '.true.';
   overlay.physics.DEF_URBAN_RUN = '.true.';
   assert.equal(materialFamilyState(overlay, 'chloride', context).status, 'blocked');
 });
@@ -387,6 +401,49 @@ test('stomatal choice writes both flags atomically while retaining their scalar 
   assert.equal(next.physics.DEF_USE_MEDLYNST, '.false.');
   assert.equal(next.physics.DEF_USE_WUEST, '.false.');
   assert.throws(() => setStomatalScheme(overlay, fields, 'bogus'));
+});
+
+test('nitrogen solute presets carry their standard parameter files', () => {
+  const fields = materialKeys.map((k) =>
+    field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character'),
+  );
+  for (const [family, name, file] of [
+    ['nh4', 'NH4', 'standard_nh4_parameter.nml'],
+    ['no3', 'NO3', 'standard_no3_parameter.nml'],
+  ] as const) {
+    const rows = appendMaterialFamily([], family);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].NAMES, name);
+    assert.equal(rows[0].TYPES, 'solute');
+    assert.equal(rows[0].PARAM_FILES, file);
+    const overlay = setMaterialRows(empty(), fields, rows);
+    assert.equal(overlay.physics.DEF_SOLUTE_NAMES, `'${name}'`);
+    assert.equal(overlay.physics.DEF_SOLUTE_PARAM_FILES, `'${name}:${file}'`);
+  }
+});
+test('material setup requires BGC for nitrogen solutes on both engines', () => {
+  const overlay = empty();
+  overlay.physics = {
+    DEF_USE_ISOTOPE: '.true.',
+    DEF_USE_Campbell_SOIL_MODEL: '.false.',
+    DEF_URBAN_RUN: '.false.',
+    DEF_USE_BGC: '.true.',
+    DEF_SOLUTE_NAMES: "'NH4'",
+    DEF_SOLUTE_PARAM_FILES: "'NH4:standard_nh4_parameter.nml'",
+  };
+  const context = { subgrid: 'PFT', kernelMacros: [], caseScope: 'spatial' as const };
+  // BGC 已打开，两个引擎都支持这条耦合，没有待解决项。
+  assert.deepEqual(materialSetupIssues(overlay, { ...context, engine: 'rust' }), []);
+  assert.deepEqual(materialSetupIssues(overlay, { ...context, engine: 'fortran' }), []);
+  overlay.physics.DEF_USE_BGC = '.false.';
+  assert.match(
+    JSON.stringify(materialSetupIssues(overlay, { ...context, engine: 'rust' })),
+    /需要 BGC/,
+  );
+  assert.match(
+    JSON.stringify(materialSetupIssues(overlay, { ...context, engine: 'fortran' })),
+    /需要 BGC/,
+  );
 });
 
 test('appending a solute family keeps an existing matching row and writes family fields', () => {
@@ -904,6 +961,33 @@ test('applying methane selection enables BGC atomically without changing dry-run
   assert.deepEqual(saved, before);
 });
 
+test('isotope selection prefills positive aquifer mixing water without touching user values', () => {
+  // 首次启用同位素时含水层混合水量必须 >0，但该字段在 DEF_USE_ISOTOPE 保存前
+  // 被后端 hidden；不预填就是死锁（2026-11-12 实测）。预填 1000 mm 仅作测试值，
+  // 已填写过的正值必须保留。
+  const fields = [
+    ...materialKeys.map((k) => field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character')),
+    field('DEF_MT_AQUIFER_MIXING_WATER_MM', 'real'),
+  ];
+  const rows = appendMaterialFamily([], 'isotope');
+  const first = applyMaterialSelection(empty(), fields, rows);
+  assert.equal(first.physics.DEF_USE_ISOTOPE, '.true.');
+  assert.equal(first.physics.DEF_MT_AQUIFER_MIXING_WATER_MM, '1000');
+  const saved = empty();
+  saved.physics.DEF_MT_AQUIFER_MIXING_WATER_MM = '250';
+  assert.equal(
+    applyMaterialSelection(saved, fields, rows).physics.DEF_MT_AQUIFER_MIXING_WATER_MM,
+    '250',
+  );
+  // 没有这个字段时不要凭空写一个不可编辑的键（旧版本/测试骨架会这样）。
+  const without = applyMaterialSelection(
+    empty(),
+    materialKeys.map((k) => field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character')),
+    rows,
+  );
+  assert.equal(without.physics.DEF_MT_AQUIFER_MIXING_WATER_MM, undefined);
+});
+
 test('nonmethane selections retain the existing BGC choice', () => {
   const fields = materialKeys.map((k) =>
     field(k, k.startsWith('DEF_USE_') ? 'logical' : 'character'),
@@ -950,4 +1034,20 @@ test('methane selection rejects LULCC from overrides or defaults without changin
       ),
     );
   }
+});
+
+test('legacy model case overrides are surfaced in stable order for the migration notice', () => {
+  assert.deepEqual(legacyCaseOverrideEntries({}), []);
+  assert.deepEqual(
+    legacyCaseOverrideEntries({
+      legacy_case_overrides: {
+        DEF_MT_AQUIFER_MIXING_WATER_MM: '2500.',
+        DEF_GRIDBASED_ROUTING_MAX_DT: '1800.',
+      },
+    }),
+    [
+      ['DEF_GRIDBASED_ROUTING_MAX_DT', '1800.'],
+      ['DEF_MT_AQUIFER_MIXING_WATER_MM', '2500.'],
+    ],
+  );
 });

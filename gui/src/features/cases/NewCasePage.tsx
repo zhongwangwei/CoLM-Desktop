@@ -1509,17 +1509,33 @@ export default function NewCasePage() {
       setCaseValues(next);
     }
     if (site.crop || site.urban || methane)
-      setForm((previous) => ({
-        ...previous,
-        subgrid: methane
-          ? ['PFT', 'PC'].includes(previous.subgrid)
-            ? previous.subgrid
-            : 'PFT'
-          : site.crop
-            ? 'PFT'
-            : 'IGBP',
-        landcover: 'IGBP',
-      }));
+      setForm((previous) => {
+        // 内置示例把 examples/Runtime 填进 runtime，那里只有 BGC/CROP 用的
+        // ndep/nitrif；城市算例的显式 runtime 必须自带 urban/LUCY_rawdata.nc
+        // （CLI 会拒绝不完整目录），拿示例这份建 AU-Preston 必失败（2026-11-12
+        // 实测：默认 GUI 流程建不出城市示例）。城市站清回空让 CLI 铺算例内置的
+        // 城市表；切回甲烷/作物站时补回 BGC 需要的那份。用户手填的目录
+        // （不等于示例值）一律不动。
+        const bundled = ownData ? '' : (exampleValues.current.runtime ?? '');
+        const runtime =
+          site.urban && bundled && previous.runtime === bundled
+            ? ''
+            : (site.crop || methane) && !previous.runtime && bundled
+              ? bundled
+              : previous.runtime;
+        return {
+          ...previous,
+          runtime,
+          subgrid: methane
+            ? ['PFT', 'PC'].includes(previous.subgrid)
+              ? previous.subgrid
+              : 'PFT'
+            : site.crop
+              ? 'PFT'
+              : 'IGBP',
+          landcover: 'IGBP',
+        };
+      });
   }
   // 示例站点按数据用途配置作物、城市或甲烷过程；只修改当前算例草稿。
   // 普通站点只选站点，下垫面方案仍须在第四步明确选择。

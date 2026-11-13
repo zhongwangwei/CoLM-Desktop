@@ -59,6 +59,7 @@ fn main() -> Result<()> {
         topmod_method: 0,
         variably_saturated: flag("DEF_USE_VariablySaturatedFlow", true)
             || !flag("DEF_USE_Campbell_SOIL_MODEL", false),
+        nh4_leaching: colm_runtime::material::resolve_nh4_leaching(&document)?,
     };
     let only = args.get(3);
     let mut call = 0;

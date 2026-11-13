@@ -50,6 +50,7 @@ pub struct MaterialSnapshot {
     pub rnof: f64,
     pub rsur: f64,
     pub rsub: f64,
+    pub bgc_leach: f64,
     pub qinfl: f64,
     pub qcharge: f64,
     /// 1 ldew、2 雪/土液、3 雪/土冰、4 wa、5 wdsrf、6 wetwat、7 scv、8 waterstorage、
@@ -169,6 +170,7 @@ pub fn material_save_storage(
             rnof: acc.rnof,
             rsur: acc.rsur,
             rsub: acc.rsub,
+            bgc_leach: acc.bgc_leach,
             qinfl: acc.qinfl,
             qcharge: acc.qcharge,
             storage_comp: comp,
@@ -391,7 +393,12 @@ pub fn material_balance_check(
         }
         let step_output_check = step_output;
         let step_vapor_exchange = acc.vapor_exchange - snap.vapor_exchange;
-        let step_input_check = step_input + step_vapor_exchange;
+        // BGC 矿质氮淋溶在步内后段注入（`CoLMDRIVER` 的 `mt_land_after_bgc`）：它从 BGC 的
+        // 矿质氮库离开、进入材料径流，是外部输入；像水汽交换一样计入质量守恒，但不参与
+        // 固定签名（降水）核对。注入发生在本次检查之后，下一次的步首快照已经带上它，
+        // 与同批累加的 `a_mt_rnof` 输出相抵，收支保持精确（`MOD_MT_Conservation.F90:459-485`）。
+        let step_bgc_leach = acc.bgc_leach - snap.bgc_leach;
+        let step_input_check = step_input + step_vapor_exchange + step_bgc_leach;
 
         let reactive_source_sink = state.step[itrc].reactive_source_step;
         let numerical_source_sink = state.step[itrc].numerical_residual_step;

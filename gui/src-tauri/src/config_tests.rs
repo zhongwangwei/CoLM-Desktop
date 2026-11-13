@@ -901,7 +901,17 @@ fn existing_case_material_defaults_commit_only_after_candidate_validation() {
         if kind == "gas" {
             super::stage_methane_parameter(&dirs[0], None).unwrap();
         } else {
-            super::stage_solute_parameter(&dirs[0], (None, None)).unwrap();
+            super::stage_solute_parameter(
+                &dirs[0],
+                "standard_chloride_parameter.nml",
+                super::STANDARD_PARAM_TEMPLATES
+                    .iter()
+                    .find(|(name, _)| *name == "standard_chloride_parameter.nml")
+                    .unwrap()
+                    .1,
+                (None, None),
+            )
+            .unwrap();
         }
         let defaults = std::fs::read(source.join(filename)).unwrap();
         let registry = colm_model::Registry::open(work.join("registry")).unwrap();
@@ -1061,7 +1071,17 @@ fn material_staging_only_updates_explicit_process_parameters() {
     std::fs::write(&ch4, "&nl_colm_methane_parameter\n! custom methane settings\n DEF_METHANE%inundation_mode = 'wetwat'\n DEF_METHANE%use_spatial_ph = .true.\n/\n").unwrap();
     std::fs::write(&chloride, format!("&nl_colm_solute_parameter\n! custom chloride settings\n {SOLUTE_INIT_CONC} = 0.2\n {SOLUTE_PRECIP_CONC} = 0.3\n/\n")).unwrap();
     super::stage_methane_parameter(&dir, Some("routing")).unwrap();
-    super::stage_solute_parameter(&dir, (Some("0.4"), None)).unwrap();
+    super::stage_solute_parameter(
+        &dir,
+        "standard_chloride_parameter.nml",
+        super::STANDARD_PARAM_TEMPLATES
+            .iter()
+            .find(|(name, _)| *name == "standard_chloride_parameter.nml")
+            .unwrap()
+            .1,
+        (Some("0.4"), None),
+    )
+    .unwrap();
     let ch4_text = std::fs::read_to_string(ch4).unwrap();
     let doc = colm_namelist::parse(&ch4_text).unwrap();
     assert_eq!(doc.get(METHANE_MODE).unwrap().to_string(), "'routing'");
@@ -1072,6 +1092,41 @@ fn material_staging_only_updates_explicit_process_parameters() {
     assert_eq!(doc.get(SOLUTE_INIT_CONC).unwrap().to_string(), "0.4");
     assert_eq!(doc.get(SOLUTE_PRECIP_CONC).unwrap().to_string(), "0.3");
     assert!(chloride_text.contains("custom chloride settings"));
+}
+
+#[test]
+fn material_staging_generates_nh4_and_no3_solute_templates() {
+    // 上游 MaterialTransport 自带 NH4/NO3 溶质参数文件；向导选这两个 family 时
+    // 必须像 Cl 一样把模板落到算例目录（2026-11-12）。
+    let dir = batch("material-stage-nh4", &[SAMPLE]).remove(0);
+    let case = std::path::Path::new(&dir);
+    let fields = [FieldChange {
+        path: "DEF_SOLUTE_PARAM_FILES".into(),
+        value: "NH4:standard_nh4_parameter.nml,NO3:standard_no3_parameter.nml".into(),
+    }];
+    super::stage_material_parameters(&dir, &fields, None, (None, None)).unwrap();
+    for file in ["standard_nh4_parameter.nml", "standard_no3_parameter.nml"] {
+        let text = std::fs::read_to_string(case.join(file)).unwrap();
+        let doc = colm_namelist::parse(&text).unwrap();
+        assert_eq!(
+            doc.get("DEF_SOLUTE%unit_kind").unwrap().to_string(),
+            "'mass_fraction'"
+        );
+    }
+    // 单溶质时向导浓度字段写进该文件；多溶质时无法用一个标量同时表达，模板保持缺省。
+    let dir = batch("material-stage-nh4-conc", &[SAMPLE]).remove(0);
+    let case = std::path::Path::new(&dir);
+    let fields = [FieldChange {
+        path: "DEF_SOLUTE_PARAM_FILES".into(),
+        value: "NH4:standard_nh4_parameter.nml".into(),
+    }];
+    super::stage_material_parameters(&dir, &fields, None, (Some("0.05"), Some("0.1"))).unwrap();
+    let doc = colm_namelist::parse(
+        &std::fs::read_to_string(case.join("standard_nh4_parameter.nml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(doc.get(SOLUTE_INIT_CONC).unwrap().to_string(), "0.05");
+    assert_eq!(doc.get(SOLUTE_PRECIP_CONC).unwrap().to_string(), "0.1");
 }
 
 #[test]
@@ -5555,7 +5610,7 @@ fn forcing_reference_and_values_change_together_without_copying_stale_values() {
         &material_fields(&[("DEF_forcing_namelist", "'first.nml'")]),
     )
     .unwrap();
-    let before = forcing_input_snapshot(std::slice::from_ref(&dir), &[]).unwrap();
+    let before = case_save_input_snapshot(std::slice::from_ref(&dir), &[]).unwrap();
     apply_fields(
         &dir,
         &material_fields(&[
@@ -5575,12 +5630,12 @@ fn forcing_reference_and_values_change_together_without_copying_stale_values() {
         "21.0"
     );
     assert_ne!(
-        forcing_input_snapshot(std::slice::from_ref(&dir), &[]).unwrap(),
+        case_save_input_snapshot(std::slice::from_ref(&dir), &[]).unwrap(),
         before
     );
-    let before = forcing_input_snapshot(std::slice::from_ref(&dir), &[]).unwrap();
+    let before = case_save_input_snapshot(std::slice::from_ref(&dir), &[]).unwrap();
     std::fs::write(root.join("second.nml"), "&nl_colm_forcing\n/\n").unwrap();
-    assert_ne!(forcing_input_snapshot(&[dir], &[]).unwrap(), before);
+    assert_ne!(case_save_input_snapshot(&[dir], &[]).unwrap(), before);
 }
 
 #[cfg(unix)]
@@ -6112,4 +6167,19 @@ fn fortran_flood_feedback_keeps_its_supported_runoff_adjustment_path() {
         runtime_state(&rust, "DEF_GridRiverLake_FloodFeedback").mode,
         FieldMode::Editable
     ));
+}
+
+#[test]
+fn case_save_snapshot_tracks_metadata_creation_changes_and_removal() {
+    let dir = batch("case-metadata-snapshot", &[SAMPLE]).remove(0);
+    let dirs = vec![dir.clone()];
+    let path = std::path::Path::new(&dir).join(colm_model::CASE_DATA_FILE);
+    let absent = case_save_input_snapshot(&dirs, &[]).unwrap();
+    std::fs::write(&path, "{}").unwrap();
+    let present = case_save_input_snapshot(&dirs, &[]).unwrap();
+    assert_ne!(present, absent);
+    std::fs::write(&path, "{\"case_field_edits\":{}}").unwrap();
+    assert_ne!(case_save_input_snapshot(&dirs, &[]).unwrap(), present);
+    std::fs::remove_file(path).unwrap();
+    assert_eq!(case_save_input_snapshot(&dirs, &[]).unwrap(), absent);
 }

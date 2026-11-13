@@ -45,8 +45,7 @@ fn accumulate_routes_layers_aquifer_and_thin_snow() {
     wliq[soisno_slot(1)] = 10.0;
     // 第 2 层干：非挥发溶质计入 layer_dry，同位素仍计入层。
     wliq[soisno_slot(3)] = 4.0;
-    for itrc in 0..2 {
-        let pools = &mut state.pools[itrc];
+    for pools in &mut state.pools[..2] {
         pools.wliq_soisno[soisno_slot(0)] = 0.1;
         pools.wice_soisno[soisno_slot(0)] = 0.2;
         pools.wliq_soisno[soisno_slot(1)] = 0.5;
@@ -76,8 +75,7 @@ fn accumulate_routes_layers_aquifer_and_thin_snow() {
     assert_eq!(state.water_acc.wa_debt, 30.0);
     // 有雪层时 scv 不与薄雪材料配对。
     assert_eq!(state.water_acc.scv, 0.0);
-    for itrc in 0..2 {
-        let acc = &state.acc[itrc];
+    for acc in &state.acc[..2] {
         assert_eq!(acc.snow_mass[soisno_slot(0)], 0.1 + 0.2);
         assert_eq!(acc.soil_mass[0], 0.5);
         assert_eq!(acc.wa_debt_mass, 3.0);

@@ -8,8 +8,10 @@ MODULE MOD_MT_Methane
    USE MOD_Precision
    USE MOD_SPMD_Task, only: p_is_worker, p_is_master, CoLM_stop
 #ifdef USEMPI
-   USE MPI
-   USE MOD_SPMD_Task, only: p_comm_glb, p_err
+   ! 上游 c545a96c：MPI 常量统一从宿主 MOD_SPMD_Task 取，避免直接依赖编译器私有的 mpi.mod；
+   ! 桌面版沿用自己的 MPI 头/模块选择，这里保持与上游一致的写法，减少后续同步差异。
+   USE MOD_SPMD_Task, only: p_comm_glb, p_err, &
+      MPI_IN_PLACE, MPI_INTEGER, MPI_MAX, MPI_LOGICAL, MPI_LOR
 #endif
    USE MOD_MT_Defs, only: material_param_file_for_index, material_lower, &
       FAMILY_GAS, STATE_OWNER_PROVIDER, REACTION_PROVIDER

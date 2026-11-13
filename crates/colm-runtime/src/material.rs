@@ -5,6 +5,7 @@ use colm_numeric::Contract;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use colm_core::bgc_driver::BgcSwitches;
 use colm_core::material::{
     MaterialNamelist, MaterialParamFiles, MaterialParameterOverrides, MaterialPools, MaterialSet,
     PatchMaterialState, DESCRIPTOR_IDENTITY_WIDTH, SOISNO_LAYERS,
@@ -103,7 +104,126 @@ pub fn param_files_from_document(document: &Document) -> Result<MaterialParamFil
     })
 }
 
-/// `mt_any_enabled` 为真时注册材料（`material_defs_init`）；一个 family 都没开返回 `None`。
+/// `resolve_nh4_leaching`（`MOD_MT_Namelist.F90:365-410`）：把材料 namelist 的
+/// `DEF_NH4_LEACHING` 模式解析成 BGC 读的 `DEF_USE_NH4_LEACHING`。'auto' 只在
+/// `DEF_SOLUTE_NAMES` 里出现独立 `NH4` token 时打开（大小写不敏感，逗号分隔）。
+pub fn resolve_nh4_leaching(document: &Document) -> Result<bool> {
+    let mode = crate::physics::text(document, "DEF_NH4_LEACHING")?
+        .trim()
+        .to_ascii_lowercase();
+    match mode.as_str() {
+        "auto" => {
+            let names = crate::physics::text(document, "DEF_SOLUTE_NAMES")?;
+            Ok(names
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("nh4")))
+        }
+        "on" | "true" | "yes" => Ok(true),
+        "off" | "false" | "no" => Ok(false),
+        other => anyhow::bail!("DEF_NH4_LEACHING must be auto, on or off; got {other}"),
+    }
+}
+
+/// `mt_bgc_n_leaching` 的质量计算部分（纯函数，便于单测）：逐 solute 取 BGC 淋溶通量，
+/// 乘层厚与步长、gN→kg N（/1000），返回 `(材料序号, 地下质量, 地表质量)`。
+fn bgc_nitrogen_leaching_masses(
+    set: &MaterialSet,
+    bgc: &colm_core::bgc_state::BgcState,
+    switches: BgcSwitches,
+    dz_soi: &[f64],
+    deltim: f64,
+) -> Vec<(usize, f64, f64)> {
+    let mut out = Vec::new();
+    for (itrc, material) in set.materials.iter().enumerate() {
+        if !material.is_solute() {
+            continue;
+        }
+        let name = material.name.trim().to_ascii_lowercase();
+        if name != "nh4" && name != "no3" {
+            continue;
+        }
+        let mut sub_mass = 0.0_f64;
+        let mut runoff_mass = 0.0_f64;
+        // `sub_mass = sub_mass + flux*dz*deltim`：gfortran `-O2`（默认 `-ffp-contract=fast`）
+        // 在 arm64 上把 `(flux*dz)*deltim + acc` 收缩成 fmul+fmadd（x86-64 不收缩），
+        // 用 `Contract::contract` 表达同一舍入；否则材料浓度会差 1 ULP。
+        if switches.nitrif {
+            if name == "nh4" {
+                for (j, dz) in dz_soi.iter().enumerate() {
+                    sub_mass =
+                        (bgc.patch_flux.smin_nh4_leached_vr[j] * dz).contract(deltim, sub_mass);
+                }
+            } else {
+                for (j, dz) in dz_soi.iter().enumerate() {
+                    sub_mass =
+                        (bgc.patch_flux.smin_no3_leached_vr[j] * dz).contract(deltim, sub_mass);
+                    runoff_mass =
+                        (bgc.patch_flux.smin_no3_runoff_vr[j] * dz).contract(deltim, runoff_mass);
+                }
+            }
+        } else if name == "nh4" {
+            // 硝化关时矿质氮池就是 NH4，聚合淋溶通量记到 NH4（上游分支）。
+            for (j, dz) in dz_soi.iter().enumerate() {
+                sub_mass = (bgc.patch_flux.sminn_leached_vr[j] * dz).contract(deltim, sub_mass);
+            }
+        }
+        sub_mass /= 1000.0;
+        runoff_mass /= 1000.0;
+        out.push((itrc, sub_mass, runoff_mass));
+    }
+    out
+}
+
+/// 把淋溶质量记到材料累加器（`a_mt_rsub/rsur/rnof/bgc_leach` 与 `mt_rnof_step`），
+/// 累加顺序与 `MOD_MT_NitrogenLeaching.F90:99-109` 一致。
+fn apply_bgc_leaching_masses(
+    state: &mut colm_core::material::PatchMaterialState,
+    masses: &[(usize, f64, f64)],
+) {
+    for &(itrc, sub_mass, runoff_mass) in masses {
+        if sub_mass + runoff_mass <= 0.0 {
+            continue;
+        }
+        let acc = &mut state.acc[itrc];
+        acc.rsub += sub_mass;
+        acc.rsur += runoff_mass;
+        acc.rnof = acc.rnof + sub_mass + runoff_mass;
+        acc.bgc_leach = acc.bgc_leach + sub_mass + runoff_mass;
+        let step = &mut state.step[itrc];
+        step.rnof_step = step.rnof_step + sub_mass + runoff_mass;
+    }
+}
+
+/// `mt_bgc_n_leaching`（`MOD_MT_NitrogenLeaching.F90:49-115`）：把 BGC 这一步算出的
+/// 矿质氮淋溶质量记到材料的径流累加器与 `a_mt_bgc_leach`。
+///
+/// 调用点在 `bgc.step` 之后（`CoLMDRIVER.F90:238-240` 的 `bgc_driver` → `mt_land_after_bgc`）：
+/// 氮从 BGC 矿质氮库离开、随基流/地表径流进入材料输运，对材料是外部输入。只有 NH4/NO3
+/// 两种 solute 参与；通量单位 gN m-2 s-1，乘层厚与步长后除以 1000 得 kg N m-2。
+/// 非土壤 patch（`patchtype /= 0`）直接返回，和上游一致。
+pub fn book_bgc_nitrogen_leaching(
+    runtime: &MaterialRuntime,
+    state: &mut colm_core::StandardLctSnowSoilState,
+    switches: BgcSwitches,
+    patch_type: i32,
+    deltim: f64,
+) -> Result<()> {
+    if patch_type != 0 {
+        return Ok(());
+    }
+    let Some(bgc) = state.bgc.as_ref() else {
+        return Ok(());
+    };
+    let Some(track) = state.material.as_deref_mut() else {
+        return Ok(());
+    };
+    let grid = colm_core::colm_soil_grid(bgc.dims.nl_soil)?;
+    let masses =
+        bgc_nitrogen_leaching_masses(&runtime.set, bgc, switches, &grid.thickness_m, deltim);
+    apply_bgc_leaching_masses(&mut track.state, &masses);
+    Ok(())
+}
+
 pub fn material_set_from_document(document: &Document) -> Result<Option<MaterialSet>> {
     if !colm_namelist::material::any_enabled(document)? {
         return Ok(None);

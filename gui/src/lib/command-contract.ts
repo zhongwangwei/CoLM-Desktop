@@ -1474,6 +1474,14 @@ export const commandContract = {
     "engine": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "caseEditedFields": {
+      "required": false,
+      "rust_type": "Option<Vec<String>>"
+    },
+    "caseRemovedFields": {
+      "required": false,
+      "rust_type": "Option<Vec<String>>"
     }
   },
   "probe_observation_table": {
@@ -2929,6 +2937,17 @@ export const commandContract = {
     "quick": {
       "required": true,
       "rust_type": "bool"
+    }
+  },
+  "remote_auth_pending": {},
+  "remote_auth_respond": {
+    "requestId": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "value": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "workspace_create": {

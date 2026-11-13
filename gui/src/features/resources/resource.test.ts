@@ -11,6 +11,7 @@ import {
   partitionLabel,
   SERVER_PRESETS,
   applyServerPreset,
+  prefillServerPaths,
   applyServerCase,
   presetForServer,
   serverDisplayName,
@@ -460,4 +461,35 @@ test('a saved case brings non-sensitive settings but keeps local credentials', (
   // 案例里没有本机凭据：认证方式与私钥路径保留当前值。
   assert.equal(applied.auth, 'password');
   assert.equal(applied.identity_file, '/key');
+});
+
+test('default path suggestions preserve user paths and use only known shared paths or the chosen root', () => {
+  const land = SERVER_PRESETS.find((preset) => preset.id === 'land')!;
+  const server = {
+    ...newServer(),
+    host: 'arbitrary-alias',
+    root: '/my/work',
+    scheduler: 'pbs',
+    username: 'me',
+    auth: 'key-password',
+    identity_file: '/my/key',
+  };
+  const suggested = prefillServerPaths(server, land);
+  assert.deepEqual(
+    [suggested.project_dir, suggested.rawdata_dir, suggested.runtime_dir, suggested.forcing_dir],
+    ['/my/work', '/shr03/CoLMrawdata', '/shr03/CoLMruntime', '/shr03/CoLM_Forcing/JRA3Q'],
+  );
+  for (const key of ['host', 'root', 'scheduler', 'username', 'auth', 'identity_file'] as const)
+    assert.equal(suggested[key], server[key]);
+  const custom = {
+    ...server,
+    project_dir: '/custom/projects',
+    rawdata_dir: '/custom/raw',
+    runtime_dir: '/custom/runtime',
+    forcing_dir: '/custom/station.nc',
+  };
+  assert.deepEqual(prefillServerPaths(custom, land), custom);
+  assert.deepEqual(prefillServerPaths(server), { ...server, project_dir: '/my/work' });
+  assert.deepEqual(prefillServerPaths(newServer()), newServer());
+  assert.equal(applyServerPreset(server, land).project_dir, '/my/work');
 });

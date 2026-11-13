@@ -40,6 +40,10 @@ pub struct BgcSwitches {
     /// `DEF_USE_VariablySaturatedFlow`：只有 `WATER_VSF` 写 `frcsat`，`WATER_2014` 下它保持分配时的
     /// `spval`，`CNFireArea` 据此回退。
     pub variably_saturated: bool,
+    /// `DEF_USE_NH4_LEACHING`：由 `DEF_NH4_LEACHING` 模式与 `DEF_SOLUTE_NAMES` 里的 NH4 token
+    /// 解析出来的运行期开关（`MOD_MT_Namelist.F90:365-410`）。打开时 BGC 逐物种算 NH4 淋溶，
+    /// 并由材料输运把这份质量记成外部输入；关闭时该行清零，BGC 结果与上游逐位一致。
+    pub nh4_leaching: bool,
 }
 
 macro_rules! physics_fields {

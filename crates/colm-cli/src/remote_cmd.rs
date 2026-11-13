@@ -3189,10 +3189,6 @@ fn verify_submitted_output_identity(proof: &serde_json::Value, record: &Record) 
             submitted["record_input_fingerprints"] == false,
             "server disabled fingerprints without an explicit disabled submission policy"
         );
-        ensure!(
-            submitted["remote_model_run"].is_object() && remote["model_run"].is_object(),
-            "disabled fingerprint fetch requires a bound model identity"
-        );
     }
     // Legacy runs retain output integrity checks, but cannot certify scientific identity.
     if submitted["remote_model_run"].is_null() && remote["model_run"].is_null() {

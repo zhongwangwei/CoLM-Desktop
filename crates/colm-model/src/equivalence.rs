@@ -83,6 +83,26 @@ fn parse(physics: &BTreeMap<String, String>) -> BTreeMap<String, Value> {
         .collect()
 }
 
+/// 历史迁移值按「键存在 + 值相等」比较：显式 `-1` 与「没写」对算例所有权语义不同，
+/// 不能套用 `same_effect_physics` 的默认值等价规则（否则冻结去重会把显式覆盖丢掉）。
+fn same_legacy_case_overrides(a: &BTreeMap<String, String>, b: &BTreeMap<String, String>) -> bool {
+    let parse_map = |map: &BTreeMap<String, String>| -> BTreeMap<String, Value> {
+        map.iter()
+            .map(|(key, text)| {
+                (
+                    key.to_ascii_uppercase(),
+                    crate::validation::literal(text).unwrap_or_else(|_| Value::Str(text.clone())),
+                )
+            })
+            .collect()
+    };
+    let a = parse_map(a);
+    let b = parse_map(b);
+    a.len() == b.len()
+        && a.iter()
+            .all(|(key, value)| b.get(key).is_some_and(|other| same_value(value, other)))
+}
+
 fn keys_involved(a: &BTreeMap<String, Value>, b: &BTreeMap<String, Value>) -> BTreeSet<String> {
     let mut keys: BTreeSet<String> = a.keys().chain(b.keys()).cloned().collect();
     for (parent, child) in FORCED_OFF {
@@ -132,6 +152,7 @@ pub fn same_effect(a: &Overlay, b: &Overlay) -> bool {
         && a.process_files == b.process_files
         && a.hybrid == b.hybrid
         && same_effect_physics(&parse(&a.physics), &parse(&b.physics))
+        && same_legacy_case_overrides(&a.legacy_case_overrides, &b.legacy_case_overrides)
 }
 
 /// Whether a revision with this code, overlay and applicability already exists in effect.

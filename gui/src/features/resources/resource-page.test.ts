@@ -478,7 +478,7 @@ test('scheduler detection is visible beside advanced settings and applies one ca
       scheduler,
     );
     assert.deepEqual((contract.details as { schedulerDetection: unknown }).schedulerDetection, {
-      configuration: JSON.stringify({ ...page.servers[0], scheduler }),
+      configuration: JSON.stringify({ ...page.servers[0], scheduler, project_dir: '/data/colm' }),
       schedulers: [scheduler],
       unverifiedQsub: false,
     });
@@ -881,6 +881,7 @@ test('only visible configuration fields and selected maintenance actions enter t
 
 test('checks aggregate both readonly replies, edits revoke evidence, and native key selection edits only the draft', async () => {
   const page = harness();
+  page.servers[0].project_dir = '/data/colm';
   await page.ready();
   let contract = await page.action('resource-check');
   let check = (contract.details as { check: ReturnType<typeof resource.resourceCheckSummary> })
@@ -1029,11 +1030,11 @@ test('SSH aliases local and new remain server selections, and new servers expose
   assert.equal((contract.details as { selected: string }).selected, 'new');
   assert.ok(contract.fields.some((field) => field.id === 'resource-root'));
 });
-test('key and password modes explain agent and password-only constraints', async () => {
+test('key and password modes explain on-demand prompts and password-only constraints', async () => {
   const page = harness();
   await page.ready();
   page.fill('resource-auth', 'key');
-  assert.match(page.text(page.nodes()), /ssh-add/);
+  assert.match(page.text(page.nodes()), /弹窗询问/);
   page.fill('resource-auth', 'password');
   assert.match(page.text(page.nodes()), /一次性动态口令/);
 });
@@ -1423,4 +1424,165 @@ test('discarding a dirty server deleted elsewhere clears the stale editor', asyn
   await page.action('resource-discard');
   assert.ok(!page.contract().fields.some((field) => field.id === 'resource-name'));
   assert.equal(page.guard(), null);
+});
+
+test('mixed authentication keeps the key picker and preserves explicit identity between key modes', async () => {
+  const page = harness();
+  await page.ready();
+  page.fill('resource-auth', 'key');
+  page.fill('resource-identity', '/private/custom-key');
+  const contract = page.fill('resource-auth', 'key-password');
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-identity')?.value,
+    '/private/custom-key',
+  );
+  assert.ok(contract.actions.some((action) => action.id === 'resource-pick-identity'));
+  assert.ok(!contract.fields.some((field) => field.id === 'resource-password'));
+  assert.ok(!contract.actions.some((action) => action.id === 'resource-register-password'));
+  assert.match(page.text(page.nodes()), /登记密码/);
+  page.fill('resource-auth', 'key');
+  assert.equal(
+    page.contract().fields.find((field) => field.id === 'resource-identity')?.value,
+    '/private/custom-key',
+  );
+  page.fill('resource-auth', 'password');
+  assert.ok(!page.contract().fields.some((field) => field.id === 'resource-identity'));
+});
+
+test('server default path pickers use the complete unsaved connection and update only their field', async () => {
+  const page = harness();
+  await page.ready();
+  await page.action('resource-new');
+  for (const key of ['project_dir', 'rawdata_dir', 'runtime_dir', 'forcing_dir'])
+    assert.equal(
+      page.visible().find((action) => action.id === `resource-browse-${key}`)?.enabled,
+      false,
+    );
+  page.fill('resource-host', 'my-alias');
+  page.fill('resource-username', 'my-account');
+  page.fill('resource-auth', 'key-password');
+  page.fill('resource-identity', '/my/key');
+  page.fill('resource-root', '/work');
+  await page.action('resource-advanced-toggle');
+  page.fill('resource-port', '2202');
+  page.fill('resource-env_script', 'module load custom');
+  const paths: Record<string, string> = {};
+  for (const key of ['project_dir', 'rawdata_dir', 'runtime_dir', 'forcing_dir']) {
+    await page.action(`resource-browse-${key}`);
+    const browser = page.browser()!;
+    assert.equal(browser.server.host, 'my-alias');
+    assert.equal(browser.server.username, 'my-account');
+    assert.equal(browser.server.auth, 'key-password');
+    assert.equal(browser.server.identity_file, '/my/key');
+    assert.equal(browser.server.port, 2202);
+    assert.equal(browser.server.env_script, 'module load custom');
+    assert.equal(browser.directory, true);
+    assert.ok(page.guard());
+    browser.onSelect(`/chosen/${key}`);
+    paths[key] = `/chosen/${key}`;
+    const contract = page.render();
+    for (const [field, value] of Object.entries(paths))
+      assert.equal(contract.fields.find((item) => item.id === `resource-${field}`)?.value, value);
+    assert.equal(contract.fields.find((item) => item.id === 'resource-root')?.value, '/work');
+  }
+  await page.action('resource-browse-forcing-file');
+  assert.equal(page.browser()!.directory, false);
+  page.browser()!.onSelect('/forcing/station.nc');
+  page.render();
+  assert.equal(
+    page.contract().fields.find((item) => item.id === 'resource-forcing_dir')?.value,
+    '/forcing/station.nc',
+  );
+  assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
+});
+
+test('closing a default path browser leaves the draft intact and stale selections cannot overwrite edits', async () => {
+  const page = harness();
+  await page.ready();
+  page.fill('resource-rawdata_dir', '/original');
+  await page.action('resource-browse-rawdata_dir');
+  page.browser()!.onClose();
+  page.render();
+  assert.equal(
+    page.contract().fields.find((item) => item.id === 'resource-rawdata_dir')?.value,
+    '/original',
+  );
+  await page.action('resource-browse-rawdata_dir');
+  page.fill('resource-host', 'changed-host');
+  page.browser()!.onSelect('/stale-selection');
+  page.render();
+  assert.equal(
+    page.contract().fields.find((item) => item.id === 'resource-rawdata_dir')?.value,
+    '/original',
+  );
+  assert.equal(
+    page.contract().fields.find((item) => item.id === 'resource-host')?.value,
+    'changed-host',
+  );
+  assert.match(page.text(page.nodes()), /连接设置已改变/);
+});
+
+test('server path browser rejects a busy or locked operation before opening', () => {
+  let opened = false;
+  for (const [busy, locked] of [
+    [true, false],
+    [false, true],
+  ]) {
+    callback('browseServer', {
+      busy,
+      lock: { current: locked },
+      editor: { ...resource.newServer(), host: 'chosen' },
+      setRootBrowser: () => {
+        opened = true;
+      },
+    })('project_dir');
+  }
+  assert.equal(opened, false);
+});
+
+test('successful checks suggest shared cluster paths without overwriting settings or verifying new defaults', async () => {
+  const page = harness();
+  await page.ready();
+  page.partitions(['first', 'second', 'largemem'].map((name) => ({ name }) as resource.Partition));
+  page.fill('resource-host', 'user-chosen-alias');
+  page.fill('resource-rawdata_dir', '/my/surface');
+  page.fill('resource-auth', 'key-password');
+  page.fill('resource-identity', '/my/key');
+  await page.action('resource-advanced-toggle');
+  let contract = await page.action('resource-check');
+  const value = (id: string) =>
+    contract.fields.find((field) => field.id === `resource-${id}`)?.value;
+  assert.equal(value('project_dir'), '/data/colm');
+  assert.equal(value('rawdata_dir'), '/my/surface');
+  assert.equal(value('runtime_dir'), '/shr03/CoLMruntime');
+  assert.equal(value('forcing_dir'), '/shr03/CoLM_Forcing/JRA3Q');
+  assert.equal(value('host'), 'user-chosen-alias');
+  assert.equal(value('scheduler'), 'auto');
+  assert.equal(value('auth'), 'key-password');
+  assert.equal(value('identity'), '/my/key');
+  assert.equal(
+    (contract.details as { check: { ssh: { state: string } } }).check.ssh.state,
+    'pending',
+  );
+  assert.ok(contract.actions.some((action) => action.id === 'resource-save'));
+  contract = await page.action('resource-check');
+  assert.equal(
+    (contract.details as { check: { ssh: { state: string } } }).check.ssh.state,
+    'success',
+  );
+  assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
+});
+
+test('late connection checks cannot prefill changed drafts', async () => {
+  const page = harness();
+  await page.ready();
+  page.partitions(['first', 'second', 'largemem'].map((name) => ({ name }) as resource.Partition));
+  const release = page.pauseProbe();
+  const pending = page.action('resource-check');
+  page.render();
+  page.fill('resource-host', 'changed-while-checking');
+  release();
+  const contract = await pending;
+  for (const key of ['project_dir', 'rawdata_dir', 'runtime_dir', 'forcing_dir'])
+    assert.equal(contract.fields.find((field) => field.id === `resource-${key}`)?.value, '');
 });

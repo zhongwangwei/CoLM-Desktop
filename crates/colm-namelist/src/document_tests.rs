@@ -91,3 +91,46 @@ fn insertion_accepts_comments_on_group_delimiters() {
     d.insert("b", crate::Value::Int(2), "nl_colm").unwrap();
     assert_eq!(d.to_string(), src.replace("/ ! end", "   b = 2\n/ ! end"));
 }
+
+#[test]
+fn a_missing_group_can_be_appended_explicitly_before_inserting() {
+    // 上游把材料拆进 `&nl_colm_material`，而建例只写 `&nl_colm`；用户第一次在
+    // 已有算例上开材料时，插入路径必须先显式补一个空组（2026-11-12 实测：
+    // 不补会报 "this namelist has no group &nl_colm_material"）。
+    let src = "&nl_colm\n   DEF_CASE_NAME = 'x'\n/\n";
+    let mut d = crate::parse(src).unwrap();
+    d.ensure_group("nl_colm_material").unwrap();
+    let out = d.to_string();
+    assert!(out.starts_with(src), "原有内容必须逐字节保留：{out}");
+    assert!(out.contains("&nl_colm_material\n/\n"), "{out}");
+    d.insert(
+        "DEF_USE_METHANE",
+        crate::Value::Bool(true),
+        "nl_colm_material",
+    )
+    .unwrap();
+    let out = d.to_string();
+    let at = out.find("DEF_USE_METHANE").unwrap();
+    assert!(at > out.find("&nl_colm_material").unwrap(), "{out}");
+    assert_eq!(out.matches("&nl_colm_material").count(), 1, "{out}");
+    // 重复调用不补第二个空组。
+    d.ensure_group("nl_colm_material").unwrap();
+    assert_eq!(d.to_string().matches("&nl_colm_material").count(), 1);
+}
+
+#[test]
+fn an_existing_group_with_a_comment_is_not_duplicated() {
+    let src = "&nl_colm\n/\n&nl_colm_material ! material settings\n/\n";
+    let mut d = crate::parse(src).unwrap();
+    d.ensure_group("NL_COLM_MATERIAL").unwrap();
+    assert_eq!(d.to_string(), src);
+}
+
+#[test]
+fn an_invalid_group_name_is_refused_instead_of_being_rendered() {
+    let mut d = crate::parse("&nl_colm\n/\n").unwrap();
+    for bad in ["", "1nl", "nl colm", "nl_colm\n&evil"] {
+        assert!(d.ensure_group(bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(d.to_string(), "&nl_colm\n/\n");
+}

@@ -2123,8 +2123,8 @@ export default function RunPanel({
         !servers.find((server) => server.host === host)?.memory_gb && (
           <p className="muted">
             {t(
-              '没填内存：在按整节点给内存的 Slurm 分区（如 land02）上，会按申请的核数分摊节点内存，例如 8 个线程约拿到节点内存的 8/96。大区域或高分辨率的模拟请在计算资源里填"内存 GB"。',
-              'No memory set: on Slurm partitions that hand out whole-node memory (such as land02) the node memory is shared out by the cores requested, e.g. 8 threads get about 8/96 of it. For large or high-resolution regions, set "Memory GB" in Compute resources.',
+              '没填内存：在按整节点给内存的 Slurm 分区（如 land 集群）上，会按申请的核数分摊节点内存，例如 8 个线程约拿到节点内存的 8/96。大区域或高分辨率的模拟请在计算资源里填"内存 GB"。',
+              'No memory set: on Slurm partitions that hand out whole-node memory (such as the land cluster) the node memory is shared out by the cores requested, e.g. 8 threads get about 8/96 of it. For large or high-resolution regions, set "Memory GB" in Compute resources.',
             )}
           </p>
         )}

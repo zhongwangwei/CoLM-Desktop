@@ -115,6 +115,9 @@ pub struct MaterialAccumulators {
     pub rsub: f64,
     pub rnof: f64,
     pub water_rnof: f64,
+    /// `a_mt_bgc_leach`：BGC 矿质氮淋溶记入材料的外部输入（kg m-2），
+    /// 与 `rsur`/`rsub` 同一步注入，供守恒检查把「从 BGC 氮库离开、进入材料」的质量记成输入。
+    pub bgc_leach: f64,
     pub qinfl: f64,
     pub qcharge: f64,
     pub ldew_mass: f64,

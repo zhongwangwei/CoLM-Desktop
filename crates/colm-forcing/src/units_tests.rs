@@ -156,6 +156,11 @@ fn observation_flux_aliases_are_renames_not_rescales() {
         ("μmol/m²/s", "umol/m2/s"),
         ("umol m-2 s-1", "umol/m2/s"),
         ("µmol m^-2 s^-1", "umol/m2/s"),
+        // FLUXNET-CH4 的 GPP/NEE/Resp 带 CO2 物种前缀；目标仍是物种无关的规范单位。
+        ("umol CO2 m-2 s-1", "umol/m2/s"),
+        ("µmol CO2 m-2 s-1", "umol/m2/s"),
+        ("μmol CO2 m^-2 s^-1", "umol/m2/s"),
+        ("umol CO2/m²/s", "umol/m2/s"),
         ("nmol CH4/m²/s", "nmol CH4/m2/s"),
         ("nmol CH₄ m-2 s-1", "nmol CH4/m2/s"),
     ] {
@@ -186,6 +191,32 @@ fn kilowatt_flux_is_rescaled_to_watts() {
 }
 
 #[test]
+fn co2_species_prefix_from_fluxnet_ch4_is_a_rename() {
+    // 实测缺陷（2026-11-12）：内置 AT-Neu 观测文件的 GPP/NEE 写
+    // `umol CO2 m-2 s-1`，表里只有裸 `umol m-2 s-1`，结果页整页观测评估失败。
+    // CO2 前缀的摩尔数确定是 CO2，而评估表里 GPP/NEE/Resp 的规范目标
+    // `umol/m2/s` 本来就物种无关，所以这是改名、不是换算。
+    let values = [1.8337343205163141, -0.0];
+    for from in [
+        "umol CO2 m-2 s-1",
+        "µmol CO2 m-2 s-1",
+        "μmol CO2 m-2 s-1",
+        "umol CO2 m^-2 s^-1",
+        "umol CO2 m**-2 s**-1",
+        "umol CO2/m2/s",
+    ] {
+        let got = super::convert_units(from, "umol/m2/s", &values).unwrap();
+        assert_eq!(got, values.to_vec(), "{from} 改名不该动数");
+        assert!(got[1].is_sign_negative(), "{from} 丢了 -0.0 的符号位");
+        assert_eq!(
+            super::from_canonical("umol/m2/s", from, &values).unwrap(),
+            values,
+            "{from} 缺反向换算，缺测修复会无路可走"
+        );
+    }
+}
+
+#[test]
 fn molar_units_of_different_species_do_not_convert() {
     // µmol 与 nmol 的摩尔数不是同一种物质，绝不能互相换算；
     // 也不接受裸 `nmol m-2 s-1`（无法确认是甲烷）。
@@ -193,6 +224,8 @@ fn molar_units_of_different_species_do_not_convert() {
         ("umol/m2/s", "nmol CH4/m2/s"),
         ("nmol CH4/m2/s", "umol/m2/s"),
         ("nmol m-2 s-1", "nmol CH4/m2/s"),
+        ("umol CO2 m-2 s-1", "nmol CH4/m2/s"),
+        ("umol CO2 m-2 s-1", "nmol/m2/s"),
     ] {
         assert!(
             super::convert_units(from, to, &[1.0]).is_err(),

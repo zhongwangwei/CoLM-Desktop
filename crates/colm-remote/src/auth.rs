@@ -3,14 +3,21 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 
 static AUTH: OnceLock<Auth> = OnceLock::new();
+static GUI_RELAY: OnceLock<(String, String)> = OnceLock::new();
+static GUI_TARGET_PASSWORD: Mutex<Option<(String, String)>> = Mutex::new(None);
+static ANSWERED_SECRETS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+const GUI_BROKER: &str = "COLM_SSH_GUI_BROKER";
+const GUI_TOKEN: &str = "COLM_SSH_GUI_TOKEN";
 const LIMIT: u64 = 64 * 1024;
+const HUMAN_REPLY_TIMEOUT_SECS: u64 = 600;
+const NETWORK_CONNECT_TIMEOUT_SECS: u64 = 60;
 const BROKER: &str = "COLM_SSH_ASKPASS_BROKER";
 const TOKEN: &str = "COLM_SSH_ASKPASS_TOKEN";
 
@@ -38,7 +45,7 @@ pub fn current_connection() -> Option<Connection> {
 pub fn check_connection(recorded: Option<&Connection>) -> Result<()> {
     if let Some(recorded) = recorded {
         if AUTH.get().is_none() {
-            ensure!(recorded.auth != "password", "this job requires an SSH password; enter it in the server connection settings again");
+            ensure!(!matches!(recorded.auth.as_str(), "password" | "key-password") || GUI_RELAY.get().is_some(), "this job requires an SSH password; enter it in the server connection settings again");
             let auth = Auth {
                 host: recorded.host.clone(),
                 username: recorded.username.clone(),
@@ -94,20 +101,21 @@ impl Auth {
             "invalid SSH username"
         );
         ensure!(
-            ["config", "key", "password"].contains(&self.auth.as_str()),
+            ["config", "key", "password", "key-password"].contains(&self.auth.as_str()),
             "invalid SSH authentication method"
         );
         ensure!(
             self.identity_file.is_empty()
-                || (self.auth == "key"
+                || (matches!(self.auth.as_str(), "key" | "key-password")
                     && Path::new(&self.identity_file).is_absolute()
                     && !self.identity_file.contains(char::is_control)),
             "SSH key must be an absolute local path in key mode"
         );
-        if self.auth == "password" {
+        if matches!(self.auth.as_str(), "password" | "key-password") {
             let password = self.password.as_deref().unwrap_or("");
             ensure!(
-                !password.is_empty() && !password.contains(['\r', '\n', '\0']),
+                (!password.is_empty() || GUI_RELAY.get().is_some())
+                    && !password.contains(['\r', '\n', '\0']),
                 "enter a nonempty single-line SSH password"
             );
         } else {
@@ -120,7 +128,7 @@ impl Auth {
     }
 
     fn apply(&self, command: &mut Command) -> Result<()> {
-        if self.auth != "config" {
+        if self.auth != "config" || GUI_RELAY.get().is_some() {
             command.args(["-o", "StrictHostKeyChecking=yes"]);
         }
         if !self.username.is_empty() {
@@ -129,36 +137,37 @@ impl Auth {
         if self.port != 0 {
             command.args(["-p", &self.port.to_string()]);
         }
+        let broker = GUI_RELAY.get().or(self.broker.as_ref());
+        if let Some(broker) = broker {
+            apply_broker(command, broker)?;
+        } else {
+            ensure!(
+                !matches!(self.auth.as_str(), "password" | "key-password"),
+                "SSH password broker is unavailable"
+            );
+            command.args(["-o", "BatchMode=yes"]);
+        }
         if self.auth == "password" {
-            let (address, token) = self
-                .broker
-                .as_ref()
-                .context("SSH password broker is unavailable")?;
             command.args([
-                "-o",
-                "BatchMode=no",
                 "-o",
                 "PreferredAuthentications=password",
                 "-o",
                 "PubkeyAuthentication=no",
                 "-o",
                 "KbdInteractiveAuthentication=no",
-                "-o",
-                "NumberOfPasswordPrompts=1",
             ]);
-            command
-                .env("SSH_ASKPASS", std::env::current_exe()?)
-                .env("SSH_ASKPASS_REQUIRE", "force")
-                .env(BROKER, address)
-                .env(TOKEN, token)
-                .env("LC_ALL", "C");
-        } else {
-            command.args(["-o", "BatchMode=yes"]);
-            if self.auth == "key" {
-                command.args(["-o", "PreferredAuthentications=publickey"]);
-                if !self.identity_file.is_empty() {
-                    command.args(["-i", &self.identity_file, "-o", "IdentitiesOnly=yes"]);
-                }
+            if GUI_RELAY.get().is_none() {
+                command.args(["-o", "NumberOfPasswordPrompts=1"]);
+            }
+        } else if matches!(self.auth.as_str(), "key" | "key-password") {
+            let preferred = if self.auth == "key-password" {
+                "PreferredAuthentications=publickey,password,keyboard-interactive"
+            } else {
+                "PreferredAuthentications=publickey"
+            };
+            command.args(["-o", preferred]);
+            if !self.identity_file.is_empty() {
+                command.args(["-i", &self.identity_file, "-o", "IdentitiesOnly=yes"]);
             }
         }
         // Explicit credentials must not reuse an already authenticated connection.
@@ -187,11 +196,37 @@ fn parse(reader: impl Read) -> Result<Auth> {
 
 /// Called once by the CLI before dispatch; no credential is written to disk.
 pub fn initialize_from_stdin() -> Result<()> {
+    match (std::env::var_os(GUI_BROKER), std::env::var_os(GUI_TOKEN)) {
+        (None, None) => {}
+        (Some(address), Some(token)) => {
+            let address = address
+                .to_str()
+                .context("invalid SSH credential endpoint")?;
+            let token = token.to_str().context("invalid SSH credential token")?;
+            validate_endpoint(address, token)?;
+            GUI_RELAY
+                .set(start_gui_relay(address.to_owned(), token.to_owned())?)
+                .map_err(|_| anyhow::anyhow!("SSH GUI relay already initialized"))?;
+        }
+        _ => anyhow::bail!("incomplete SSH GUI credential endpoint"),
+    }
     if std::env::var("COLM_SSH_AUTH_STDIN").as_deref() != Ok("1") {
         return Ok(());
     }
     let mut auth = parse(std::io::stdin().lock())?;
-    if auth.auth == "password" {
+    if GUI_RELAY.get().is_some() {
+        if let Some(password) = auth
+            .password
+            .as_ref()
+            .filter(|password| !password.is_empty())
+        {
+            *GUI_TARGET_PASSWORD
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) =
+                direct_password_prompt(&resolved_config(&auth)?)?
+                    .map(|prompt| (prompt, password.clone()));
+        }
+    } else if matches!(auth.auth.as_str(), "password" | "key-password") {
         let prompt = password_prompt(&auth)?;
         auth.broker = Some(start_broker(auth.password.clone().unwrap(), prompt)?);
     }
@@ -207,14 +242,27 @@ pub(crate) fn check_host(host: &str) -> Result<()> {
 }
 
 pub(crate) fn configure(command: &mut Command) -> Result<()> {
+    // The outer SSH banner wait includes time spent answering a jump-host prompt.
+    let timeout = NETWORK_CONNECT_TIMEOUT_SECS
+        + if GUI_RELAY.get().is_some() {
+            HUMAN_REPLY_TIMEOUT_SECS
+        } else {
+            0
+        };
+    command.args(["-o", &format!("ConnectTimeout={timeout}")]);
     command
         .env_remove("COLM_SSH_AUTH_STDIN")
+        .env_remove(GUI_BROKER)
+        .env_remove(GUI_TOKEN)
         .env_remove(BROKER)
         .env_remove(TOKEN)
         .env_remove("SSH_ASKPASS")
         .env("SSH_ASKPASS_REQUIRE", "never");
     if let Some(auth) = AUTH.get() {
         auth.apply(command)?;
+    } else if let Some(broker) = GUI_RELAY.get() {
+        command.args(["-o", "StrictHostKeyChecking=yes"]);
+        apply_broker(command, broker)?;
     } else {
         command.args(["-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes"]);
     }
@@ -222,15 +270,31 @@ pub(crate) fn configure(command: &mut Command) -> Result<()> {
 }
 
 pub(crate) fn redact(text: &str) -> String {
-    if let Some(password) = AUTH
-        .get()
-        .and_then(|auth| auth.password.as_deref())
-        .filter(|p| !p.is_empty())
-    {
-        text.replace(password, "[redacted]")
-    } else {
-        text.to_owned()
+    let mut secrets = ANSWERED_SECRETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(password) = AUTH.get().and_then(|auth| auth.password.as_ref()) {
+        secrets.push(password.clone());
     }
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    secrets
+        .iter()
+        .filter(|secret| !secret.is_empty())
+        .fold(text.to_owned(), |text, secret| {
+            text.replace(secret, "[redacted]")
+        })
+}
+
+fn apply_broker(command: &mut Command, (address, token): &(String, String)) -> Result<()> {
+    command
+        .args(["-o", "BatchMode=no"])
+        .env("SSH_ASKPASS", std::env::current_exe()?)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env(BROKER, address)
+        .env(TOKEN, token)
+        .env("LC_ALL", "C");
+    Ok(())
 }
 
 fn random_token() -> Result<String> {
@@ -251,7 +315,7 @@ fn random_token() -> Result<String> {
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
-fn password_prompt(auth: &Auth) -> Result<String> {
+fn resolved_config(auth: &Auth) -> Result<String> {
     let mut command = Command::new("ssh");
     command
         .arg("-G")
@@ -272,7 +336,25 @@ fn password_prompt(auth: &Auth) -> Result<String> {
         output.status.success(),
         "cannot resolve SSH connection settings"
     );
-    prompt_from_config(&String::from_utf8_lossy(&output.stdout))
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn password_prompt(auth: &Auth) -> Result<String> {
+    prompt_from_config(&resolved_config(auth)?)
+}
+
+fn direct_password_prompt(config: &str) -> Result<Option<String>> {
+    // A jump host can emit target-shaped prompts; never prefill across a proxy.
+    if config.lines().any(|line| {
+        ["proxyjump ", "proxycommand "].iter().any(|field| {
+            line.strip_prefix(field).is_some_and(|value| {
+                !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("none")
+            })
+        })
+    }) {
+        return Ok(None);
+    }
+    prompt_from_config(config).map(Some)
 }
 
 fn prompt_from_config(text: &str) -> Result<String> {
@@ -323,35 +405,121 @@ fn start_broker(password: String, prompt: String) -> Result<(String, String)> {
     Ok((address, token))
 }
 
-fn askpass() -> Result<()> {
-    let prompt = std::env::args().nth(1).unwrap_or_default();
-    // Password-only authentication never needs host-key, passphrase or MFA replies.
+fn validate_prompt(prompt: &str) -> Result<()> {
+    let lower = prompt.trim_end().to_ascii_lowercase();
     ensure!(
-        prompt.trim_end().ends_with("'s password:"),
+        !prompt.is_empty()
+            && prompt.len() < 4096
+            && !prompt.contains(char::is_control)
+            && (lower.ends_with("password:")
+                || (lower.starts_with("enter passphrase for key '") && lower.ends_with("':"))),
         "unsupported SSH prompt"
     );
-    let address: std::net::SocketAddr = std::env::var(BROKER)?.parse()?;
+    Ok(())
+}
+
+fn validate_endpoint(address: &str, token: &str) -> Result<std::net::SocketAddr> {
+    let address: std::net::SocketAddr = address.parse()?;
     ensure!(
         address.ip().is_loopback(),
         "invalid SSH credential endpoint"
     );
-    let token = std::env::var(TOKEN)?;
     ensure!(
         token.len() == 64 && token.bytes().all(|c| c.is_ascii_hexdigit()),
         "invalid SSH credential token"
     );
+    Ok(address)
+}
+
+fn request_secret(address: &str, token: &str, prompt: &str) -> Result<Vec<u8>> {
+    validate_prompt(prompt)?;
+    let address = validate_endpoint(address, token)?;
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3))?;
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(HUMAN_REPLY_TIMEOUT_SECS)))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     stream.write_all(token.as_bytes())?;
     writeln!(stream, "{prompt}")?;
-    let mut password = Vec::new();
-    stream.take(LIMIT + 1).read_to_end(&mut password)?;
+    let mut secret = Vec::new();
+    stream.take(LIMIT + 1).read_to_end(&mut secret)?;
     ensure!(
-        !password.is_empty() && password.len() as u64 <= LIMIT,
+        !secret.is_empty()
+            && secret.len() as u64 <= LIMIT
+            && !secret.iter().any(|byte| matches!(byte, b'\r' | b'\n' | 0)),
         "SSH credential unavailable"
     );
-    std::io::stdout().write_all(&password)?;
+    Ok(secret)
+}
+
+fn relay(mut stream: TcpStream, token: &str, gui_address: &str, gui_token: &str) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let mut supplied = [0u8; 64];
+    stream.read_exact(&mut supplied)?;
+    ensure!(
+        supplied
+            .iter()
+            .zip(token.as_bytes())
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0,
+        "invalid SSH credential request"
+    );
+    let mut received = String::new();
+    BufReader::new((&mut stream).take(4096)).read_line(&mut received)?;
+    let prompt = received
+        .strip_suffix('\n')
+        .context("invalid SSH credential prompt")?;
+    validate_prompt(prompt)?;
+    let supplied_password = {
+        let mut password = GUI_TARGET_PASSWORD
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if password
+            .as_ref()
+            .is_some_and(|(expected, _)| expected == prompt)
+        {
+            password.take().map(|(_, secret)| secret.into_bytes())
+        } else {
+            None
+        }
+    };
+    let secret = match supplied_password {
+        Some(secret) => secret,
+        None => request_secret(gui_address, gui_token, prompt)?,
+    };
+    let secret_text = std::str::from_utf8(&secret).context("invalid SSH credential reply")?;
+    ANSWERED_SECRETS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(secret_text.to_owned());
+    stream.write_all(&secret)?;
+    Ok(())
+}
+
+fn start_gui_relay(gui_address: String, gui_token: String) -> Result<(String, String)> {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let address = listener.local_addr()?.to_string();
+    let token = random_token()?;
+    let expected = token.clone();
+    std::thread::Builder::new()
+        .name("ssh-gui-relay".into())
+        .spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let (token, address, gui_token) =
+                    (expected.clone(), gui_address.clone(), gui_token.clone());
+                let _ = std::thread::Builder::new()
+                    .name("ssh-gui-request".into())
+                    .spawn(move || {
+                        let _ = relay(stream, &token, &address, &gui_token);
+                    });
+            }
+        })?;
+    Ok((address, token))
+}
+
+fn askpass() -> Result<()> {
+    let prompt = std::env::args().nth(1).unwrap_or_default();
+    let secret = request_secret(&std::env::var(BROKER)?, &std::env::var(TOKEN)?, &prompt)?;
+    std::io::stdout().write_all(&secret)?;
     Ok(())
 }
 

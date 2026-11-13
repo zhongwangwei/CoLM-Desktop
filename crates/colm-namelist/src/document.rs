@@ -80,6 +80,39 @@ impl Document {
         bail!("no such field in this namelist: {path}")
     }
 
+    /// 确保这份文件里有 `&group`（没有就在末尾补一个空的），供 [`Document::insert`]
+    /// 插字段用。
+    ///
+    /// 为什么需要它：上游把材料拆进 `&nl_colm_material` 等新组，而建例只写
+    /// `&nl_colm`，老算例更没有这些组。只在「用户明确开启一个新过程」时补空组
+    /// （调用方知道自己在写哪个 family），不能让 `insert` 无条件替任何调用方建组 ——
+    /// 那样拼错组名会被静默吞掉。
+    pub fn ensure_group(&mut self, group: &str) -> Result<()> {
+        if group.is_empty()
+            || !group
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            || group.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        {
+            bail!("invalid namelist group name: {group:?}");
+        }
+        if self.items.iter().any(|item| match item {
+            Item::GroupStart(start) => group_matches(start, group),
+            _ => false,
+        }) {
+            return Ok(());
+        }
+        // 末尾没有换行时先补一个，避免 `&group` 拼到最后一行上；parse 会把
+        // 空白/注释行按原文保留，原有内容一个字节都不动。
+        let mut text = self.to_string();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&format!("&{group}\n/\n"));
+        *self = crate::parse(&text)?;
+        Ok(())
+    }
+
     /// 加一个这份文件里还没有的字段，插在指定 namelist 组的 `/` 之前。
     ///
     /// **组名必须由调用方给。** CoLM 按组读 namelist，插错组等于没设 ——

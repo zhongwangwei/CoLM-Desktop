@@ -24,6 +24,7 @@ import {
   partitionLabel,
   SERVER_PRESETS,
   applyServerPreset,
+  prefillServerPaths,
   applyServerCase,
   serverDisplayName,
   recognisedPreset,
@@ -65,7 +66,11 @@ export default function ResourcesPage() {
     [error, setError] = useState(''),
     [configLoaded, setConfigLoaded] = useState(false),
     [output, setOutput] = useState<Record<string, unknown>>({});
-  const [rootBrowser, setRootBrowser] = useState<Server | null>(null),
+  const [rootBrowser, setRootBrowser] = useState<{
+      server: Server;
+      field: 'root' | DataPathKey;
+      directory: boolean;
+    } | null>(null),
     [deletingServer, setDeletingServer] = useState<Server | null>(null),
     // 软件里保存的服务器配置案例（非敏感配置），和集群预设一起出现在下拉里。
     [serverCases, setServerCases] = useState<ServerCase[]>([]);
@@ -336,7 +341,8 @@ export default function ResourcesPage() {
   async function checkConnection() {
     if (!editor) return;
     const server = structuredClone(editor),
-      configuration = JSON.stringify(server);
+      configuration = JSON.stringify(server),
+      token = epoch.current;
     const result: ResourceCheck = {
       configuration,
       checked_at: new Date().toISOString(),
@@ -353,6 +359,10 @@ export default function ResourcesPage() {
       } catch (error) {
         result.engine_error = String(error);
       }
+    }
+    if (result.probe?.hostname && token.active && token === epoch.current) {
+      const next = prefillServerPaths(server, recognisedPreset(result.probe));
+      setEditor((current) => (JSON.stringify(current) === configuration ? next : current));
     }
     const summary = resourceCheckSummary(server, result, en);
     return {
@@ -387,8 +397,11 @@ export default function ResourcesPage() {
         t('服务器未返回有效的调度器识别结果。', 'Invalid scheduler detection response.'),
       );
     const schedulers = [...new Set(probe.schedulers)];
-    const next = schedulers.length === 1 ? { ...server, scheduler: schedulers[0] } : server;
-    if (token.active && token === epoch.current && next.scheduler !== server.scheduler) {
+    const next = prefillServerPaths(
+      schedulers.length === 1 ? { ...server, scheduler: schedulers[0] } : server,
+      recognisedPreset(probe),
+    );
+    if (token.active && token === epoch.current && JSON.stringify(next) !== configuration) {
       setEditor((current) => (JSON.stringify(current) === configuration ? next : current));
       setOutput((current) => {
         const result = { ...current };
@@ -452,15 +465,20 @@ export default function ResourcesPage() {
     setAppliedPreset('');
     return t('案例已删除', 'Case deleted');
   }
+  function browseServer(field: 'root' | DataPathKey, directory = true) {
+    if (busy || lock.current || !editor?.host.trim()) return;
+    setRootBrowser({ server: structuredClone(editor), field, directory });
+  }
   function editField(key: keyof Server, value: string) {
-    if (key === 'auth' && value !== 'password') setPassword('');
+    if (key === 'auth' && value !== 'password' && value !== 'key-password') setPassword('');
     if (editor)
       editServer({
         ...editor,
         [key]: typeof editor[key] === 'number' ? Number(value) : value,
-        // 密钥文件只在 key 认证下有意义；切走时清掉，否则后端会把它带进 CLI，
-        // CLI 的 Auth::validate 会以“非 key 模式不应有 identity_file”拒绝整条命令。
-        ...(key === 'auth' && value !== 'key' ? { identity_file: '' } : {}),
+        // 切离使用显式密钥的模式时清掉隐藏路径。
+        ...(key === 'auth' && value !== 'key' && value !== 'key-password'
+          ? { identity_file: '' }
+          : {}),
       });
   }
   /** 清除本机默认路径上一次保存成功的提示；一改值它就不再成立。 */
@@ -680,10 +698,13 @@ export default function ResourcesPage() {
       label: t('认证方式', 'Authentication'),
       value: editor.auth,
       type: 'choice',
-      options: ['config', 'key', 'password'].map((value) => ({ value, label: value })),
+      options: ['config', 'key', 'password', 'key-password'].map((value) => ({
+        value,
+        label: value,
+      })),
       set: (value) => editField('auth', value),
     });
-    if (editor.auth === 'key')
+    if (editor.auth === 'key' || editor.auth === 'key-password')
       guideFields.push({
         id: 'resource-identity',
         label: t('密钥文件', 'Identity file'),
@@ -1198,6 +1219,7 @@ export default function ResourcesPage() {
                   ['config', 'SSH config'],
                   ['key', t('密钥', 'Key')],
                   ['password', t('密码', 'Password')],
+                  ['key-password', t('密钥与密码', 'Key and password')],
                 ].map(([value, label]) => (
                   <Button
                     key={value}
@@ -1271,7 +1293,7 @@ export default function ResourcesPage() {
             );
           })()}
           <div className="resource-wide-field">{field('resource-username')}</div>
-          {editor.auth === 'key' && (
+          {(editor.auth === 'key' || editor.auth === 'key-password') && (
             <div className="resource-identity">
               {field('resource-identity')}
               <ActionButton
@@ -1282,15 +1304,15 @@ export default function ResourcesPage() {
               />
             </div>
           )}
-          {editor.auth === 'key' && (
+          {(editor.auth === 'key' || editor.auth === 'key-password') && (
             <Notice>
               {t(
-                '带口令的私钥请先用 ssh-add 加入 ssh-agent；应用不接收、也不保存私钥口令。',
-                'For passphrase-protected keys, load the key into ssh-agent with ssh-add first; the app never asks for or stores the passphrase.',
+                '需要私钥口令时，应用会弹窗询问；填写后继续当前操作。',
+                'When a key needs a passphrase, the app asks in a dialog and continues the current operation.',
               )}
             </Notice>
           )}
-          {editor.auth === 'password' && (
+          {(editor.auth === 'password' || editor.auth === 'key-password') && (
             <>
               <Field label={t('密码（仅本次原生会话）', 'Password (native session only)')}>
                 <div className="browse-input">
@@ -1311,8 +1333,8 @@ export default function ResourcesPage() {
               </Field>
               <Notice>
                 {t(
-                  '密码模式仅支持 SSH password 认证，不支持键盘交互或一次性动态口令；需要动态口令时请用 SSH config，并先在终端里建立连接。',
-                  'Password mode supports SSH password authentication only; it cannot answer keyboard-interactive or one-time-code prompts. For OTP, use SSH config with an existing terminal connection.',
+                  '需要登录密码时，应用会弹窗询问；也可提前登记本次会话的密码。不支持一次性动态口令。',
+                  'The app asks for a login password when needed. You can also register it for this session in advance. One-time codes are not supported.',
                 )}
               </Notice>
             </>
@@ -1322,8 +1344,8 @@ export default function ResourcesPage() {
             <ActionButton
               action="resource-browse-root"
               label={t('浏览服务器', 'Browse server')}
-              disabled={busy || !editor.host}
-              run={() => setRootBrowser(structuredClone(editor))}
+              disabled={busy || !editor.host.trim()}
+              run={() => browseServer('root')}
             />
           </div>
           <section className="resource-data-defaults">
@@ -1334,7 +1356,25 @@ export default function ResourcesPage() {
                 'Filled in when a new simulation runs on this server; paths changed while creating one are synced back here. Use absolute server paths.',
               )}
             </p>
-            <div className="form-grid">{dataFields.map(([key]) => field(`resource-${key}`))}</div>
+            {dataFields.map(([key, label]) => (
+              <div className="resource-identity" key={key}>
+                {field(`resource-${key}`)}
+                <ActionButton
+                  action={`resource-browse-${key}`}
+                  label={`${t('选择目录', 'Choose folder')} · ${label}`}
+                  disabled={busy || !editor.host.trim()}
+                  run={() => browseServer(key)}
+                />
+                {key === 'forcing_dir' && (
+                  <ActionButton
+                    action="resource-browse-forcing-file"
+                    label={t('选择强迫场文件', 'Choose forcing file')}
+                    disabled={busy || !editor.host.trim()}
+                    run={() => browseServer(key, false)}
+                  />
+                )}
+              </div>
+            ))}
           </section>
           {selectedServer && kindPathSection}
           {/* 已保存的服务器才读：新填的地址还没连通过，读负载只会报错。 */}
@@ -1723,18 +1763,23 @@ export default function ResourcesPage() {
       )}
       {rootBrowser && (
         <RemotePathBrowser
-          host={rootBrowser.host}
-          server={rootBrowser}
-          initialPath={rootBrowser.root.startsWith('/') ? rootBrowser.root : undefined}
-          directory
+          host={rootBrowser.server.host}
+          server={rootBrowser.server}
+          initialPath={
+            rootBrowser.server[rootBrowser.field]?.startsWith('/')
+              ? rootBrowser.server[rootBrowser.field]
+              : undefined
+          }
+          directory={rootBrowser.directory}
           en={en}
           onSelect={(path) => {
-            if (JSON.stringify(editor) === JSON.stringify(rootBrowser)) editField('root', path);
+            if (JSON.stringify(editor) === JSON.stringify(rootBrowser.server))
+              editField(rootBrowser.field, path);
             else
               setError(
                 t(
-                  '连接设置已改变，请重新选择目录。',
-                  'Connection settings changed; choose the folder again.',
+                  '连接设置已改变，请重新选择路径。',
+                  'Connection settings changed; choose the path again.',
                 ),
               );
             setRootBrowser(null);

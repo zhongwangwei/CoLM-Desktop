@@ -699,6 +699,8 @@ fn soilbiogeochem_nitrogenflux_summary(
     for j in 0..d.nl_soil {
         s.patch_flux.supplement_to_sminn[0] = s.patch_flux.supplement_to_sminn_vr[j]
             .contract(p.dz_soi[j], s.patch_flux.supplement_to_sminn[0]);
+        s.patch_flux.smin_nh4_leached[0] = s.patch_flux.smin_nh4_leached_vr[j]
+            .contract(p.dz_soi[j], s.patch_flux.smin_nh4_leached[0]);
         s.patch_flux.smin_no3_leached[0] = s.patch_flux.smin_no3_leached_vr[j]
             .contract(p.dz_soi[j], s.patch_flux.smin_no3_leached[0]);
         s.patch_flux.smin_no3_runoff[0] = s.patch_flux.smin_no3_runoff_vr[j]

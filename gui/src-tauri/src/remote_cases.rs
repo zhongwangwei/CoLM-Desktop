@@ -399,7 +399,7 @@ async fn finish_locally(
         crate::config::set_spinup(vec![local.clone()], 1, repeat, None, Some(true))?;
     }
 
-    crate::model::bind_new_case(local, model_revision.cloned(), creation).await?;
+    crate::model::bind_new_case(local, model_revision.cloned(), creation, fields).await?;
     let preview =
         crate::model::model_case_context_unleased(local.clone(), model_revision.cloned()).await?;
     let preview_dir = PathBuf::from(&preview.entry.dir);

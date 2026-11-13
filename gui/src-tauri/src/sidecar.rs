@@ -1414,9 +1414,34 @@ fn detached_children() -> &'static Mutex<HashMap<u32, (ChildOwner, bool)>> {
 /// 子进程登记项：读输出结束（含错误路径）后自动移除，避免 PID 复用后误杀。
 pub(crate) struct DetachedChildGuard {
     pid: u32,
+    live: Arc<Mutex<bool>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ChildCancellation {
+    pid: u32,
+    live: Arc<Mutex<bool>>,
+}
+impl ChildCancellation {
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+    pub(crate) fn stop(&self) -> Result<(), String> {
+        let live = self.live.lock().map_err(|_| "child lifetime unavailable")?;
+        if *live {
+            stop_registered_child(self.pid)?;
+        }
+        Ok(())
+    }
 }
 
 impl DetachedChildGuard {
+    pub(crate) fn cancellation(&self) -> ChildCancellation {
+        ChildCancellation {
+            pid: self.pid,
+            live: self.live.clone(),
+        }
+    }
     /// 这个子进程是否被停止按钮或关窗终止过。
     pub(crate) fn stopped(&self) -> bool {
         detached_children()
@@ -1428,6 +1453,9 @@ impl DetachedChildGuard {
 
 impl Drop for DetachedChildGuard {
     fn drop(&mut self) {
+        let mut live = self.live.lock().unwrap_or_else(|e| e.into_inner());
+        *live = false;
+        crate::ssh_credentials::cancel_pid(self.pid);
         if let Ok(mut children) = detached_children().lock() {
             children.remove(&self.pid);
         }
@@ -1461,7 +1489,10 @@ pub(crate) fn register_child(pid: u32, owner: ChildOwner) -> DetachedChildGuard 
     if stopped {
         let _ = terminate_process_tree(pid);
     }
-    DetachedChildGuard { pid }
+    DetachedChildGuard {
+        pid,
+        live: Arc::new(Mutex::new(true)),
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1472,6 +1503,18 @@ pub(crate) fn register_remote_child(pid: u32, case: Option<String>) -> DetachedC
 /// 只终止这一个远程子进程（启动失败/传凭据失败时用）。
 pub(crate) fn kill_remote_child(pid: u32) -> Result<(), String> {
     terminate_process_tree(pid)
+}
+
+/// Credential cancellation only targets a still-registered child, marking it before killing.
+fn stop_registered_child(pid: u32) -> Result<(), String> {
+    let mut children = detached_children()
+        .lock()
+        .map_err(|_| "child process registry poisoned")?;
+    if let Some((_, stopped)) = children.get_mut(&pid) {
+        *stopped = true;
+        terminate_process_tree(pid)?;
+    }
+    Ok(())
 }
 
 /// 终止所有登记的子进程（远程与数据准备）；返回成功发出终止的个数。关窗/退出时调用。
@@ -1497,6 +1540,9 @@ fn cancel_children_where(wanted: impl Fn(&ChildOwner) -> bool) -> Result<usize, 
         pids.sort_unstable();
         pids
     };
+    for pid in &pids {
+        crate::ssh_credentials::cancel_pid(*pid);
+    }
     let mut cancelled = 0;
     let mut failures = Vec::new();
     for (pid, outcome) in terminate_all(pids.into_iter().map(|pid| (pid, pid)).collect()) {
@@ -2866,7 +2912,7 @@ pub async fn new_case(
                 });
         crate::project::record_case(&case_dir, &record)?;
         creation.check()?;
-        crate::model::bind_new_case(&case_dir, model_revision, &creation).await?;
+        crate::model::bind_new_case(&case_dir, model_revision, &creation, &fields).await?;
         Ok(output)
     }
     .await;
@@ -3226,7 +3272,8 @@ pub async fn new_spatial_case(
         crate::config::apply_fields(&request.out, &request.fields).map_err(cleanup)?;
         crate::project::record_case(&request.out, &recorded)?;
         creation.check()?;
-        crate::model::bind_new_case(&request.out, model_revision, &creation).await?;
+        crate::model::bind_new_case(&request.out, model_revision, &creation, &request.fields)
+            .await?;
         Ok(output)
     }
     .await;

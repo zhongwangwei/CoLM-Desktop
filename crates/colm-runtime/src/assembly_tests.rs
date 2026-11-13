@@ -262,9 +262,12 @@ fn static_soil_fields_come_from_the_constant_restart() {
 fn the_saturated_conductivity_is_not_rescaled() {
     let (fixture, template) = assemble("conductivity-units", 1);
     let input = template.input(&binding());
-    for layer in 0..SOIL_LAYERS {
+    for (layer, &conductivity) in input.water.saturated_hydraulic_conductivity_mm_s[..SOIL_LAYERS]
+        .iter()
+        .enumerate()
+    {
         assert_eq!(
-            input.water.saturated_hydraulic_conductivity_mm_s[layer],
+            conductivity,
             fixture.soil.get(SoilField::HydraulicConductivity, layer, 1),
             "layer {layer} conductivity was rescaled"
         );

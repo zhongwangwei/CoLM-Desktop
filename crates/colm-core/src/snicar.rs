@@ -290,9 +290,9 @@ fn validate_input(input: &SnicarInput) -> Result<()> {
     let aerosol_layers = input
         .active_layers
         .max(usize::from(input.active_layers == 0));
-    for layer in 0..aerosol_layers {
+    for concentrations in &input.aerosol_mass_concentration[..aerosol_layers] {
         ensure!(
-            input.aerosol_mass_concentration[layer]
+            concentrations
                 .iter()
                 .all(|&value| value.is_finite() && value >= 0.0),
             "SNICAR aerosol mass concentrations must be finite and nonnegative"

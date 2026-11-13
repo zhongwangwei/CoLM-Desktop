@@ -26,6 +26,8 @@ export type Overlay = {
   physics: Record<string, string>;
   hybrid?: { config: string; assets: Asset[] } | null;
   process_files: Asset[];
+  /** 历史版本里「当时算模型字段、现在归算例」的值；运行配置按旧行为应用。 */
+  legacy_case_overrides?: Record<string, string>;
 };
 export type Applicability = {
   sites: string[];

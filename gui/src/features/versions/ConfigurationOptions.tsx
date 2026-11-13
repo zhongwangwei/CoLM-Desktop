@@ -48,6 +48,9 @@ import {
   materialKeys,
   materialRows,
   setMaterialRows,
+  legacyCaseOverrideEntries,
+  AQUIFER_MIXING_WATER,
+  AQUIFER_MIXING_WATER_TEST_MM,
   type ConfigurationSource,
   type ConfigurationResult,
   type FamilyContext,
@@ -120,6 +123,7 @@ export default function ConfigurationOptions({
     [loaded, setLoaded] = useState(''),
     [opened, setOpened] = useState<Record<string, boolean>>({}),
     [inputs, setInputs] = useState<Record<string, string>>({}),
+    [caseEdits, setCaseEdits] = useState<{ scope: string; fields: string[] } | null>(null),
     [selectedPftKind, setPftKind] = useState('pft'),
     [selectedPftIndex, setPftIndex] = useState(''),
     [processName, setProcessName] = useState(''),
@@ -162,6 +166,12 @@ export default function ConfigurationOptions({
   const pftVisible = !process && !onCaseChange && (!scheme || !!fixedPftKind);
   const pftOpen = pftVisible && (opened.pft ?? false);
   const selection = pftOpen && pftIndex !== '' ? { kind: pftKind, index: Number(pftIndex) } : null;
+  const sourceKey = JSON.stringify(
+    source.kind === 'draft'
+      ? { kind: source.kind, id: source.id, generation: source.generation }
+      : source,
+  );
+  const editScope = JSON.stringify({ sourceKey, caseDir });
   const queryValues = scheme ? { ...caseSchemeFields(scheme), ...caseValues } : caseValues;
   const request = JSON.stringify({
     source: source.kind === 'draft' ? { ...source, overlay: sourceOverlay } : source,
@@ -170,6 +180,11 @@ export default function ConfigurationOptions({
     engine: engine ?? null,
     pftSelection: selection,
     caseValues: queryValues,
+    caseEditedFields:
+      caseEdits?.scope === editScope
+        ? caseEdits.fields.filter((key) => !removedCaseKeys.includes(key))
+        : null,
+    caseRemovedFields: removedCaseKeys,
   });
   const overlay = onCaseChange
     ? removedCaseKeys.reduce(
@@ -177,7 +192,7 @@ export default function ConfigurationOptions({
         caseOptionOverlay(
           sourceOverlay,
           fields,
-          queryValues,
+          loaded === request ? { ...queryValues, ...result.legacy_case_overrides } : queryValues,
           loaded === request
             ? result.fields.filter((field) => !removedCaseKeys.includes(field.name))
             : [],
@@ -196,11 +211,6 @@ export default function ConfigurationOptions({
     )
       .trim()
       .toLowerCase() === '.false.';
-  const sourceKey = JSON.stringify(
-    source.kind === 'draft'
-      ? { kind: source.kind, id: source.id, generation: source.generation }
-      : source,
-  );
   const parentValues = Object.fromEntries(
     Object.entries({
       ecology: 'DEF_USE_BGC',
@@ -306,19 +316,36 @@ export default function ConfigurationOptions({
       throw new Error(bilingual('当前配置不可修改', 'Configuration is locked or stale'));
     try {
       const next = change();
-      if (onCaseChange && modalActions) {
-        onCaseChange(caseOptionPatch(overlay, next, fields));
-      } else if (onCaseChange) {
-        savingNow.current = true;
-        setSaving(true);
-        void Promise.resolve()
-          .then(() => onCaseChange(caseOptionPatch(overlay, next, fields)))
-          .then(() => setError(''))
-          .catch((e) => setError(String(e)))
-          .finally(() => {
-            savingNow.current = false;
-            setSaving(false);
-          });
+      if (onCaseChange) {
+        const patch = caseOptionPatch(overlay, next, fields);
+        const edited = Object.keys(patch).filter((key) => patch[key] !== null);
+        const rememberEdits = () => {
+          if (edited.length)
+            setCaseEdits((previous) => ({
+              scope: editScope,
+              fields: [
+                ...new Set([...(previous?.scope === editScope ? previous.fields : []), ...edited]),
+              ],
+            }));
+        };
+        if (modalActions) {
+          onCaseChange(patch);
+          rememberEdits();
+        } else {
+          savingNow.current = true;
+          setSaving(true);
+          void Promise.resolve()
+            .then(() => onCaseChange(patch))
+            .then(() => {
+              rememberEdits();
+              setError('');
+            })
+            .catch((e) => setError(String(e)))
+            .finally(() => {
+              savingNow.current = false;
+              setSaving(false);
+            });
+        }
       } else onChange!(next);
       setError('');
     } catch (e) {
@@ -1142,6 +1169,55 @@ export default function ConfigurationOptions({
       </p>
     </Card>
   );
+  // 水同位素的地下含水层混合水量：必须 >0 才能保存，但后端在 `DEF_USE_ISOTOPE`
+  // 尚未保存为 true 时把它标成 hidden（“只有水同位素使用”），对话框里本来没有
+  // 输入框。选中同位素族时在这里显式渲染，默认 1000 mm 测试值（历史设计），
+  // 用户可改；不渲染就会首次启用时被自身校验卡死（实测 2026-11-12）。
+  const isotopeMixingVisible =
+    process === 'material' &&
+    (currentIsotope === true || table.some((row) => row.TYPES.trim().toLowerCase() === 'isotope'));
+  const aquiferMixing =
+    modelSettingValue(overlay, AQUIFER_MIXING_WATER) ??
+    values.fields.find((field) => field.name === AQUIFER_MIXING_WATER)?.configured_value ??
+    values.fields.find((field) => field.name === AQUIFER_MIXING_WATER)?.built_in_default ??
+    AQUIFER_MIXING_WATER_TEST_MM;
+  const setAquiferMixing = (value: string) =>
+    write(() => setModelOption(overlay, fields, AQUIFER_MIXING_WATER, value));
+  if (isotopeMixingVisible)
+    controls.push({
+      id: 'configuration-aquifer-mixing',
+      label: t('含水层混合水量（mm）', 'Aquifer mixing water (mm)'),
+      value: aquiferMixing,
+      type: 'text',
+      disabled: locked || !ready,
+      set: (value) => {
+        if (locked) throw new Error(bilingual('当前配置不可修改', 'Configuration is locked'));
+        setAquiferMixing(value);
+      },
+    });
+  const isotopeMixingCard = isotopeMixingVisible && (
+    <Card
+      title={t('水同位素混合参数', 'Water isotope mixing')}
+      description={t(
+        '通用水输运的同位素需要正的含水层混合水量；默认 1000 mm 是测试值，正式模拟请用实测或率定值。',
+        'Water isotopes need positive aquifer mixing water. The 1000 mm default is a test value; use measured or calibrated values for real simulations.',
+      )}
+    >
+      <Field label={t('含水层混合水量（mm）', 'Aquifer mixing water (mm)')}>
+        <Input
+          id="configuration-aquifer-mixing"
+          aria-label={t('含水层混合水量（mm）', 'Aquifer mixing water (mm)')}
+          value={aquiferMixing}
+          disabled={locked || !ready}
+          onChange={(event) => setAquiferMixing(event.target.value)}
+        />
+      </Field>
+      <small>
+        {AQUIFER_MIXING_WATER} ·{' '}
+        {t('默认 1000 mm 仅供测试', 'The 1000 mm default is for testing only')}
+      </small>
+    </Card>
+  );
   const assets = (caseProcessVisible('material') ? values.process_files : []).map((asset) => {
     const isOpen = opened[`${sourceKey}:${asset.file}`] ?? materialOpen;
     return (
@@ -1331,11 +1407,28 @@ export default function ConfigurationOptions({
           'Defaults are shown when no override is set; saved edits override them. Enable a process to see its settings. Disabling it preserves saved values.',
         )}
       </Notice>
+      {ready && legacyCaseOverrideEntries(values).length > 0 && (
+        <Notice tone="warning">
+          {t(
+            `该模型的旧定义里有 ${legacyCaseOverrideEntries(values).length} 个参数已改为算例拥有，已按历史值迁移并应用到本次运行：${legacyCaseOverrideEntries(
+              values,
+            )
+              .map(([key, value]) => `${key}=${value}`)
+              .join(', ')}`,
+            `${legacyCaseOverrideEntries(values).length} legacy model parameter(s) now belong to the case; their historical values were migrated and applied to this run: ${legacyCaseOverrideEntries(
+              values,
+            )
+              .map(([key, value]) => `${key}=${value}`)
+              .join(', ')}`,
+          )}
+        </Notice>
+      )}
       {error && <Notice tone="error">{error}</Notice>}
       {!ready && <p>{t('正在查询配置条件…', 'Checking configuration conditions…')}</p>}
       {!stagedMaterialModal && groups}
       {familyCards}
       {materialTable}
+      {isotopeMixingCard}
       {stagedMaterialModal && groups}
       {modalActions && materials !== null && (
         <Notice>
