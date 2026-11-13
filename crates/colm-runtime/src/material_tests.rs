@@ -350,9 +350,7 @@ fn bgc_nitrogen_leaching_books_species_mass_like_the_fortran_coupling() {
 
     let set = named_solute_set(&dir, "NH4");
     let mut bgc = colm_core::bgc_state::BgcState::new(0, dims);
-    for j in 0..dz.len() {
-        bgc.patch_flux.smin_nh4_leached_vr[j] = 1.0e-4;
-    }
+    bgc.patch_flux.smin_nh4_leached_vr[..dz.len()].fill(1.0e-4);
     let masses = bgc_nitrogen_leaching_masses(
         &set,
         &bgc,
@@ -391,9 +389,7 @@ fn bgc_nitrogen_leaching_books_species_mass_like_the_fortran_coupling() {
 
     let set = named_solute_set(&dir, "NH4");
     let mut bgc = colm_core::bgc_state::BgcState::new(0, dims);
-    for j in 0..dz.len() {
-        bgc.patch_flux.sminn_leached_vr[j] = 5.0e-4;
-    }
+    bgc.patch_flux.sminn_leached_vr[..dz.len()].fill(5.0e-4);
     let masses = bgc_nitrogen_leaching_masses(
         &set,
         &bgc,

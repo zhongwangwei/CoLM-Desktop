@@ -323,9 +323,7 @@ pub fn follow_host_water(
                             pools.solid_soisno[layer] = solid * water / wsnow;
                         }
                     } else {
-                        for layer in 0..MAX_SNOW_LAYERS {
-                            pools.solid_soisno[layer] = 0.0;
-                        }
+                        pools.solid_soisno[..MAX_SNOW_LAYERS].fill(0.0);
                         pools.solid_soisno[soisno_slot(1)] += solid;
                     }
                 }

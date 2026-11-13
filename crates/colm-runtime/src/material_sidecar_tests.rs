@@ -62,12 +62,8 @@ fn filled_state(set: &MaterialSet, seed: f64) -> PatchMaterialState {
         let base = seed + 100.0 * i as f64;
         acc.precip = base + 1.0;
         acc.scv_mass = base + 2.0;
-        for j in 0..SOIL_LAYERS {
-            acc.soil_mass[j] = base + 10.0 + j as f64;
-        }
-        for j in 0..MAX_SNOW_LAYERS {
-            acc.snow_mass[j] = base + 30.0 + j as f64;
-        }
+        acc.soil_mass = std::array::from_fn(|j| base + 10.0 + j as f64);
+        acc.snow_mass = std::array::from_fn(|j| base + 30.0 + j as f64);
     }
     state.water_acc.ldew = seed + 0.5;
     state.water_acc.soil = std::array::from_fn(|j| seed + 50.0 + j as f64);
