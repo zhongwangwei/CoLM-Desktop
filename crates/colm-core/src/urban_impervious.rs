@@ -191,10 +191,14 @@ pub(crate) fn solve_urban_ground_column(
         input.interface_depth_m,
         input.snow_layers,
     );
-    for road in 0..road_layers {
-        let layer = road_offset + road;
-        if impervious && input.impervious_interface_conductivity_w_m_k[road] > 0.0 {
-            conductivity[layer] = input.impervious_interface_conductivity_w_m_k[road];
+    for (road, &override_conductivity) in input
+        .impervious_interface_conductivity_w_m_k
+        .iter()
+        .take(road_layers)
+        .enumerate()
+    {
+        if impervious && override_conductivity > 0.0 {
+            conductivity[road_offset + road] = override_conductivity;
         }
     }
     let factor = column_factor(input, &capacity)?;

@@ -1007,9 +1007,7 @@ fn rebuild_snow_interfaces(snow: &mut RuntimeSnowColumn) {
 }
 
 fn remember_ice_fraction(snow: &mut RuntimeSnowColumn) {
-    for slot in 0..MAX_SNOW_LAYERS {
-        snow.previous_ice_fraction[slot] = 0.0;
-    }
+    snow.previous_ice_fraction[..MAX_SNOW_LAYERS].fill(0.0);
     for index in snow.layer_count + 1..=0 {
         let slot = snow_layer_slot(index);
         snow.previous_ice_fraction[slot] = snow.ice_water_kg_m2[slot]

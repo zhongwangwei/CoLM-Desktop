@@ -367,7 +367,7 @@ jobs:
             Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
           if (-not $mt) { throw 'Windows SDK manifest tool was not found' }
           $executables = @(Get-Item target/debug/colm-desktop-gui.exe) +
-            @(Get-ChildItem target/debug/deps/colm_desktop_gui_lib-*.exe)
+            @(Get-ChildItem target/debug -Recurse -File -Filter 'colm_desktop_gui_lib-*.exe')
           if ($executables.Count -lt 2) { throw 'App and unit-test executables are required' }
           foreach ($executable in $executables) {
             $manifest = Join-Path $env:RUNNER_TEMP "$($executable.Name).manifest"
@@ -385,7 +385,7 @@ jobs:
         if: failure() && runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tests = Get-ChildItem gui/src-tauri/target/debug/deps/colm_desktop_gui_lib-*.exe
+          $tests = Get-ChildItem gui/src-tauri/target/debug -Recurse -File -Filter 'colm_desktop_gui_lib-*.exe'
           foreach ($test in $tests) {
             ./scripts/diagnose-windows-loader.ps1 -Executable $test.FullName
           }
