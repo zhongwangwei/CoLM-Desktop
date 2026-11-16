@@ -938,6 +938,7 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
                 .iter()
                 .chain(colm_remote::engine::PACK_EXTRA_PATHS.iter())
                 .copied()
+                .chain([colm_remote::engine::SOURCE_LINKS_FILE])
                 .collect();
             if source.join(".git").exists() {
                 // A checkout's identity covers only the files git would package; ignored build
@@ -1828,6 +1829,54 @@ pub(crate) fn cached_official_cli(opts: &Opts, code: &CodeRef) -> Result<PathBuf
 #[cfg(test)]
 mod artifact_tests {
     use super::*;
+    #[test]
+    fn official_source_copy_keeps_materialized_link_identity() {
+        let root = std::env::temp_dir().join(unique_id());
+        let source = root.join("source");
+        let cache = root.join("cache");
+        let relative = "vendor/CoLM202X/include/Makeoptions";
+        std::fs::create_dir_all(source.join("vendor/CoLM202X/include")).unwrap();
+        std::fs::write(source.join("Cargo.toml"), "[workspace]\n").unwrap();
+        for path in [relative, "vendor/CoLM202X/include/Makeoptions.github"] {
+            std::fs::write(source.join(path), "FF=mpif90\n").unwrap();
+        }
+        std::fs::write(
+            source.join(colm_remote::engine::SOURCE_LINKS_FILE),
+            serde_json::to_vec(&std::collections::BTreeMap::from([(
+                relative,
+                "Makeoptions.github",
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir(&cache).unwrap();
+        for path in colm_remote::engine::SNAPSHOT_PATHS
+            .into_iter()
+            .chain([colm_remote::engine::SOURCE_LINKS_FILE])
+        {
+            if source.join(path).exists() {
+                copy_source_path(&source, Path::new(path), &cache.join(path)).unwrap();
+            }
+        }
+        assert_eq!(
+            crate::remote_cmd::source_content_sha256(&source).unwrap(),
+            crate::remote_cmd::source_content_sha256(&cache).unwrap()
+        );
+        let workspace = colm_workspace::Workspace::create_from_snapshot(
+            &root.join("workspaces"),
+            "portable",
+            &cache,
+            "official",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::remote_cmd::source_content_sha256(&workspace.src()).unwrap(),
+            crate::remote_cmd::source_content_sha256(&source).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn official_source_copy_preserves_the_three_internal_links_without_weakening_program_copies() {

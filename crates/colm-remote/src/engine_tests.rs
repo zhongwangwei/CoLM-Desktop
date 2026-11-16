@@ -166,6 +166,147 @@ fn real_colm_link_layout_has_one_identity_in_checkout_and_extracted_source() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn materialized_source_links_preserve_identity_without_symlink_privileges() {
+    let root = std::env::temp_dir().join(format!("colm-portable-links-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let archive = root.join("source.tar.gz");
+    let encoder = flate2::write::GzEncoder::new(
+        std::fs::File::create(&archive).unwrap(),
+        flate2::Compression::default(),
+    );
+    let mut builder = tar::Builder::new(encoder);
+    let links = [
+        ("vendor/CoLM202X/include/Makeoptions", "Makeoptions.github"),
+        (
+            "vendor/CoLM202X/run/scripts/batch.config",
+            "batch.github.config",
+        ),
+        (
+            "vendor/CoLM202X/run/scripts/machine.config",
+            "machine-github.config",
+        ),
+        ("vendor/CoLM202X/include/chain", "Makeoptions"),
+        ("vendor/CoLM202X/include/A", "Z"),
+        ("vendor/CoLM202X/include/B", "A"),
+        ("vendor/CoLM202X/include/Z", "Makeoptions.github"),
+        ("oracle/link.rs", "../Cargo.toml"),
+    ];
+    // Links precede their targets, as they can in a real package.
+    for (path, target) in links {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        builder
+            .append_link(&mut header, format!("./{path}"), target)
+            .unwrap();
+    }
+    for (path, bytes) in [
+        ("Cargo.toml", "[workspace]\n"),
+        ("Cargo.lock", "lock\n"),
+        ("vendor/CoLM202X/include/Makeoptions.github", "FF=mpif90\n"),
+        (
+            "vendor/CoLM202X/run/scripts/batch.github.config",
+            "queue=short\n",
+        ),
+        (
+            "vendor/CoLM202X/run/scripts/machine-github.config",
+            "compiler=gnu\n",
+        ),
+        ("docs/使用说明.md", "说明\n"),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(bytes.len() as u64);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, bytes.as_bytes())
+            .unwrap();
+    }
+    builder.into_inner().unwrap().finish().unwrap();
+    let extracted = root.join("缓存 with spaces");
+    unpack_source_with_links(&archive, &extracted, true).unwrap();
+    let metadata: std::collections::BTreeMap<String, String> =
+        serde_json::from_slice(&std::fs::read(extracted.join(SOURCE_LINKS_FILE)).unwrap()).unwrap();
+    assert_eq!(metadata[links[0].0], links[0].1);
+    assert!(metadata.keys().all(|path| !path.contains('\\')));
+    for (path, _) in links {
+        assert!(std::fs::symlink_metadata(extracted.join(path))
+            .unwrap()
+            .is_file());
+        source_file_link(&extracted, Path::new(path)).unwrap();
+    }
+    assert_eq!(
+        std::fs::read_to_string(extracted.join("docs/使用说明.md")).unwrap(),
+        "说明\n"
+    );
+    let identity = source_content_sha256(&extracted).unwrap();
+    #[cfg(unix)]
+    {
+        let native = root.join("native");
+        unpack_source_with_links(&archive, &native, false).unwrap();
+        assert_eq!(source_content_sha256(&native).unwrap(), identity);
+    }
+    for args in [["init", "-q"], ["add", "-A"]] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&extracted)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    assert_eq!(source_content_sha256(&extracted).unwrap(), identity);
+    let snapshot = snapshot(&Source::Checkout(extracted.clone())).unwrap();
+    assert_eq!(snapshot.id, tarball_content_id(&archive).unwrap());
+    let repacked = root.join("repacked.tar.gz");
+    pack_source(&snapshot, &repacked).unwrap();
+    assert_eq!(tarball_content_id(&repacked).unwrap(), snapshot.id);
+    let cache = root.join("identity-cache");
+    assert_eq!(
+        cached_source_content_sha256(&extracted, &cache).unwrap(),
+        identity
+    );
+    std::fs::write(extracted.join(links[0].0), "changed\n").unwrap();
+    assert!(cached_source_content_sha256(&extracted, &cache).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn source_extraction_rejects_unsafe_links_before_writing_files() {
+    let root = std::env::temp_dir().join(format!("colm-extract-links-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    for target in ["../../outside", "/outside", "missing", "bad.rs", "."] {
+        let archive = root.join("bad.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "Cargo.toml", &[][..])
+            .unwrap();
+        header.set_entry_type(tar::EntryType::Symlink);
+        builder
+            .append_link(&mut header, "crates/bad.rs", target)
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        let destination = root.join("destination");
+        assert!(
+            unpack_source_with_links(&archive, &destination, true).is_err(),
+            "{target}"
+        );
+        assert!(!destination.exists());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn compile_configuration_content_and_link_selection_both_change_source_identity() {

@@ -937,6 +937,8 @@ fn file_sha256(path: &Path) -> Result<String> {
 
 fn unpack_app_source(tarball: &Path, cache: &Path) -> Result<PathBuf> {
     const MARKER: &str = ".colm-source-sha256";
+    // Re-extract older privileged Windows caches with the portable link representation.
+    let cache = cache.join("v2");
     let digest = file_sha256(tarball)?;
     let dest = cache.join(&digest);
     let complete = |path: &Path| {
@@ -955,7 +957,7 @@ fn unpack_app_source(tarball: &Path, cache: &Path) -> Result<PathBuf> {
         );
         return Ok(dest);
     }
-    std::fs::create_dir_all(cache)?;
+    std::fs::create_dir_all(&cache)?;
     // macOS 的 `SystemTime` 只到微秒：同一进程的几个线程会拿到同一个时间戳，
     // 所以再加一个进程内计数，暂存目录名才不撞（撞了 `create_dir` 报 EEXIST）。
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -969,14 +971,8 @@ fn unpack_app_source(tarball: &Path, cache: &Path) -> Result<PathBuf> {
     ));
     std::fs::create_dir(&staging)?;
     let result = (|| {
-        let status = Command::new("tar")
-            .arg("-xzf")
-            .arg(tarball)
-            .arg("-C")
-            .arg(&staging)
-            .status()
-            .context("cannot run tar")?;
-        ensure!(status.success(), "cannot unpack {}", tarball.display());
+        engine::unpack_source(tarball, &staging)
+            .with_context(|| format!("cannot unpack {}", tarball.display()))?;
         ensure!(
             staging.join("Cargo.lock").is_file() && staging.join("Cargo.toml").is_file(),
             "source package is incomplete"

@@ -60,6 +60,19 @@ lto = "thin"
 codegen-units = 1
 debug = 1
 
+# Match the GUI's debug hash optimization for source and program validation in colm-cli.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.digest]
+opt-level = 3
+
+[profile.dev.package.block-buffer]
+opt-level = 3
+
+[profile.dev.package.crypto-common]
+opt-level = 3
+
 # Preserve lopdf's nesting-depth security fix while supporting engine Rust 1.85.1.
 [patch.crates-io]
 lopdf = { path = "vendor/lopdf" }

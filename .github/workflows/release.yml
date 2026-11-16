@@ -370,6 +370,56 @@ jobs:
           COLM_XERJ_CACHE: ${{ github.workspace }}/.xerj-cache
         run: bash ../../scripts/bundle-release.sh
 
+      - name: Smoke installed Windows model initialization
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Get-ChildItem 'gui/src-tauri/target/release/bundle/nsis/*.exe' | Select-Object -First 1
+          if (!$installer) { throw 'Windows installer is missing' }
+          $smokeRoot = Join-Path $env:RUNNER_TEMP 'CoLM installed smoke'
+          $installDir = Join-Path $smokeRoot 'app'
+          $process = Start-Process $installer.FullName -ArgumentList "/S /D=$installDir" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer exited $($process.ExitCode)" }
+          $script = Join-Path $smokeRoot 'smoke.ps1'
+          @'
+          param([string]$InstallDir, [string]$SmokeRoot)
+          $ErrorActionPreference = 'Stop'
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            throw 'Installed model initialization must run as a standard user'
+          }
+          $cli = Join-Path $InstallDir 'colm-cli.exe'
+          if (!(Test-Path -LiteralPath $cli)) { throw 'Installed CLI is missing' }
+          $env:COLM_RESOURCE_DIR = $InstallDir
+          $env:COLM_ENGINE_CACHE = Join-Path $SmokeRoot 'cache'
+          $env:COLM_HISTORY_DB = Join-Path $SmokeRoot 'history.sqlite3'
+          $modelRoot = Join-Path $SmokeRoot 'models'
+          Set-Location $SmokeRoot
+          $output = & $cli model-list --model-root $modelRoot
+          if ($LASTEXITCODE -ne 0) { throw "Installed model-list exited $LASTEXITCODE" }
+          if (@($output | ConvertFrom-Json).Count -eq 0) { throw 'Installed model-list returned no official model' }
+          # A second startup exercises the published source and frozen model caches.
+          & $cli model-list --model-root $modelRoot
+          if ($LASTEXITCODE -ne 0) { throw "Cached model-list exited $LASTEXITCODE" }
+          '@ | Set-Content -LiteralPath $script
+          # Hosted Windows runners disable UAC, so a limited administrator token is insufficient.
+          $user = 'colm-smoke'
+          $password = ConvertTo-SecureString ([guid]::NewGuid().ToString('N') + 'aA1!') -AsPlainText -Force
+          New-LocalUser -Name $user -Password $password | Out-Null
+          try {
+            Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $user
+            & icacls $smokeRoot /grant "${user}:(OI)(CI)M" /T | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot grant the smoke user access to installed files' }
+            $credential = [pscredential]::new("$env:COMPUTERNAME\$user", $password)
+            $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$script`" -InstallDir `"$installDir`" -SmokeRoot `"$smokeRoot`""
+            $process = Start-Process (Get-Command pwsh).Source -ArgumentList $arguments -Credential $credential -LoadUserProfile -Wait -PassThru -WorkingDirectory $smokeRoot -RedirectStandardOutput "$smokeRoot/stdout.log" -RedirectStandardError "$smokeRoot/stderr.log"
+            Get-Content "$smokeRoot/stdout.log", "$smokeRoot/stderr.log"
+            if ($process.ExitCode -ne 0) { throw "Standard-user model initialization exited $($process.ExitCode)" }
+          } finally {
+            Remove-LocalUser -Name $user
+          }
+
       # 装出来的东西必须自带内核，否则这条流水线就白跑了。
       # macOS 上能直接查；另外两个平台的目录结构不同，只查产物存在。
       - name: The installer carries its own kernels

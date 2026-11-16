@@ -44,6 +44,43 @@ pub const SNAPSHOT_PATHS: [&str; 11] = [
 /// （`search_docs`）与读源码（`--source app`）；远程编译用不着，不进快照标识。
 pub const PACK_EXTRA_PATHS: [&str; 1] = ["docs"];
 
+/// Logical file links materialized by Windows extraction, kept when freezing/copying sources.
+pub const SOURCE_LINKS_FILE: &str = ".colm-source-links.json";
+
+fn source_links(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, PathBuf>> {
+    let path = root.join(SOURCE_LINKS_FILE);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        metadata.is_file(),
+        "source link metadata must be a regular file"
+    );
+    let links: std::collections::BTreeMap<PathBuf, PathBuf> =
+        serde_json::from_slice(&std::fs::read(path)?)?;
+    for (path, target) in &links {
+        ensure!(
+            !path.as_os_str().is_empty()
+                && path
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+                && path != Path::new(SOURCE_LINKS_FILE),
+            "invalid materialized source link path"
+        );
+        ensure!(
+            !target.as_os_str().is_empty()
+                && !target.components().any(|part| matches!(
+                    part,
+                    std::path::Component::Prefix(_) | std::path::Component::RootDir
+                )),
+            "source link must be relative"
+        );
+    }
+    Ok(links)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFileLink {
     pub target: PathBuf,
@@ -52,6 +89,25 @@ pub struct SourceFileLink {
 
 /// Source links may select another source file; they must never import files from outside.
 pub fn source_file_link(root: &Path, relative: &Path) -> Result<SourceFileLink> {
+    let links = source_links(root)?;
+    let link = resolve_source_file_link(root, relative, &links)?;
+    if links.contains_key(relative) {
+        let path = root.join(relative);
+        ensure!(
+            std::fs::symlink_metadata(&path)?.is_file()
+                && std::fs::read(&path)? == std::fs::read(&link.resolved_file)?,
+            "materialized source link differs from its target: {}",
+            path.display()
+        );
+    }
+    Ok(link)
+}
+
+fn resolve_source_file_link(
+    root: &Path,
+    relative: &Path,
+    links: &std::collections::BTreeMap<PathBuf, PathBuf>,
+) -> Result<SourceFileLink> {
     ensure!(
         relative
             .components()
@@ -60,7 +116,10 @@ pub fn source_file_link(root: &Path, relative: &Path) -> Result<SourceFileLink> 
     );
     let canonical_root = root.canonicalize()?;
     let path = root.join(relative);
-    let target = std::fs::read_link(&path)?;
+    let target = match links.get(relative) {
+        Some(target) => target.clone(),
+        None => std::fs::read_link(&path)?,
+    };
     ensure!(
         !target.is_absolute()
             && !target.components().any(|part| matches!(
@@ -68,15 +127,6 @@ pub fn source_file_link(root: &Path, relative: &Path) -> Result<SourceFileLink> 
                 std::path::Component::Prefix(_) | std::path::Component::RootDir
             )),
         "source link must be relative: {}",
-        path.display()
-    );
-    let resolved_file = path
-        .canonicalize()
-        .with_context(|| format!("source link is broken or cyclic: {}", path.display()))?;
-    ensure!(
-        resolved_file.starts_with(&canonical_root)
-            && std::fs::symlink_metadata(&resolved_file)?.is_file(),
-        "source link must resolve to an internal regular file: {}",
         path.display()
     );
     // Inspect every link in the resolution chain, including links used as path components.
@@ -91,10 +141,17 @@ pub fn source_file_link(root: &Path, relative: &Path) -> Result<SourceFileLink> 
         let mut followed = None;
         for (index, part) in parts.iter().enumerate() {
             current.push(part);
-            let metadata = std::fs::symlink_metadata(&current)?;
-            if metadata.file_type().is_symlink() {
+            let logical_target = links.get(current.strip_prefix(&canonical_root)?);
+            if logical_target.is_some()
+                || std::fs::symlink_metadata(&current)?
+                    .file_type()
+                    .is_symlink()
+            {
                 ensure!(seen.insert(current.clone()), "source link cycle");
-                let next = std::fs::read_link(&current)?;
+                let next = match logical_target {
+                    Some(target) => target.clone(),
+                    None => std::fs::read_link(&current)?,
+                };
                 ensure!(
                     !next.is_absolute()
                         && !next.components().any(|part| matches!(
@@ -104,7 +161,7 @@ pub fn source_file_link(root: &Path, relative: &Path) -> Result<SourceFileLink> 
                     "absolute source link in resolution chain"
                 );
                 ensure!(
-                    std::fs::metadata(&current)?.is_file(),
+                    index + 1 == parts.len(),
                     "source directory links are not supported"
                 );
                 let mut next_path = current
@@ -121,13 +178,21 @@ pub fn source_file_link(root: &Path, relative: &Path) -> Result<SourceFileLink> 
         }
         match followed {
             Some(next) => unresolved = next,
-            None => break,
+            None => {
+                let resolved_file = current.canonicalize()?;
+                ensure!(
+                    resolved_file.starts_with(&canonical_root)
+                        && std::fs::symlink_metadata(&resolved_file)?.is_file(),
+                    "source link must resolve to an internal regular file: {}",
+                    path.display()
+                );
+                return Ok(SourceFileLink {
+                    target,
+                    resolved_file,
+                });
+            }
         }
     }
-    Ok(SourceFileLink {
-        target,
-        resolved_file,
-    })
 }
 
 fn normalize_inside(root: &Path, path: &Path) -> Result<PathBuf> {
@@ -182,14 +247,19 @@ fn hash_source_entry(
 /// Source identity excludes Git metadata, bulk datasets and generated build/cache directories.
 /// The same relative-path/byte stream is used for checkouts and extracted packages.
 pub fn source_content_sha256(root: &Path) -> Result<String> {
-    fn collect(root: &Path, relative: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    fn collect(
+        root: &Path,
+        relative: &Path,
+        links: &std::collections::BTreeMap<PathBuf, PathBuf>,
+        files: &mut Vec<PathBuf>,
+    ) -> Result<()> {
         let path = root.join(relative);
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(meta) => meta,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         };
-        if meta.file_type().is_symlink() {
+        if meta.file_type().is_symlink() || links.contains_key(relative) {
             source_file_link(root, relative)?;
             files.push(relative.to_owned());
         } else if meta.is_dir() {
@@ -202,7 +272,7 @@ pub fn source_content_sha256(root: &Path) -> Result<String> {
                 ) {
                     continue;
                 }
-                collect(root, &relative.join(name), files)?;
+                collect(root, &relative.join(name), links, files)?;
             }
         } else if meta.is_file() {
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -258,8 +328,9 @@ pub fn source_content_sha256(root: &Path) -> Result<String> {
         "source has no Cargo.toml"
     );
     let mut files = Vec::new();
+    let links = source_links(root)?;
     for path in SNAPSHOT_PATHS {
-        collect(root, Path::new(path), &mut files)?;
+        collect(root, Path::new(path), &links, &mut files)?;
     }
     if root.join(".git").exists() {
         // A checkout and its package must bind the same files, excluding ignored scratch output.
@@ -271,7 +342,9 @@ pub fn source_content_sha256(root: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     for file in files {
         let path = root.join(&file);
-        let link = if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+        let link = if std::fs::symlink_metadata(&path)?.file_type().is_symlink()
+            || links.contains_key(&file)
+        {
             Some(source_file_link(root, &file)?)
         } else {
             None
@@ -471,9 +544,12 @@ pub fn git_files(repo: &Path, paths: &[&str]) -> Result<Vec<String>> {
 /// 按内容算快照标识：每个文件的路径与字节依次进哈希。
 pub fn content_id(base: &Path, files: &[String]) -> Result<String> {
     let mut hasher = Sha256::new();
+    let links = source_links(base)?;
     for file in files {
         let path = base.join(file);
-        let link = if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+        let link = if std::fs::symlink_metadata(&path)?.file_type().is_symlink()
+            || links.contains_key(Path::new(file))
+        {
             Some(source_file_link(base, Path::new(file))?)
         } else {
             None
@@ -687,7 +763,13 @@ pub fn upload(ssh: &Ssh, root: &str, snapshot: &Snapshot) -> Result<bool> {
         .to_owned();
     let result: Result<()> = (|| {
         match &snapshot.source {
-            Source::Checkout(repo) => ssh.upload_list(repo, &snapshot.files, &stage)?,
+            Source::Checkout(repo) => {
+                let mut files = snapshot.files.clone();
+                if !source_links(repo)?.is_empty() {
+                    files.push(SOURCE_LINKS_FILE.into());
+                }
+                ssh.upload_list(repo, &files, &stage)?;
+            }
             Source::Tarball(path) => ssh.upload_tarball(path, &stage)?,
         }
         ssh.run_ok(&publish_source_script(&stage, &dest))?;
@@ -1013,12 +1095,95 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
     archive.follow_symlinks(false);
     // 源码读取器接受普通文件和符号链接，稀疏输入也必须写成普通文件条目。
     archive.sparse(false);
+    let links = source_links(repo)?;
     for path in files {
+        if links.contains_key(Path::new(&path)) {
+            let link = source_file_link(repo, Path::new(&path))?;
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_mode(0o777);
+            header.set_size(0);
+            archive.append_link(&mut header, &path, &link.target)?;
+            continue;
+        }
         archive
             .append_path_with_name(repo.join(&path), &path)
             .with_context(|| format!("cannot pack source file {path}"))?;
     }
     archive.into_inner()?.finish()?;
+    Ok(())
+}
+
+/// Extract validated sources using Rust I/O, without requiring Windows symlink privileges.
+pub fn unpack_source(source: &Path, destination: &Path) -> Result<()> {
+    unpack_source_with_links(source, destination, cfg!(windows))
+}
+
+fn unpack_source_with_links(source: &Path, destination: &Path, materialize: bool) -> Result<()> {
+    // Validate all paths and link chains before writing any archive entries.
+    tarball_content_id(source)?;
+    std::fs::create_dir_all(destination)?;
+    let file = std::fs::File::open(source)?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut links = std::collections::BTreeMap::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path: PathBuf = entry
+            .path()?
+            .components()
+            .filter(|part| !matches!(part, std::path::Component::CurDir))
+            .collect();
+        ensure!(
+            path != Path::new(SOURCE_LINKS_FILE),
+            "reserved source link metadata path"
+        );
+        if entry.header().entry_type().is_symlink() {
+            links.insert(
+                path,
+                entry
+                    .link_name()?
+                    .context("missing source link target")?
+                    .into_owned(),
+            );
+        } else {
+            ensure!(
+                entry.unpack_in(destination)?,
+                "source archive escaped destination"
+            );
+        }
+    }
+    for path in links.keys() {
+        let output = destination.join(path);
+        std::fs::create_dir_all(output.parent().context("source link has no parent")?)?;
+    }
+    let resolved = links
+        .keys()
+        .map(|path| resolve_source_file_link(destination, path, &links))
+        .collect::<Result<Vec<_>>>()?;
+    for ((path, target), link) in links.iter().zip(resolved) {
+        let output = destination.join(path);
+        if materialize {
+            std::fs::copy(link.resolved_file, output)?;
+        } else {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, output)?;
+            #[cfg(not(unix))]
+            bail!(
+                "native source links are unavailable on this platform: {}",
+                target.display()
+            );
+        }
+    }
+    if materialize && !links.is_empty() {
+        let portable = links
+            .iter()
+            .map(|(path, target)| Ok((logical_path(path)?, logical_path(target)?)))
+            .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+        std::fs::write(
+            destination.join(SOURCE_LINKS_FILE),
+            serde_json::to_vec(&portable)?,
+        )?;
+    }
     Ok(())
 }
 

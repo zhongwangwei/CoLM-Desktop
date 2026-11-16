@@ -447,13 +447,27 @@ test('a startup command that never answers times out instead of spinning forever
   );
 });
 
+test('startup reports model versions while their initialization is still pending', async () => {
+  let release!: (value: { version: VersionRef }[]) => void;
+  const list = new Promise<{ version: VersionRef }[]>((resolve) => {
+    release = resolve;
+  });
+  const app = booting(async () => ({ removed: [] }), '', '', { modelList: () => list });
+  const startup = app.boot();
+  for (let i = 0; i < 5; i++) await settle();
+  assert.equal((app.state.startup as { stage: string }).stage, 'versions');
+  release([{ version: { id: 'official', revision: 1 } }]);
+  await startup;
+  assert.equal(app.state.startup, undefined);
+});
+
 test('a failed startup stage is kept on the cover state, and retrying can recover', async () => {
   const app = booting(async () => ({ removed: [] }), 'model_list');
   await app.boot();
   await settle();
   const failed = app.state.startup as { phase: string; stage: string; error: string };
   assert.equal(failed.phase, 'failed');
-  assert.equal(failed.stage, 'kernels');
+  assert.equal(failed.stage, 'versions');
   assert.match(failed.error, /model versions/i);
   assert.doesNotMatch(
     failed.error,

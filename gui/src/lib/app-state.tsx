@@ -580,12 +580,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
             gotKernels = true;
             // 过期代次连内核目录也不能写回：重试后这一代可能已经选到别的内核目录，旧结果不该
             // 把界面指回一个不再使用的目录。当前代次晚到的结果照常接上，慢盘首次启动靠它完成。
-            if (generation === bootEpoch.current)
-              update({
+            if (generation === bootEpoch.current) {
+              if (!gotVersions) stage = 'versions';
+              update((old) => ({
                 kernels,
                 kernelDir:
                   kernels.find((k) => k.preset === 'default')?.dir ?? kernels[0]?.dir ?? null,
-              });
+                ...(old.startup?.phase === 'booting' && !gotVersions
+                  ? { startup: { ...old.startup, stage } }
+                  : {}),
+              }));
+            }
             settle();
           },
           () => {},
