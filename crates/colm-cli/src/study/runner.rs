@@ -6344,6 +6344,7 @@ pub(crate) fn save_version(
             end: crate::unix_date(p.1),
         };
         store.create_draft(colm_model::ModelDraft {
+            code_editable: None,
             id: id.clone(),
             name: opts.need_str("--name")?,
             note,

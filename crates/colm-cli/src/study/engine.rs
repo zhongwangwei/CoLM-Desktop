@@ -1451,6 +1451,7 @@ mod tests {
             .clone();
         store
             .create_draft(colm_model::ModelDraft {
+                code_editable: None,
                 id: "selected".into(),
                 name: "Selected".into(),
                 note: "Verify the selected parameter baseline is frozen before sampling".into(),

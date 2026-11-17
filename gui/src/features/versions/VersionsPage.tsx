@@ -628,7 +628,12 @@ export default function VersionsPage() {
     if (!token.active || token !== epoch.current || draftNow.current?.id !== current.id) return;
     const changed = dirtyNow.current;
     const merged = changed
-      ? { ...draftNow.current, code: next.code, generation: next.generation }
+      ? {
+          ...draftNow.current,
+          code: next.code,
+          code_editable: next.code_editable,
+          generation: next.generation,
+        }
       : next;
     draftNow.current = merged;
     setDraft(merged);
@@ -663,7 +668,7 @@ export default function VersionsPage() {
   async function adoptWorkspace(name: string) {
     assertSourceSaved();
     if (!draft || !name.trim()) return;
-    await save({ ...draft, code: { ...draft.code, workspace: name.trim() } });
+    await save({ ...draft, code_editable: true, code: { ...draft.code, workspace: name.trim() } });
   }
   async function loadDraft(id: string) {
     if (dirty) throw new Error(t('请先保存草稿', 'Save the current draft first'));
@@ -1043,6 +1048,16 @@ export default function VersionsPage() {
     const found = state.versions.find((v) => keyOf(v.version) === keyOf(ref));
     return found ? `${found.name} · r${found.version.revision}` : `${ref.id} r${ref.revision}`;
   };
+  const parentCode =
+    draft && state.versions.find((v) => keyOf(v.version) === keyOf(draft.parent))?.code;
+  const codeEditable =
+    !!draft &&
+    (draft.code_editable ??
+      (!!parentCode &&
+        (draft.code.kind !== parentCode.kind ||
+          draft.code.workspace !== parentCode.workspace ||
+          draft.code.commit !== parentCode.commit ||
+          draft.code.source_sha256 !== parentCode.source_sha256)));
   // 派生链：官方 r101 › 根系方案 r1 › 根系方案调参 r2。
   const backToResearch = !!draft && draft.id === researchDraft;
   const lineage = (() => {
@@ -1698,7 +1713,7 @@ export default function VersionsPage() {
             })()}
           </div>
           <div hidden={tab !== 'code'} className="versions-panel">
-            {shown.code.workspace && draft ? (
+            {shown.code.workspace && draft && codeEditable ? (
               <CodeWorkspace
                 disabled={busy || codeBusy || dirty}
                 key={shown.code.workspace}

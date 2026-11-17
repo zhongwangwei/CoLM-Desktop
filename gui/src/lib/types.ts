@@ -36,6 +36,7 @@ export type Applicability = {
   validation?: { start: string; end: string } | null;
 };
 export type ModelDraft = {
+  code_editable?: boolean | null;
   id: string;
   name: string;
   note: string;

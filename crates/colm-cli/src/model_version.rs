@@ -158,6 +158,7 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
                 }
             };
             let draft = ModelDraft {
+                code_editable: Some(input.branch_code || input.workspace.is_some()),
                 id,
                 name: input.name,
                 note: input.note,
@@ -174,7 +175,22 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
         "model-draft" => serde_json::to_value(store.draft(&opts.need_str("--model-id")?)?)?,
         "model-save-draft" => {
             let mut draft: ModelDraft = request(opts)?;
-            draft.code = code(opts, draft.code.workspace.as_deref())?;
+            let saved = store.draft(&draft.id)?;
+            let selected_workspace = draft.code.workspace != saved.code.workspace;
+            draft.code_editable = Some(
+                selected_workspace
+                    || draft_code_editable(&store, &saved)?
+                    || (draft.code_editable == Some(true) && saved.code_editable != Some(true)),
+            );
+            if draft.code_editable == Some(true) {
+                ensure!(
+                    draft.code.workspace.is_some(),
+                    "editable code needs a workspace"
+                );
+                draft.code = code(opts, draft.code.workspace.as_deref())?;
+            } else {
+                draft.code = saved.code;
+            }
             serde_json::to_value(
                 store.save_draft(draft, opts.need_str("--expected-generation")?.parse()?)?,
             )?
@@ -194,13 +210,8 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
         "model-freeze" => {
             let id = opts.need_str("--model-id")?;
             let mut draft = store.draft(&id)?;
-            if let Some(workspace) = draft.code.workspace.as_deref() {
-                let actual = code(opts, Some(workspace))?;
-                if actual != draft.code {
-                    let generation = draft.generation;
-                    draft.code = actual;
-                    draft = store.save_draft(draft, generation)?;
-                }
+            if draft_code_editable(&store, &draft)? {
+                draft.code = code(opts, draft.code.workspace.as_deref())?;
             }
             if let Some(check) = freeze_check(opts, &draft)? {
                 let blocking: Vec<String> = check
@@ -231,7 +242,7 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
                 }
             };
             let keep_draft = opts.get("--keep-draft").is_some_and(|v| v == "1");
-            serde_json::to_value(store.freeze_keeping(&id, &root, keep_draft)?)?
+            serde_json::to_value(store.freeze_draft_keeping(draft, &root, keep_draft)?)?
         }
         "model-migrate-case" => {
             let source = code(
@@ -905,6 +916,8 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
                 .args([
                     "-c",
                     "core.longpaths=true",
+                    "-c",
+                    "core.autocrlf=false",
                     "clone",
                     "--local",
                     "--no-hardlinks",
@@ -919,6 +932,7 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
                 "cannot freeze source checkout: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             );
+            colm_workspace::layout::preserve_checkout_bytes(&ws.src(), &target.join("src"))?;
             for folder in ["bin", "kernels"] {
                 if ws.dir.join(folder).exists() {
                     copy_tree(&ws.dir.join(folder), &target.join(folder))?;
@@ -1065,7 +1079,10 @@ pub(crate) fn cached_options(opts: &Opts, code: &CodeRef) -> Result<Option<Opts>
     // （2026-10-22）。校验通过后记下整个目录的元数据指纹，指纹没变就不再重做；改动过任何文件
     // （大小或修改时间变了）就照旧全量校验。只防得住意外损坏和普通改动，防不住刻意保留大小与时间戳的篡改。
     const VERIFIED: &str = ".verified-fingerprint";
-    let fingerprint = colm_remote::engine::tree_fingerprint(&dest, &[VERIFIED])?;
+    let fingerprint = format!(
+        "verified-v2:{}",
+        colm_remote::engine::tree_fingerprint(&dest, &[VERIFIED])?
+    );
     let verified =
         std::fs::read_to_string(dest.join(VERIFIED)).is_ok_and(|seen| seen.trim() == fingerprint);
     if !verified {
@@ -1380,6 +1397,7 @@ mod tests {
             value
         };
         let mut draft = ModelDraft {
+            code_editable: None,
             id: "model-1".into(),
             name: "d".into(),
             note: String::new(),
@@ -1968,19 +1986,18 @@ mod artifact_tests {
     }
 }
 
+fn draft_code_editable(store: &Registry, draft: &ModelDraft) -> Result<bool> {
+    Ok(draft
+        .code_editable
+        .unwrap_or(draft.code != store.get(&draft.parent)?.code))
+}
+
 /// 用自己代码工作区的草稿在冻结前要过的检查（[`colm_workspace::version::freeze_check`]）；沿用官方
 /// 代码的草稿没有。核对的 namelist 变量是草稿里改了值的参数与物理开关。
 fn freeze_check(
     opts: &Opts,
     draft: &ModelDraft,
 ) -> Result<Option<colm_workspace::version::FreezeCheck>> {
-    let Some(name) = draft.code.workspace.as_deref() else {
-        return Ok(None);
-    };
-    let workspace = colm_workspace::Workspace::open(
-        &crate::provenance::workspace_root(opts.get("--workspace-root")),
-        name,
-    )?;
     let mut keys: Vec<String> = draft
         .overlay
         .parameters
@@ -1991,6 +2008,39 @@ fn freeze_check(
         .collect();
     keys.sort();
     keys.dedup();
+    if !draft_code_editable(&registry(opts)?, draft)? {
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        verify_code(opts, &draft.code)?;
+        let source = match &draft.code.workspace {
+            Some(name) => cache_dir(opts, &draft.code)?
+                .join("workspaces")
+                .join(name)
+                .join("src"),
+            None => cache_dir(opts, &draft.code)?.join("source"),
+        };
+        ensure!(
+            source.is_dir(),
+            "frozen source is unavailable for parameter validation"
+        );
+        let item = colm_workspace::version::parameter_check(&source, &keys)?;
+        return Ok(Some(colm_workspace::version::FreezeCheck {
+            ready: !item.blocking,
+            touches: colm_workspace::version::Touches {
+                engine: false,
+                kernel: false,
+            },
+            items: vec![item],
+        }));
+    }
+    let Some(name) = draft.code.workspace.as_deref() else {
+        return Ok(None);
+    };
+    let workspace = colm_workspace::Workspace::open(
+        &crate::provenance::workspace_root(opts.get("--workspace-root")),
+        name,
+    )?;
     Ok(Some(colm_workspace::version::freeze_check(
         &workspace, &keys,
     )?))
@@ -2078,7 +2128,7 @@ fn branch_draft_code(store: &Registry, opts: &Opts) -> Result<serde_json::Value>
         "model draft changed; reload it before copying its code"
     );
     ensure!(
-        draft.code.workspace.is_none(),
+        !draft_code_editable(store, &draft)?,
         "this draft already has its own code"
     );
     let parent = store.get(&draft.parent)?;
@@ -2087,6 +2137,7 @@ fn branch_draft_code(store: &Registry, opts: &Opts) -> Result<serde_json::Value>
         "this draft does not use its parent's code; choose its code workspace instead"
     );
     draft.code = branch_parent_code(opts, &parent, &draft.id)?;
+    draft.code_editable = Some(true);
     let generation = draft.generation;
     Ok(serde_json::to_value(store.save_draft(draft, generation)?)?)
 }
@@ -3229,6 +3280,7 @@ mod draft_asset_tests {
         };
         let draft = store
             .create_draft(ModelDraft {
+                code_editable: None,
                 id: "custom".into(),
                 name: "Custom".into(),
                 note: "Process import".into(),
@@ -4062,6 +4114,10 @@ mod verified_cache_tests {
         // 记住之后照样可用（走的是不重算的那条路）。
         cached_options(&opts, &code).unwrap();
         std::fs::write(&program, b"tampered program!").unwrap();
+        // A legacy metadata memo must not bypass the upgraded verifier.
+        let old_memo =
+            colm_remote::engine::tree_fingerprint(&dest, &[".verified-fingerprint"]).unwrap();
+        std::fs::write(dest.join(".verified-fingerprint"), old_memo).unwrap();
         let error = match cached_options(&opts, &code) {
             Ok(_) => panic!("a changed program must be rejected"),
             Err(error) => error.to_string(),
@@ -4146,6 +4202,7 @@ mod study_import_tests {
         let parent = store.install_official(code.clone()).unwrap();
         let draft = store
             .create_draft(ModelDraft {
+                code_editable: None,
                 id: "custom".into(),
                 name: "Custom".into(),
                 note: "Study import".into(),
@@ -4628,6 +4685,203 @@ mod study_import_tests {
         let draft = fixture.store.draft("custom").unwrap();
         assert_eq!(draft.overlay.parameters.len(), 1);
         assert!(!fixture.study.join("run.lock").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod inherited_draft_tests {
+    use super::*;
+    #[test]
+    fn saving_an_inherited_official_draft_keeps_its_frozen_code() {
+        let root = std::env::temp_dir().join(unique_id());
+        let mut opts = Opts {
+            positional: vec![],
+            flags: vec![("--model-root".into(), root.to_string_lossy().into_owned())],
+        };
+        let store = registry(&opts).unwrap();
+        let code = CodeRef {
+            kind: CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        };
+        let parent = store.install_official(code.clone()).unwrap();
+        let draft: ModelDraft = serde_json::from_value(serde_json::json!({
+            "id":"inherited", "name":"Inherited", "note":"keep frozen source", "parent":parent.version,
+            "code":code, "overlay":parent.overlay, "generation":0
+        })).unwrap();
+        let draft = store.create_draft(draft).unwrap();
+        opts.flags
+            .push(("--json".into(), serde_json::to_string(&draft).unwrap()));
+        opts.flags
+            .push(("--expected-generation".into(), draft.generation.to_string()));
+        cmd("model-save-draft", &opts).unwrap();
+        assert_eq!(store.draft("inherited").unwrap().code, code);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    fn workspace_fixture() -> (
+        PathBuf,
+        Opts,
+        Registry,
+        colm_workspace::Workspace,
+        ModelDraft,
+    ) {
+        let root = std::env::temp_dir().join(unique_id());
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::create_dir_all(source.join("vendor/CoLM202X/share")).unwrap();
+        std::fs::write(
+            source.join("vendor/CoLM202X/share/MOD_Namelist.F90"),
+            "NAMELIST /nl_colm/ DEF_PRESENT\n",
+        )
+        .unwrap();
+        colm_workspace::git::run(&source, &["init", "-q"]).unwrap();
+        colm_workspace::git::set_identity(&source).unwrap();
+        colm_workspace::git::run(&source, &["add", "-A"]).unwrap();
+        colm_workspace::git::run(&source, &["commit", "-qm", "base"]).unwrap();
+        let opts = Opts {
+            positional: vec![],
+            flags: vec![
+                (
+                    "--model-root".into(),
+                    root.join("models").to_string_lossy().into_owned(),
+                ),
+                (
+                    "--workspace-root".into(),
+                    root.join("ws").to_string_lossy().into_owned(),
+                ),
+            ],
+        };
+        let ws = colm_workspace::Workspace::create(
+            &root.join("ws"),
+            "editable",
+            source.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        let store = registry(&opts).unwrap();
+        let parent = store
+            .install_official(CodeRef {
+                kind: CodeKind::Official,
+                workspace: None,
+                commit: None,
+                source_sha256: "a".repeat(64),
+            })
+            .unwrap();
+        let draft = store.create_draft(serde_json::from_value(serde_json::json!({
+            "id":"editable", "name":"Editable", "note":"test editable source", "parent":parent.version,
+            "code":code(&opts, Some("editable")).unwrap(), "code_editable":true,
+            "overlay":parent.overlay, "generation":0
+        })).unwrap()).unwrap();
+        (root, opts, store, ws, draft)
+    }
+
+    #[test]
+    fn failed_freeze_does_not_refresh_the_persisted_draft() {
+        let (root, mut opts, store, ws, before) = workspace_fixture();
+        std::fs::write(ws.src().join("Cargo.toml"), "[workspace]\n# newer\n").unwrap();
+        colm_workspace::git::run(&ws.src(), &["add", "-A"]).unwrap();
+        colm_workspace::git::run(&ws.src(), &["commit", "-qm", "newer"]).unwrap();
+        opts.flags.push(("--model-id".into(), before.id.clone()));
+        let error = cmd("model-freeze", &opts).unwrap_err().to_string();
+        assert!(error.contains("cannot be frozen yet"), "{error}");
+        assert_eq!(store.draft(&before.id).unwrap(), before);
+        // An ordinary save still follows an explicitly selected live workspace.
+        let mut request = before.clone();
+        request.code_editable = Some(false); // Stale/misleading client metadata cannot downgrade ownership.
+        opts.flags
+            .push(("--json".into(), serde_json::to_string(&request).unwrap()));
+        opts.flags.push((
+            "--expected-generation".into(),
+            before.generation.to_string(),
+        ));
+        cmd("model-save-draft", &opts).unwrap();
+        let saved = store.draft(&before.id).unwrap();
+        assert_ne!(saved.code, before.code);
+        assert_eq!(saved.code_editable, Some(true));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inherited_workspace_uses_frozen_cache_after_original_is_deleted() {
+        let (root, mut opts, store, ws, base) = workspace_fixture();
+        let parent = store.freeze(&base.id, &root).unwrap();
+        let dest = cache_dir(&opts, &parent.code).unwrap();
+        copy_tree(&ws.dir, &dest.join("workspaces/editable")).unwrap();
+        std::fs::write(
+            dest.join("code.json"),
+            serde_json::to_vec(&parent.code).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dest.join("artifacts.json"), "{}").unwrap();
+        std::fs::remove_dir_all(ws.dir).unwrap();
+        let inherited: ModelDraft = serde_json::from_value(serde_json::json!({
+            "id":"inherited", "name":"Inherited", "note":"retain frozen workspace", "parent":parent.version,
+            "code":parent.code, "overlay":parent.overlay, "generation":0
+        })).unwrap();
+        let inherited = store.create_draft(inherited).unwrap();
+        assert!(freeze_check(&opts, &inherited).unwrap().is_none());
+        let mut unsupported = inherited.clone();
+        unsupported.id = "unsupported".into();
+        unsupported
+            .overlay
+            .physics
+            .insert("DEF_TUNING_CSOILC".into(), "0.006".into());
+        let unsupported = store.create_draft(unsupported).unwrap();
+        let check = freeze_check(&opts, &unsupported).unwrap().unwrap();
+        assert!(!check.ready);
+        assert_eq!(check.items[0].code, "parameters");
+        assert!(check.items[0].message.contains("DEF_TUNING_CSOILC"));
+        let fail_opts = Opts {
+            positional: vec![],
+            flags: opts
+                .flags
+                .iter()
+                .cloned()
+                .chain([("--model-id".into(), "unsupported".into())])
+                .collect(),
+        };
+        assert!(cmd("model-freeze", &fail_opts)
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be frozen yet"));
+        assert_eq!(store.draft("unsupported").unwrap(), unsupported);
+        opts.flags
+            .push(("--json".into(), serde_json::to_string(&inherited).unwrap()));
+        opts.flags.push((
+            "--expected-generation".into(),
+            inherited.generation.to_string(),
+        ));
+        cmd("model-save-draft", &opts).unwrap();
+        assert_eq!(store.draft("inherited").unwrap().code, parent.code);
+        opts.flags.push(("--model-id".into(), "inherited".into()));
+        cmd("model-freeze", &opts).unwrap();
+        // Copying inherited workspace code remains available, too.
+        let inherited = store.create_draft(serde_json::from_value(serde_json::json!({
+            "id":"copy", "name":"Copy", "note":"copy frozen workspace", "parent":parent.version,
+            "code":parent.code, "overlay":parent.overlay, "generation":0
+        })).unwrap()).unwrap();
+        let branch_opts = Opts {
+            positional: vec![],
+            flags: opts
+                .flags
+                .iter()
+                .filter(|(key, _)| key != "--model-id" && key != "--expected-generation")
+                .cloned()
+                .chain([
+                    ("--model-id".into(), "copy".into()),
+                    (
+                        "--expected-generation".into(),
+                        inherited.generation.to_string(),
+                    ),
+                ])
+                .collect(),
+        };
+        let branched = branch_draft_code(&store, &branch_opts).unwrap();
+        assert_eq!(branched["code_editable"], true);
+        assert_ne!(branched["code"]["workspace"], "editable");
         std::fs::remove_dir_all(root).unwrap();
     }
 }

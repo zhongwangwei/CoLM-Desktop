@@ -43,6 +43,7 @@ fn code() -> CodeRef {
 }
 fn draft(parent: VersionRef) -> ModelDraft {
     ModelDraft {
+        code_editable: None,
         id: "experiment".into(),
         name: "Experiment".into(),
         note: "Evaluate coefficient sensitivity".into(),
@@ -2427,4 +2428,30 @@ fn freezing_an_explicit_legacy_override_does_not_reuse_official_and_still_migrat
         Some(-1.0),
         "未编辑的旧算例继续应用历史模型覆盖"
     );
+}
+
+#[test]
+fn freezing_a_refreshed_candidate_is_atomic_for_draft_state() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let parent = reg.install_official(code()).unwrap();
+    let original = reg.create_draft(draft(parent.version)).unwrap();
+    let mut candidate = original.clone();
+    candidate.code.source_sha256 = "b".repeat(64);
+    candidate.note = "refreshed candidate".into();
+    // Publication cannot replace a file where the revision directory must be.
+    fs::write(reg.root().join("versions").join(&candidate.id), "blocked").unwrap();
+    assert!(reg
+        .freeze_draft_keeping(candidate.clone(), &tmp.0, true)
+        .is_err());
+    assert_eq!(reg.draft(&original.id).unwrap(), original);
+    fs::remove_file(reg.root().join("versions").join(&candidate.id)).unwrap();
+    let frozen = reg
+        .freeze_draft_keeping(candidate.clone(), &tmp.0, true)
+        .unwrap();
+    assert_eq!(frozen.code, candidate.code);
+    assert_eq!(reg.draft(&original.id).unwrap(), original);
+    reg.save_draft(original.clone(), original.generation)
+        .unwrap();
+    assert!(reg.freeze_draft_keeping(candidate, &tmp.0, true).is_err());
 }

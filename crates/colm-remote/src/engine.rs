@@ -26,9 +26,10 @@ pub const BINARIES: [(&str, &str); 4] = [
 
 /// 快照包含的仓库路径：编译远程引擎要用的（整个 workspace 加编译期读入的 `vendor`）。快照标识只按这些文件算，
 /// 所以只改文档不会让服务器重新上传、重新编译。
-pub const SNAPSHOT_PATHS: [&str; 11] = [
+pub const SNAPSHOT_PATHS: [&str; 12] = [
     "Cargo.toml",
     "Cargo.lock",
+    ".gitattributes",
     "crates",
     "oracle",
     "xtask",
@@ -200,32 +201,28 @@ pub fn resolve_source_file_link(
     }
 }
 
+// Path::components erases `.` and trailing separators, which require directory traversal.
+fn raw_relative_parts(path: &Path) -> Result<Vec<&str>> {
+    Ok(path
+        .to_str()
+        .context("source link target is not UTF-8")?
+        .split(|c| c == '/' || (cfg!(windows) && c == '\\'))
+        .collect())
+}
+
 fn normalize_inside(root: &Path, path: &Path) -> Result<PathBuf> {
     let mut normalized = PathBuf::new();
-    for part in path.components() {
-        match part {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                ensure!(
-                    !normalized.as_os_str().is_empty(),
-                    "source link escapes root"
-                );
-                ensure!(
-                    std::fs::symlink_metadata(root.join(&normalized))?.is_dir(),
-                    "source link traverses a missing directory, file or directory link"
-                );
-                ensure!(normalized.pop(), "source link escapes root");
-            }
-            std::path::Component::Normal(part) => normalized.push(part),
-            _ => bail!("source link must be relative"),
+    let parts = raw_relative_parts(path)?;
+    for (index, part) in parts.iter().enumerate() {
+        match *part {
+            "" | "." => {}
+            ".." => ensure!(normalized.pop(), "source link escapes root"),
+            part => normalized.push(part),
         }
-        let current = root.join(&normalized);
-        if std::fs::symlink_metadata(&current)
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
+        if index + 1 < parts.len() {
             ensure!(
-                !std::fs::metadata(&current)?.is_dir(),
-                "source directory links are not supported"
+                std::fs::symlink_metadata(root.join(&normalized))?.is_dir(),
+                "source link traverses a missing directory, file or directory link"
             );
         }
     }
@@ -257,6 +254,27 @@ fn hash_source_entry(
     Ok(())
 }
 
+const SOURCE_IDENTITY_FILE: &str = "crates/colm-remote/source-identity.json";
+
+fn expanded_source_identity(root: &Path) -> Result<bool> {
+    let path = root.join(SOURCE_IDENTITY_FILE);
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) => ensure!(
+            metadata.is_file(),
+            "source identity marker must be a regular file"
+        ),
+    }
+    let marker: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path)?).context("invalid source identity marker")?;
+    // Embedding the capability marker prevents building this implementation without it.
+    let supported: serde_json::Value =
+        serde_json::from_str(include_str!("../source-identity.json"))?;
+    ensure!(marker == supported, "unsupported source identity schema");
+    Ok(true)
+}
+
 /// Source identity excludes Git metadata, bulk datasets and generated build/cache directories.
 /// The same relative-path/byte stream is used for checkouts and extracted packages.
 pub fn source_content_sha256(root: &Path) -> Result<String> {
@@ -264,6 +282,7 @@ pub fn source_content_sha256(root: &Path) -> Result<String> {
         root: &Path,
         relative: &Path,
         links: &std::collections::BTreeMap<PathBuf, PathBuf>,
+        expanded: bool,
         files: &mut Vec<PathBuf>,
     ) -> Result<()> {
         let path = root.join(relative);
@@ -285,7 +304,7 @@ pub fn source_content_sha256(root: &Path) -> Result<String> {
                 ) {
                     continue;
                 }
-                collect(root, &relative.join(name), links, files)?;
+                collect(root, &relative.join(name), links, expanded, files)?;
             }
         } else if meta.is_file() {
             let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -298,6 +317,13 @@ pub fn source_content_sha256(root: &Path) -> Result<String> {
                 name,
                 "Cargo.lock" | "Makefile" | "CMakeLists.txt" | "Makeoptions"
             ) || name.starts_with("Makeoptions.")
+                || (expanded
+                    && (ext == "nml"
+                        || matches!(
+                            logical_path(relative)?.as_str(),
+                            "crates/colm-srfdata/data/LUCY_rawdata.nc"
+                                | "crates/colm-srfdata/data/NCAR_urban_properties.nc"
+                        )))
                 || matches!(
                     ext.as_str(),
                     "rs" | "f"
@@ -340,19 +366,30 @@ pub fn source_content_sha256(root: &Path) -> Result<String> {
         root.join("Cargo.toml").is_file(),
         "source has no Cargo.toml"
     );
+    let expanded = expanded_source_identity(root)?;
     let mut files = Vec::new();
     let links = source_links(root)?;
     for path in SNAPSHOT_PATHS {
-        collect(root, Path::new(path), &links, &mut files)?;
+        if !expanded && path == ".gitattributes" {
+            continue;
+        }
+        collect(root, Path::new(path), &links, expanded, &mut files)?;
     }
     if root.join(".git").exists() {
         // A checkout and its package must bind the same files, excluding ignored scratch output.
         let packaged: std::collections::BTreeSet<_> =
             git_files(root, &SNAPSHOT_PATHS)?.into_iter().collect();
+        ensure!(
+            !expanded || packaged.contains(SOURCE_IDENTITY_FILE),
+            "source identity marker is excluded from the delivery inventory"
+        );
         files.retain(|file| packaged.contains(&file.to_string_lossy().replace('\\', "/")));
     }
     files.sort();
     let mut hasher = Sha256::new();
+    if expanded {
+        hasher.update(b"colm-source-content-v2\0");
+    }
     for file in files {
         let path = root.join(&file);
         let link = if std::fs::symlink_metadata(&path)?.file_type().is_symlink()
@@ -392,11 +429,10 @@ pub fn source_content_sha256(root: &Path) -> Result<String> {
 /// 代码工作区经常改，不走这里。缓存写不进去不算错，照样返回算出的哈希。
 pub fn cached_source_content_sha256(root: &Path, cache: &Path) -> Result<String> {
     let fingerprint = tree_fingerprint(root, &[])?;
+    let cache_key = format!("source-identity-v2:{fingerprint}");
     if let Ok(text) = std::fs::read_to_string(cache) {
         if let Some((seen, hash)) = text.trim().split_once(' ') {
-            if seen == fingerprint
-                && hash.len() == 64
-                && hash.bytes().all(|b| b.is_ascii_hexdigit())
+            if seen == cache_key && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
             {
                 return Ok(hash.to_owned());
             }
@@ -411,7 +447,7 @@ pub fn cached_source_content_sha256(root: &Path, cache: &Path) -> Result<String>
         let _ = std::fs::create_dir_all(dir);
     }
     let staging = cache.with_extension(format!("tmp-{}", std::process::id()));
-    if std::fs::write(&staging, format!("{fingerprint} {hash}\n")).is_ok()
+    if std::fs::write(&staging, format!("{cache_key} {hash}\n")).is_ok()
         && std::fs::rename(&staging, cache).is_err()
     {
         let _ = std::fs::remove_file(&staging);
@@ -552,6 +588,41 @@ pub fn git_files(repo: &Path, paths: &[&str]) -> Result<Vec<String>> {
         .collect();
     files.sort();
     Ok(files)
+}
+
+fn validate_delivery_inventory(root: &Path, files: &[String]) -> Result<()> {
+    let links = source_links(root)?;
+    let inventory = files
+        .iter()
+        .map(PathBuf::from)
+        .collect::<std::collections::BTreeSet<_>>();
+    let canonical_root = root.canonicalize()?;
+    ensure!(
+        !expanded_source_identity(root)? || inventory.contains(Path::new(SOURCE_IDENTITY_FILE)),
+        "source identity marker is excluded from the delivery inventory"
+    );
+    for file in files {
+        if links.contains_key(Path::new(file))
+            || std::fs::symlink_metadata(root.join(file))?
+                .file_type()
+                .is_symlink()
+        {
+            let link = source_file_link(root, Path::new(file))?;
+            let target = normalize_inside(
+                root,
+                &Path::new(file)
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .join(&link.target),
+            )?;
+            ensure!(
+                inventory.contains(&target)
+                    && inventory.contains(link.resolved_file.strip_prefix(&canonical_root)?),
+                "source link target is outside the delivery inventory: {file}"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// 按内容算快照标识：每个文件的路径与字节依次进哈希。
@@ -702,15 +773,14 @@ pub fn tarball_content_id(path: &Path) -> Result<String> {
                 .context("source archive link has no parent")?;
             let mut relative = PathBuf::new();
             let target_path = parent.join(next);
-            let components = target_path.components().collect::<Vec<_>>();
+            let components = raw_relative_parts(&target_path)?;
             for (index, component) in components.iter().enumerate() {
-                match component {
-                    std::path::Component::Normal(part) => relative.push(part),
-                    std::path::Component::CurDir => {}
-                    std::path::Component::ParentDir => {
+                match *component {
+                    "" | "." => {}
+                    ".." => {
                         ensure!(relative.pop(), "source archive link escapes root")
                     }
-                    _ => bail!("source archive link must be relative"),
+                    part => relative.push(part),
                 }
                 if index + 1 < components.len() {
                     let prefix = logical_path(&relative)?;
@@ -742,6 +812,7 @@ pub fn snapshot(source: &Source) -> Result<Snapshot> {
             if files.is_empty() {
                 bail!("{} has no engine sources", repo.display());
             }
+            validate_delivery_inventory(repo, &files)?;
             Ok(Snapshot {
                 id: content_id(repo, &files)?,
                 source: source.clone(),
@@ -769,6 +840,20 @@ pub fn uploaded(ssh: &Ssh, root: &str, id: &str) -> Result<bool> {
         == "yes")
 }
 
+fn create_source_upload_directory(path: &Path) -> Result<()> {
+    let builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    let builder = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = builder;
+        builder.mode(0o700);
+        builder
+    };
+    // Atomic creation refuses preexisting directories and symlinks before any archive is written.
+    builder.create(path)?;
+    Ok(())
+}
+
 /// 把快照传上去（已经在就跳过）。
 pub fn upload(ssh: &Ssh, root: &str, snapshot: &Snapshot) -> Result<bool> {
     if uploaded(ssh, root, &snapshot.id)? {
@@ -786,11 +871,20 @@ pub fn upload(ssh: &Ssh, root: &str, snapshot: &Snapshot) -> Result<bool> {
     let result: Result<()> = (|| {
         match &snapshot.source {
             Source::Checkout(repo) => {
-                let mut files = snapshot.files.clone();
-                if !source_links(repo)?.is_empty() {
-                    files.push(SOURCE_LINKS_FILE.into());
-                }
-                ssh.upload_list(repo, &files, &stage)?;
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let directory = std::env::temp_dir().join(format!(
+                    "colm-source-upload-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ));
+                create_source_upload_directory(&directory)?;
+                let archive = directory.join("source.tar.gz");
+                let result = (|| {
+                    pack_source_files(repo, &snapshot.files, &archive)?;
+                    ssh.upload_tarball(&archive, &stage)
+                })();
+                let _ = std::fs::remove_dir_all(&directory);
+                result?;
             }
             Source::Tarball(path) => ssh.upload_tarball(path, &stage)?,
         }
@@ -1107,6 +1201,11 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
     files.extend(git_files(repo, &PACK_EXTRA_PATHS)?);
     files.sort();
     files.dedup();
+    pack_source_files(repo, &files, out)
+}
+
+fn pack_source_files(repo: &Path, files: &[String], out: &Path) -> Result<()> {
+    validate_delivery_inventory(repo, files)?;
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1121,7 +1220,7 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
     let mut directories = std::collections::BTreeSet::new();
     for path in files {
         if links.contains_key(Path::new(&path))
-            || std::fs::symlink_metadata(repo.join(&path))?
+            || std::fs::symlink_metadata(repo.join(path))?
                 .file_type()
                 .is_symlink()
         {
@@ -1149,11 +1248,11 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
             header.set_entry_type(tar::EntryType::Symlink);
             header.set_mode(0o777);
             header.set_size(0);
-            archive.append_link(&mut header, &path, &link.target)?;
+            archive.append_link(&mut header, path, &link.target)?;
             continue;
         }
         archive
-            .append_path_with_name(repo.join(&path), &path)
+            .append_path_with_name(repo.join(path), path)
             .with_context(|| format!("cannot pack source file {path}"))?;
     }
     archive.into_inner()?.finish()?;

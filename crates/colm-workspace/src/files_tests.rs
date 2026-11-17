@@ -622,3 +622,150 @@ fn materialized_link_guards_use_existing_file_identity_without_folding_distinct_
         assert_linked_bytes(&ws, "FF=old\n");
     }
 }
+
+fn assert_mutation_rejected(ws: &Workspace, action: impl FnOnce() -> Result<Applied>) {
+    let head = ws.head().unwrap();
+    let status = git::run(&ws.src(), &["status", "--porcelain", "-z"]).unwrap();
+    assert!(action().is_err(), "unsafe mutation was accepted");
+    assert_eq!(ws.head().unwrap(), head);
+    assert_eq!(
+        git::run(&ws.src(), &["status", "--porcelain", "-z"]).unwrap(),
+        status
+    );
+}
+
+#[test]
+fn mutation_preflight_rejects_same_file_and_hardlink_without_changing_bytes() {
+    let (root, ws) = fresh("same-file-preflight");
+    let file = ws.src().join(MODULE);
+    let bytes = std::fs::read(&file).unwrap();
+    let hardlink = root.join("hardlink.F90");
+    std::fs::hard_link(&file, &hardlink).unwrap();
+    for source in [&file, &hardlink] {
+        assert_mutation_rejected(&ws, || put_file(&ws, MODULE, source, "same file", false));
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+        assert_eq!(std::fs::read(source).unwrap(), bytes);
+    }
+    #[cfg(unix)]
+    {
+        let alias = root.join("source-alias");
+        std::os::unix::fs::symlink(file.parent().unwrap(), &alias).unwrap();
+        assert_mutation_rejected(&ws, || {
+            put_file(&ws, MODULE, &alias.join("MOD_Demo.F90"), "alias", false)
+        });
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    }
+    let case_alias = ws.src().join(MODULE.to_ascii_lowercase());
+    if case_alias.exists() {
+        assert_mutation_rejected(&ws, || {
+            put_file(&ws, MODULE, &case_alias, "case alias", false)
+        });
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn mutation_preflight_rejects_overlapping_folders_without_changing_bytes() {
+    let (_root, ws) = fresh("overlap-preflight");
+    let base = "vendor/CoLM202X";
+    let from = ws.src().join(base);
+    let bytes = std::fs::read(ws.src().join(MODULE)).unwrap();
+    for (path, source) in [
+        (base.to_owned(), from.clone()),
+        (base.to_owned(), from.join("main")),
+        (format!("{base}/main"), from.clone()),
+        (format!("{base}/new/nested"), from.clone()),
+    ] {
+        assert_mutation_rejected(&ws, || put_dir(&ws, &path, &source, "overlap"));
+        assert_eq!(std::fs::read(ws.src().join(MODULE)).unwrap(), bytes);
+    }
+    #[cfg(unix)]
+    {
+        let alias = _root.join("folder-alias");
+        std::os::unix::fs::symlink(&from, &alias).unwrap();
+        assert_mutation_rejected(&ws, || {
+            put_dir(&ws, base, &alias.join("main"), "alias overlap")
+        });
+        assert_eq!(std::fs::read(ws.src().join(MODULE)).unwrap(), bytes);
+    }
+    let case_alias = ws.src().join(base.to_ascii_lowercase());
+    if case_alias.exists() {
+        assert_mutation_rejected(&ws, || put_dir(&ws, base, &case_alias, "case overlap"));
+        assert_eq!(std::fs::read(ws.src().join(MODULE)).unwrap(), bytes);
+    }
+}
+
+fn add_protected_answer(ws: &Workspace) -> PathBuf {
+    let answer = ws.src().join("oracle/golden/answer.txt");
+    std::fs::create_dir_all(answer.parent().unwrap()).unwrap();
+    std::fs::write(&answer, "protected answer\n").unwrap();
+    git::run(&ws.src(), &["add", "-f", "oracle/golden/answer.txt"]).unwrap();
+    git::run(&ws.src(), &["commit", "-qm", "fixture answer"]).unwrap();
+    answer
+}
+
+#[test]
+fn mutation_preflight_protects_old_subtrees_from_removal_and_replacement() {
+    let (root, ws) = fresh("protected-subtree-preflight");
+    let answer = add_protected_answer(&ws);
+    let replacement = root.join("replacement");
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::write(replacement.join("ordinary.txt"), "replacement").unwrap();
+    assert!(
+        list(&ws, "oracle").is_ok(),
+        "ancestor browsing must remain available"
+    );
+    for path in ["oracle", "oracle/golden"] {
+        assert_mutation_rejected(&ws, || remove(&ws, path, "remove"));
+        assert_eq!(
+            std::fs::read_to_string(&answer).unwrap(),
+            "protected answer\n"
+        );
+        assert_mutation_rejected(&ws, || put_dir(&ws, path, &replacement, "replace"));
+        assert_eq!(
+            std::fs::read_to_string(&answer).unwrap(),
+            "protected answer\n"
+        );
+    }
+}
+
+#[test]
+fn mutation_preflight_snapshot_checks_both_sides_of_staged_renames() {
+    for move_out in [true, false] {
+        let (_root, ws) = fresh(if move_out {
+            "rename-out-preflight"
+        } else {
+            "rename-in-preflight"
+        });
+        let answer = add_protected_answer(&ws);
+        if !move_out {
+            git::run(&ws.src(), &["mv", "oracle/golden/answer.txt", "answer.txt"]).unwrap();
+            git::run(&ws.src(), &["commit", "-qm", "fixture outside answer"]).unwrap();
+            std::fs::create_dir_all(answer.parent().unwrap()).unwrap();
+        }
+        let (from, to) = if move_out {
+            ("oracle/golden/answer.txt", "answer.txt")
+        } else {
+            ("answer.txt", "oracle/golden/answer.txt")
+        };
+        git::run(&ws.src(), &["mv", from, to]).unwrap();
+        assert_mutation_rejected(&ws, || snapshot_external(&ws).map(Option::unwrap));
+        assert_eq!(
+            std::fs::read_to_string(ws.src().join(to)).unwrap(),
+            "protected answer\n"
+        );
+        assert!(!ws.src().join(from).exists());
+    }
+}
+
+#[test]
+fn ordinary_staged_renames_still_snapshot() {
+    let (_root, ws) = fresh("ordinary-rename-preflight");
+    let bytes = std::fs::read(ws.src().join(MODULE)).unwrap();
+    git::run(&ws.src(), &["mv", MODULE, "renamed.F90"]).unwrap();
+    let applied = snapshot_external(&ws).unwrap().unwrap();
+    assert!(applied.files.iter().any(|path| path == MODULE));
+    assert!(applied.files.iter().any(|path| path == "renamed.F90"));
+    assert_eq!(std::fs::read(ws.src().join("renamed.F90")).unwrap(), bytes);
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+}

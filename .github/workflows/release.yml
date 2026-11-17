@@ -402,11 +402,30 @@ jobs:
           # A second startup exercises the published source and frozen model caches.
           & $cli model-list --model-root $modelRoot
           if ($LASTEXITCODE -ne 0) { throw "Cached model-list exited $LASTEXITCODE" }
+          # Exercise managed clones under the normal Git for Windows conversion setting.
+          $env:GIT_CONFIG_COUNT = '1'
+          $env:GIT_CONFIG_KEY_0 = 'core.autocrlf'
+          $env:GIT_CONFIG_VALUE_0 = 'true'
           $workspaceRoot = Join-Path $SmokeRoot 'workspaces'
           & $cli ws-create --name installed-smoke --from app --root $workspaceRoot
           if ($LASTEXITCODE -ne 0) { throw "Installed workspace creation exited $LASTEXITCODE" }
           $source = Join-Path $workspaceRoot 'installed-smoke/src'
+          if (!(Test-Path -LiteralPath (Join-Path $source '.gitattributes'))) { throw 'Source attributes were not packaged' }
+          $baseline = (& $cli ws-source-info --name installed-smoke --root $workspaceRoot) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $baseline.content_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Cannot read workspace baseline' }
+          & $cli ws-create --name installed-clone --from ws:installed-smoke --root $workspaceRoot
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot clone installed workspace' }
+          $clone = (& $cli ws-source-info --name installed-clone --root $workspaceRoot) | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $clone.content_sha256 -notmatch '^[0-9a-f]{64}$' -or $clone.content_sha256 -ne $baseline.content_sha256) { throw 'Workspace clone changed source bytes' }
           $config = Join-Path $source 'vendor/CoLM202X/include/Makeoptions.github'
+          $original = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash
+          & $cli ws-put --name installed-smoke --root $workspaceRoot --path vendor/CoLM202X/include/Makeoptions.github --from $config --message 'reject self replacement'
+          if ($LASTEXITCODE -eq 0) { throw 'Self replacement was accepted' }
+          $hardlink = Join-Path $SmokeRoot 'same-config.txt'
+          New-Item -ItemType HardLink -Path $hardlink -Target $config | Out-Null
+          & $cli ws-put --name installed-smoke --root $workspaceRoot --path vendor/CoLM202X/include/Makeoptions.github --from $hardlink --message 'reject hardlink replacement'
+          if ($LASTEXITCODE -eq 0) { throw 'Hardlink replacement was accepted' }
+          if ((Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash -ne $original) { throw 'Rejected replacement damaged source' }
           $edited = Join-Path $SmokeRoot 'Makeoptions.edited'
           ([IO.File]::ReadAllText($config) + "`n# Installed workspace validation`n") | Set-Content -LiteralPath $edited
           & $cli ws-write --name installed-smoke --root $workspaceRoot --path vendor/CoLM202X/include/Makeoptions.github --text-file $edited --message 'installed configuration edit'

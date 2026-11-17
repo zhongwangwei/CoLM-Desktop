@@ -360,6 +360,7 @@ impl Registry {
                     );
                 } else {
                     self.create_draft(ModelDraft {
+                        code_editable: None,
                         id: id.clone(),
                         name: colm_case::case_name(&case.join("case.nml"))
                             .unwrap_or_else(|_| "Migrated case".into()),

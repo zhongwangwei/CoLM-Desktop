@@ -133,7 +133,7 @@ pub fn check_path(path: &str) -> Result<()> {
     let lower = path.to_ascii_lowercase();
     for prefix in FORBIDDEN_PREFIXES {
         ensure!(
-            !lower.starts_with(prefix),
+            lower != prefix.trim_end_matches('/') && !lower.starts_with(prefix),
             "{path} is protected (reference answers and git internals cannot be patched)"
         );
     }

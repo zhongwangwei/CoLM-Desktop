@@ -771,6 +771,7 @@ mod tests {
         let baseline = registry.install_official(code.clone()).unwrap();
         let draft = registry
             .create_draft(ModelDraft {
+                code_editable: None,
                 id: "query-test".into(),
                 name: "Query".into(),
                 note: "read-only query test".into(),

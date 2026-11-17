@@ -160,6 +160,32 @@ fn clean(workspace: &Workspace) -> Result<()> {
     Ok(())
 }
 
+// Canonicalize existing ancestors too: a new destination can still be inside the source.
+fn physical_identity(path: &Path) -> Result<PathBuf> {
+    match path.canonicalize() {
+        Ok(path) => Ok(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path.parent().context("path has no existing ancestor")?;
+            Ok(physical_identity(parent)?.join(path.file_name().context("path has no name")?))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn check_old_subtree(workspace: &Workspace, path: &str) -> Result<()> {
+    check_path(path)?;
+    let item = workspace.src().join(path);
+    if std::fs::symlink_metadata(&item).is_ok_and(|meta| meta.is_dir()) {
+        for entry in std::fs::read_dir(item)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().context("file names must be UTF-8")?;
+            check_old_subtree(workspace, &format!("{path}/{name}"))?;
+        }
+    }
+    Ok(())
+}
+
 fn commit(workspace: &Workspace, path: &str, message: &str) -> Result<Applied> {
     let src = workspace.src();
     let mut files = vec![path.to_owned()];
@@ -233,9 +259,15 @@ pub fn snapshot_external(workspace: &Workspace) -> Result<Option<Applied>> {
         let Some(path) = entry.get(3..) else {
             continue;
         };
-        // 改名的那一项后面紧跟原来的名字，原名不单独算一个改动。
-        if entry.starts_with('R') || entry.starts_with('C') {
-            entries.next();
+        // Porcelain -z puts the source after the destination for renames and copies.
+        if entry.as_bytes()[..2]
+            .iter()
+            .any(|status| matches!(status, b'R' | b'C'))
+        {
+            let source = entries
+                .next()
+                .context("missing rename source in git status")?;
+            check_path(source).with_context(|| format!("{source} was changed outside the app"))?;
         }
         check_path(path).with_context(|| format!("{path} was changed outside the app"))?;
         files.push(path.to_owned());
@@ -247,7 +279,10 @@ pub fn snapshot_external(workspace: &Workspace) -> Result<Option<Applied>> {
     git::run(&src, &["add", "-A"])?;
     // 上面查的是 status 那一刻的文件；编辑器在这之后、add 之前又写的文件也会被 add 带进来，没经过检查
     // （复验 D2-06）。按真正要提交的那一份重查，有违规就撤回暂存、整次拒绝。
-    let staged = git::run(&src, &["diff", "--cached", "--name-only", "-z"])?;
+    let staged = git::run(
+        &src,
+        &["diff", "--cached", "--no-renames", "--name-only", "-z"],
+    )?;
     let mut files = Vec::new();
     for path in staged.split('\0').filter(|path| !path.is_empty()) {
         if let Err(error) = if path == colm_remote::engine::SOURCE_LINKS_FILE {
@@ -448,6 +483,28 @@ pub fn put_file(
         !file.is_dir(),
         "{path} is a directory; replace it with a folder instead"
     );
+    ensure!(
+        physical_identity(from)? != physical_identity(&file)?,
+        "source and destination are the same file"
+    );
+    #[cfg(unix)]
+    if file.exists() {
+        use std::os::unix::fs::MetadataExt;
+        let destination = std::fs::metadata(&file)?;
+        ensure!(
+            (meta.dev(), meta.ino()) != (destination.dev(), destination.ino()),
+            "source and destination are the same file"
+        );
+    }
+    // Windows stable std has no file ID API. Deny writes to the source through any hardlink.
+    #[cfg(windows)]
+    let source_guard = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(from)?
+    };
     clean(workspace)?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
@@ -469,6 +526,8 @@ pub fn put_file(
         std::io::copy(&mut source, &mut destination)
             .with_context(|| format!("cannot copy {}", from.display()))?;
         drop(destination);
+        #[cfg(windows)]
+        drop(source_guard);
         return match commit(workspace, path, &message) {
             Ok(applied) => Ok(applied),
             Err(error) => {
@@ -478,6 +537,8 @@ pub fn put_file(
         };
     }
     std::fs::copy(from, &file).with_context(|| format!("cannot copy {}", from.display()))?;
+    #[cfg(windows)]
+    drop(source_guard);
     commit(workspace, path, &message)
 }
 
@@ -531,6 +592,13 @@ pub fn put_dir(workspace: &Workspace, path: &str, from: &Path, message: &str) ->
         !dir.is_file(),
         "{path} is a file; replace it with a file instead"
     );
+    let source = physical_identity(from)?;
+    let destination = physical_identity(&dir)?;
+    ensure!(
+        !source.starts_with(&destination) && !destination.starts_with(&source),
+        "source and destination folders overlap"
+    );
+    check_old_subtree(workspace, path)?;
     for file in &files {
         let relative = file.to_str().context("file names must be UTF-8")?;
         check_path(&format!("{path}/{}", relative.replace('\\', "/")))?;
@@ -555,6 +623,7 @@ pub fn put_dir(workspace: &Workspace, path: &str, from: &Path, message: &str) ->
 pub fn remove(workspace: &Workspace, path: &str, message: &str) -> Result<Applied> {
     let message = check_message(message)?;
     let item = physical_target(workspace, path)?;
+    check_old_subtree(workspace, path)?;
     clean(workspace)?;
     crate::source_links::check_removal(&workspace.src(), path, None)?;
     match std::fs::symlink_metadata(&item) {

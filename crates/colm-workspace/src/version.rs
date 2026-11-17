@@ -323,21 +323,8 @@ pub fn freeze_check(workspace: &Workspace, parameter_keys: &[String]) -> Result<
     if paths.contains(&NAMELIST_SOURCE) {
         items.push(namelist_item(workspace)?);
     }
-    let missing = missing_namelist_keys(&src, parameter_keys)?;
     if !parameter_keys.is_empty() {
-        items.push(Item {
-            code: "parameters",
-            ok: missing.is_empty(),
-            blocking: !missing.is_empty(),
-            message: if missing.is_empty() {
-                "继承来的参数改值在新代码里都还有对应的 namelist 变量".into()
-            } else {
-                format!(
-                    "新代码里找不到这些参数改值对应的 namelist 变量：{}；在草稿里删掉或改名后再冻结",
-                    missing.join("、")
-                )
-            },
-        });
+        items.push(parameter_check(&src, parameter_keys)?);
     }
     if !touches.engine && !touches.kernel {
         items.push(Item {
@@ -351,6 +338,24 @@ pub fn freeze_check(workspace: &Workspace, parameter_keys: &[String]) -> Result<
         ready: !items.iter().any(|item| item.blocking),
         touches,
         items,
+    })
+}
+
+/// Check overlay keys against the selected frozen source without requiring new builds.
+pub fn parameter_check(src: &Path, keys: &[String]) -> Result<Item> {
+    let missing = missing_namelist_keys(src, keys)?;
+    Ok(Item {
+        code: "parameters",
+        ok: missing.is_empty(),
+        blocking: !missing.is_empty(),
+        message: if missing.is_empty() {
+            "继承来的参数改值在新代码里都还有对应的 namelist 变量".into()
+        } else {
+            format!(
+                "新代码里找不到这些参数改值对应的 namelist 变量：{}；在草稿里删掉或改名后再冻结",
+                missing.join("、")
+            )
+        },
     })
 }
 

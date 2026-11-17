@@ -272,7 +272,11 @@ impl Workspace {
             );
             clone(from, &src, true)?;
         }
-        Self::finish(dir, name, from, rev)
+        let workspace = Self::finish(dir, name, from, rev)?;
+        if !is_tarball && !is_url {
+            preserve_checkout_bytes(Path::new(from), &src)?;
+        }
+        Ok(workspace)
     }
 
     /// 源码已放进 `src/` 以后的共同收尾：切到要的提交、建本工作区的分支、写下工作区信息。
@@ -284,8 +288,20 @@ impl Workspace {
                 !rev.starts_with('-') && !rev.contains(char::is_whitespace),
                 "bad revision {rev:?}"
             );
-            git::run(&src, &["checkout", "-q", "--detach", rev])
-                .with_context(|| format!("cannot check out {rev}"))?;
+            git::run(
+                &src,
+                &[
+                    "-c",
+                    "core.autocrlf=false",
+                    "-c",
+                    "core.eol=lf",
+                    "checkout",
+                    "-q",
+                    "--detach",
+                    rev,
+                ],
+            )
+            .with_context(|| format!("cannot check out {rev}"))?;
         }
         let branch = format!("ws/{name}");
         git::run(&src, &["checkout", "-q", "-B", &branch])?;
@@ -523,6 +539,36 @@ fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Preserve the selected clean working tree, including historical CRLF sources.
+/// Only tracked regular files at the same commit are copied; ignored files never travel.
+pub fn preserve_checkout_bytes(from: &Path, to: &Path) -> Result<()> {
+    if git::head(from)? != git::head(to)? || git::is_dirty(from)? {
+        return Ok(());
+    }
+    for key in ["core.autocrlf", "core.eol"] {
+        if let Ok(value) = git::run(from, &["config", "--get", key]) {
+            git::run(to, &["config", key, &value])?;
+        }
+    }
+    for file in git::run(from, &["ls-files", "-z"])?
+        .split('\0')
+        .filter(|p| !p.is_empty())
+    {
+        let source = from.join(file);
+        if std::fs::symlink_metadata(&source)?.file_type().is_file() {
+            let target = to.join(file);
+            ensure!(
+                std::fs::symlink_metadata(&target)?.file_type().is_file(),
+                "cloned source file type changed: {file}"
+            );
+            std::fs::copy(source, target)?;
+        }
+    }
+    git::run(to, &["add", "-u"])?;
+    ensure!(!git::is_dirty(to)?, "source changed while cloning");
+    Ok(())
+}
+
 fn clone(from: &str, src: &Path, local: bool) -> Result<()> {
     let source = if local {
         std::path::absolute(from)?
@@ -534,7 +580,7 @@ fn clone(from: &str, src: &Path, local: bool) -> Result<()> {
         .env("GIT_TERMINAL_PROMPT", "0")
         // Git for Windows 默认 core.longpaths=false，模型库缓存目录较深时复制 loose object
         // 会报 "Filename too long"（CI windows 实测）；只对这条命令开长路径。
-        .args(["-c", "core.longpaths=true"])
+        .args(["-c", "core.longpaths=true", "-c", "core.autocrlf=false"])
         .arg("clone")
         .arg("-q");
     if local {
@@ -554,6 +600,8 @@ fn clone(from: &str, src: &Path, local: bool) -> Result<()> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+    git::run(src, &["config", "core.autocrlf", "false"])?;
+    git::run(src, &["config", "core.eol", "lf"])?;
     Ok(())
 }
 

@@ -27,6 +27,8 @@ fn paths_are_extracted_and_the_forbidden_ones_refused() {
         ".git/config",
         "src/.git/hooks/x",
         "oracle/golden/CN-Cng.nc",
+        "oracle/golden",
+        "Oracle/Golden",
         "",
         "a\\b",
     ] {

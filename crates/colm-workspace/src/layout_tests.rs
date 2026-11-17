@@ -405,3 +405,56 @@ fn git_gets_registry_paths_without_the_windows_verbatim_prefix() {
     assert_eq!(git_spelling("/Users/a/models/src"), "/Users/a/models/src");
     assert_eq!(git_spelling("source.tar.gz"), "source.tar.gz");
 }
+
+#[test]
+fn local_clone_preserves_clean_crlf_bytes_but_not_ignored_files_or_newer_revision() {
+    if std::env::var_os("COLM_TEST_AUTOCRLF_CHILD").is_none() {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "layout::layout_tests::local_clone_preserves_clean_crlf_bytes_but_not_ignored_files_or_newer_revision", "--nocapture"])
+            .env("COLM_TEST_AUTOCRLF_CHILD", "1")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.autocrlf")
+            .env("GIT_CONFIG_VALUE_0", "true")
+            .output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        return;
+    }
+    let root = temp("clone-physical-bytes");
+    let source = root.join("source");
+    source_repo(&source);
+    git::run(&source, &["config", "core.autocrlf", "true"]).unwrap();
+    let path = "crates/colm-core/src/demo.rs";
+    let initial = git::head(&source).unwrap();
+    std::fs::write(source.join(path), "pub const K: f64 = 3.0;\r\n").unwrap();
+    std::fs::write(source.join(".gitignore"), "private.txt\n").unwrap();
+    git::run(&source, &["add", "-A"]).unwrap();
+    git::run(&source, &["commit", "-qm", "change"]).unwrap();
+    std::fs::write(source.join("private.txt"), "private").unwrap();
+    assert!(!git::is_dirty(&source).unwrap());
+    let ws =
+        Workspace::create(&root.join("ws"), "current", source.to_str().unwrap(), None).unwrap();
+    assert_eq!(
+        std::fs::read(ws.src().join(path)).unwrap(),
+        std::fs::read(source.join(path)).unwrap()
+    );
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    assert!(!ws.src().join("private.txt").exists());
+    let older = Workspace::create(
+        &root.join("ws"),
+        "older",
+        source.to_str().unwrap(),
+        Some(&initial),
+    )
+    .unwrap();
+    let original = git::run(&source, &["show", &format!("{initial}:{path}")]).unwrap() + "\n";
+    assert_eq!(
+        std::fs::read(older.src().join(path)).unwrap(),
+        original.as_bytes()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

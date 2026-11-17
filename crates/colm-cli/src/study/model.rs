@@ -742,6 +742,7 @@ mod tests {
             .unwrap();
         let mut draft = registry
             .create_draft(colm_model::ModelDraft {
+                code_editable: None,
                 id: "scope".into(),
                 name: "Scoped".into(),
                 note: "fixture".into(),

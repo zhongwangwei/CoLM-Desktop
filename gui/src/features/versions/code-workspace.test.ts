@@ -277,10 +277,16 @@ test('a delayed code branch preserves parameter edits made while the request was
   const pending = branch();
   draftNow.current = { ...original, overlay: { value: 7 } };
   dirtyNow.current = true;
-  release({ ...original, generation: 2, code: { workspace: 'copy' } });
+  release({ ...original, generation: 2, code_editable: true, code: { workspace: 'copy' } });
   await pending;
   assert.deepEqual(written, [
-    { ...original, generation: 2, code: { workspace: 'copy' }, overlay: { value: 7 } },
+    {
+      ...original,
+      generation: 2,
+      code_editable: true,
+      code: { workspace: 'copy' },
+      overlay: { value: 7 },
+    },
   ]);
   assert.deepEqual(dirty, [true]);
 });
@@ -338,4 +344,20 @@ test('patch import and both revert actions notify the open source buffer of disk
     assert.equal(token, 1, name);
     assert.equal(refreshed, 1, name);
   }
+});
+
+test('inherited workspace code stays read-only while explicit workspace choices remain editable', () => {
+  const code = { kind: 'workspace', workspace: 'parent', commit: 'abc', source_sha256: '123' };
+  const editable = (draft: object | null, parentCode: object | null = code) =>
+    evaluate<boolean>('./VersionsPage.tsx', 'codeEditable', 'const', { draft, parentCode });
+  assert.equal(editable({ code }), false, 'legacy inherited draft');
+  assert.equal(editable({ code, code_editable: false }), false);
+  assert.equal(
+    editable({ code, code_editable: true }),
+    true,
+    'explicit selection of same workspace',
+  );
+  assert.equal(editable({ code: { ...code, workspace: 'copy' } }), true, 'legacy owned copy');
+  assert.equal(editable({ code }, null), false, 'missing parent must not expose live source');
+  assert.equal(editable(null), false);
 });

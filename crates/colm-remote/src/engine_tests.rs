@@ -1,6 +1,124 @@
 use super::*;
 
 #[test]
+fn source_upload_directory_is_private_and_refuses_existing_paths() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-upload-private-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    create_source_upload_directory(&root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    let existing = root.join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    let sentinel = existing.join("source.tar.gz");
+    std::fs::write(&sentinel, b"must survive").unwrap();
+    assert!(create_source_upload_directory(&existing).is_err());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
+    assert!(create_source_upload_directory(&sentinel).is_err());
+    #[cfg(unix)]
+    {
+        let redirected = root.join("redirected");
+        std::os::unix::fs::symlink(&existing, &redirected).unwrap();
+        assert!(create_source_upload_directory(&redirected).is_err());
+        assert!(std::fs::symlink_metadata(&redirected)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"must survive");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn source_identity_schema_preserves_legacy_and_binds_embedded_inputs() {
+    let root = std::env::temp_dir().join(format!("colm-source-schema-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("crates/example/src")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    std::fs::write(
+        root.join("crates/example/src/lib.rs"),
+        "pub fn example() {}\n",
+    )
+    .unwrap();
+    let legacy = source_content_sha256(&root).unwrap();
+    assert_eq!(
+        legacy,
+        "7ae8a3f9ec8c9b5c7eda55c1620c0b6ec629f05dc2acaef979336e8bb333d476"
+    );
+    let inputs = [
+        "vendor/CoLM202X/run/forcing/CLDAS.nml",
+        "crates/colm-srfdata/data/LUCY_rawdata.nc",
+        "crates/colm-srfdata/data/NCAR_urban_properties.nc",
+    ];
+    for file in inputs {
+        let path = root.join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "original").unwrap();
+    }
+    std::fs::write(root.join(".gitattributes"), "* text=auto eol=lf\n").unwrap();
+    assert_eq!(source_content_sha256(&root).unwrap(), legacy);
+    let marker = root.join(SOURCE_IDENTITY_FILE);
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, include_str!("../source-identity.json")).unwrap();
+    let expanded = source_content_sha256(&root).unwrap();
+    assert_ne!(expanded, legacy);
+    for file in inputs {
+        std::fs::write(root.join(file), "modified").unwrap();
+        assert_ne!(source_content_sha256(&root).unwrap(), expanded, "{file}");
+        std::fs::write(root.join(file), "original").unwrap();
+        assert_eq!(source_content_sha256(&root).unwrap(), expanded);
+    }
+    std::fs::create_dir_all(root.join("vendor/data")).unwrap();
+    std::fs::write(root.join("vendor/data/unrelated.nc"), "bulk data").unwrap();
+    assert_eq!(source_content_sha256(&root).unwrap(), expanded);
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["init", "-q"])
+        .status()
+        .unwrap()
+        .success());
+    let source = snapshot(&Source::Checkout(root.clone())).unwrap();
+    let archive = root.join("source.tar.gz");
+    pack_source(&source, &archive).unwrap();
+    let unpacked = root.join("unpacked");
+    unpack_source(&archive, &unpacked).unwrap();
+    assert_eq!(source_content_sha256(&unpacked).unwrap(), expanded);
+    assert_eq!(tarball_content_id(&archive).unwrap(), source.id);
+    let cache = root.join("content-cache");
+    // A pre-upgrade memo must not bypass the expanded source inventory.
+    let fingerprint = tree_fingerprint(&unpacked, &[]).unwrap();
+    std::fs::write(&cache, format!("{fingerprint} {legacy}\n")).unwrap();
+    assert_eq!(
+        cached_source_content_sha256(&unpacked, &cache).unwrap(),
+        expanded
+    );
+    assert!(std::fs::read_to_string(&cache)
+        .unwrap()
+        .starts_with("source-identity-v2:"));
+    for invalid in ["{", "{\"schema\":3}", "{\"schema\":1}", "{}"] {
+        std::fs::write(&marker, invalid).unwrap();
+        assert!(source_content_sha256(&root).is_err(), "{invalid}");
+        assert!(
+            snapshot(&Source::Checkout(root.clone())).is_err(),
+            "{invalid}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn source_identity_tracks_fortran_include_content() {
     let root = std::env::temp_dir().join(format!(
         "colm-source-include-{}-{}",
@@ -312,11 +430,17 @@ fn source_links_require_real_directories_before_parent_traversal() {
     let root = std::env::temp_dir().join(format!("colm-link-parent-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    for (prefix, valid) in [
-        ("missing", false),
-        ("target.rs", false),
-        ("directory", true),
+    for (target, valid) in [
+        ("target.rs/", false),
+        ("target.rs/.", false),
+        ("target.rs/./../target.rs", false),
+        ("target.rs", true),
+        ("../Cargo.toml", true),
+        ("missing/../target.rs", false),
+        ("target.rs/../target.rs", false),
+        ("directory/../target.rs", true),
     ] {
+        let prefix = target.replace('/', "-");
         let archive = root.join(format!("{prefix}.tar.gz"));
         let encoder = flate2::write::GzEncoder::new(
             std::fs::File::create(&archive).unwrap(),
@@ -346,13 +470,10 @@ fn source_links_require_real_directories_before_parent_traversal() {
         let mut link = tar::Header::new_gnu();
         link.set_entry_type(tar::EntryType::Symlink);
         link.set_size(0);
-        builder
-            .append_link(
-                &mut link,
-                "crates/link.rs",
-                format!("{prefix}/../target.rs"),
-            )
-            .unwrap();
+        link.set_path("crates/link.rs").unwrap();
+        link.as_mut_bytes()[157..157 + target.len()].copy_from_slice(target.as_bytes());
+        link.set_cksum();
+        builder.append(&link, &[][..]).unwrap();
         builder.into_inner().unwrap().finish().unwrap();
         assert_eq!(tarball_content_id(&archive).is_ok(), valid, "{prefix}");
         let portable = root.join(format!("portable-{prefix}"));
@@ -374,7 +495,7 @@ fn source_links_require_real_directories_before_parent_traversal() {
                 portable.join(SOURCE_LINKS_FILE),
                 serde_json::to_vec(&std::collections::BTreeMap::from([(
                     "crates/link.rs",
-                    format!("{prefix}/../target.rs"),
+                    target,
                 )]))
                 .unwrap(),
             )
@@ -389,7 +510,11 @@ fn source_links_require_real_directories_before_parent_traversal() {
         } else {
             assert_eq!(
                 std::fs::read(portable.join("crates/link.rs")).unwrap(),
-                b"target\n"
+                if target == "../Cargo.toml" {
+                    b"[workspace]\n".as_slice()
+                } else {
+                    b"target\n".as_slice()
+                }
             );
             assert_eq!(
                 source_file_link(
@@ -398,7 +523,7 @@ fn source_links_require_real_directories_before_parent_traversal() {
                 )
                 .unwrap()
                 .resolved_file,
-                portable.join("crates/target.rs").canonicalize().unwrap()
+                portable.join("crates").join(target).canonicalize().unwrap()
             );
         }
         #[cfg(unix)]
@@ -412,7 +537,11 @@ fn source_links_require_real_directories_before_parent_traversal() {
             if valid {
                 assert_eq!(
                     std::fs::read(native.join("crates/link.rs")).unwrap(),
-                    b"target\n"
+                    if target == "../Cargo.toml" {
+                        b"[workspace]\n".as_slice()
+                    } else {
+                        b"target\n".as_slice()
+                    }
                 );
                 assert_eq!(
                     source_content_sha256(&native).unwrap(),
@@ -423,16 +552,43 @@ fn source_links_require_real_directories_before_parent_traversal() {
                 std::fs::create_dir_all(native.join("crates")).unwrap();
                 std::fs::write(native.join("Cargo.toml"), "[workspace]\n").unwrap();
                 std::fs::write(native.join("crates/target.rs"), "target\n").unwrap();
-                std::os::unix::fs::symlink(
-                    format!("{prefix}/../target.rs"),
-                    native.join("crates/link.rs"),
-                )
-                .unwrap();
+                std::os::unix::fs::symlink(target, native.join("crates/link.rs")).unwrap();
                 assert!(source_file_link(&native, Path::new("crates/link.rs")).is_err());
                 assert!(source_content_sha256(&native).is_err());
             }
         }
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn delivery_rejects_link_targets_outside_its_inventory() {
+    let root = linked_source_fixture("excluded-target");
+    std::fs::write(root.join("local-build.config"), "private configuration\n").unwrap();
+    std::os::unix::fs::symlink("local-build.config", root.join("Makeoptions")).unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["init", "-q"])
+        .status()
+        .unwrap()
+        .success());
+    let source = Source::Checkout(root.clone());
+    assert!(snapshot(&source)
+        .unwrap_err()
+        .to_string()
+        .contains("delivery inventory"));
+    let files = git_files(&root, &SNAPSHOT_PATHS).unwrap();
+    let unchecked = Snapshot {
+        id: content_id(&root, &files).unwrap(),
+        source,
+        files,
+    };
+    let archive = root.join("rejected.tar.gz");
+    assert!(pack_source(&unchecked, &archive).is_err());
+    assert!(!archive.exists(), "preflight must precede archive creation");
+    assert!(pack_source_files(&root, &unchecked.files, &archive).is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -453,7 +609,29 @@ fn packing_preserves_empty_directories_traversed_by_source_links() {
             .unwrap()
             .success());
     }
+    std::fs::write(root.join(".gitattributes"), "* text=auto eol=lf\n").unwrap();
+    std::fs::write(
+        root.join("vendor/CoLM202X/include/empty/private.txt"),
+        "secret",
+    )
+    .unwrap();
+    std::fs::write(root.join(".git/info/exclude"), "private.txt\n").unwrap();
     let original = snapshot(&Source::Checkout(root.clone())).unwrap();
+    let transport = root.join("transport.tar.gz");
+    pack_source_files(&root, &original.files, &transport).unwrap();
+    let delivered = root.join("delivered");
+    unpack_source_with_links(&transport, &delivered, false).unwrap();
+    assert_eq!(
+        std::fs::read(delivered.join(relative)).unwrap(),
+        b"FF=mpif90\n"
+    );
+    assert_eq!(
+        std::fs::read(delivered.join(".gitattributes")).unwrap(),
+        b"* text=auto eol=lf\n"
+    );
+    assert!(!delivered
+        .join("vendor/CoLM202X/include/empty/private.txt")
+        .exists());
     let archive = root.join("source.tar.gz");
     pack_source(&original, &archive).unwrap();
     assert_eq!(tarball_content_id(&archive).unwrap(), original.id);

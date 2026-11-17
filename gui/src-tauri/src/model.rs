@@ -2861,6 +2861,7 @@ mod tests {
             let source = crate::project::open_case(source_dir.display().to_string()).unwrap();
             let draft = registry
                 .create_draft(ModelDraft {
+                    code_editable: None,
                     id: structure.to_lowercase(),
                     name: structure.into(),
                     note: "preview classification regression".into(),

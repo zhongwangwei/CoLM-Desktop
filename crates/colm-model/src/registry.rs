@@ -472,8 +472,32 @@ impl Registry {
         asset_root: &Path,
         keep_draft: bool,
     ) -> Result<FrozenRevision> {
+        self.freeze_draft_keeping(self.draft(id)?, asset_root, keep_draft)
+    }
+    /// Publish a refreshed code selection without saving a draft that may fail to freeze.
+    pub fn freeze_draft_keeping(
+        &self,
+        draft: ModelDraft,
+        asset_root: &Path,
+        keep_draft: bool,
+    ) -> Result<FrozenRevision> {
         let _lock = self.lock()?;
-        let mut draft = self.draft(id)?;
+        let saved = self.draft(&draft.id)?;
+        ensure!(
+            saved.generation == draft.generation,
+            "draft changed since it was loaded"
+        );
+        ensure!(saved.parent == draft.parent, "draft parent is immutable");
+        self.validate_draft(&draft)?;
+        self.freeze_candidate(draft, asset_root, keep_draft)
+    }
+    fn freeze_candidate(
+        &self,
+        mut draft: ModelDraft,
+        asset_root: &Path,
+        keep_draft: bool,
+    ) -> Result<FrozenRevision> {
+        let id = draft.id.as_str();
         normalize_overlay(&mut draft.overlay);
         let versions: Vec<_> = self
             .list()?
