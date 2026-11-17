@@ -77,7 +77,13 @@ function page(
   // 被 hold 的命令与它的放行者（U-05：验证"正在保存"三态）。
   let heldCommand: string | null = null;
   let heldResolver: (() => void) | null = null;
-  let draft = { ...version, id: 'custom', generation: 1 };
+  let draft = {
+    ...version,
+    id: 'custom',
+    parent: version.version,
+    code_editable: codeRef.kind === 'workspace',
+    generation: 1,
+  };
   let folderPick: string | null = null;
   async function respondJson(command: string, args: Record<string, unknown>): Promise<unknown> {
     switch (command) {
