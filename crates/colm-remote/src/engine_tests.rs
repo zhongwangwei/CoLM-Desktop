@@ -430,7 +430,7 @@ fn source_links_require_real_directories_before_parent_traversal() {
     let root = std::env::temp_dir().join(format!("colm-link-parent-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    for (target, valid) in [
+    for (case, (target, valid)) in [
         ("target.rs/", false),
         ("target.rs/.", false),
         ("target.rs/./../target.rs", false),
@@ -439,9 +439,12 @@ fn source_links_require_real_directories_before_parent_traversal() {
         ("missing/../target.rs", false),
         ("target.rs/../target.rs", false),
         ("directory/../target.rs", true),
-    ] {
-        let prefix = target.replace('/', "-");
-        let archive = root.join(format!("{prefix}.tar.gz"));
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Raw targets can end in dots, which Win32 strips from fixture directory names.
+        let archive = root.join(format!("case-{case}.tar.gz"));
         let encoder = flate2::write::GzEncoder::new(
             std::fs::File::create(&archive).unwrap(),
             flate2::Compression::default(),
@@ -475,17 +478,17 @@ fn source_links_require_real_directories_before_parent_traversal() {
         link.set_cksum();
         builder.append(&link, &[][..]).unwrap();
         builder.into_inner().unwrap().finish().unwrap();
-        assert_eq!(tarball_content_id(&archive).is_ok(), valid, "{prefix}");
-        let portable = root.join(format!("portable-{prefix}"));
+        assert_eq!(tarball_content_id(&archive).is_ok(), valid, "{target}");
+        let portable = root.join(format!("portable-{case}"));
         assert_eq!(
             unpack_source_with_links(&archive, &portable, true).is_ok(),
             valid,
-            "{prefix}"
+            "{target}"
         );
         if !valid {
             assert!(
                 !portable.exists(),
-                "invalid links must fail before extraction"
+                "invalid link {target} must fail before extraction"
             );
             std::fs::create_dir_all(portable.join("crates")).unwrap();
             std::fs::write(portable.join("Cargo.toml"), "[workspace]\n").unwrap();
@@ -528,11 +531,11 @@ fn source_links_require_real_directories_before_parent_traversal() {
         }
         #[cfg(unix)]
         {
-            let native = root.join(format!("native-{prefix}"));
+            let native = root.join(format!("native-{case}"));
             assert_eq!(
                 unpack_source_with_links(&archive, &native, false).is_ok(),
                 valid,
-                "{prefix}"
+                "{target}"
             );
             if valid {
                 assert_eq!(
@@ -548,7 +551,10 @@ fn source_links_require_real_directories_before_parent_traversal() {
                     source_content_sha256(&portable).unwrap()
                 );
             } else {
-                assert!(!native.exists());
+                assert!(
+                    !native.exists(),
+                    "invalid link {target} must fail before extraction"
+                );
                 std::fs::create_dir_all(native.join("crates")).unwrap();
                 std::fs::write(native.join("Cargo.toml"), "[workspace]\n").unwrap();
                 std::fs::write(native.join("crates/target.rs"), "target\n").unwrap();
