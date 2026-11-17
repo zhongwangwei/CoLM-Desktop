@@ -171,15 +171,13 @@ pub fn resolve_source_file_link(
                     index + 1 == parts.len(),
                     "source directory links are not supported"
                 );
-                let mut next_path = current
+                // Joining onto a Windows verbatim root removes `..` before we can validate it.
+                let next_path = current
                     .parent()
                     .context("source link has no parent")?
+                    .strip_prefix(&canonical_root)?
                     .join(next);
-                for suffix in &parts[index + 1..] {
-                    next_path.push(suffix);
-                }
-                let normalized = normalize_inside(&canonical_root, &next_path)?;
-                followed = Some(normalized.strip_prefix(&canonical_root)?.to_path_buf());
+                followed = Some(normalize_inside(&canonical_root, &next_path)?);
                 break;
             }
         }
@@ -209,24 +207,28 @@ fn normalize_inside(root: &Path, path: &Path) -> Result<PathBuf> {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
                 ensure!(
-                    std::fs::symlink_metadata(&normalized)?.is_dir(),
+                    !normalized.as_os_str().is_empty(),
+                    "source link escapes root"
+                );
+                ensure!(
+                    std::fs::symlink_metadata(root.join(&normalized))?.is_dir(),
                     "source link traverses a missing directory, file or directory link"
                 );
                 ensure!(normalized.pop(), "source link escapes root");
             }
-            other => normalized.push(other.as_os_str()),
+            std::path::Component::Normal(part) => normalized.push(part),
+            _ => bail!("source link must be relative"),
         }
-        if normalized.starts_with(root)
-            && std::fs::symlink_metadata(&normalized)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        let current = root.join(&normalized);
+        if std::fs::symlink_metadata(&current)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
         {
             ensure!(
-                !std::fs::metadata(&normalized)?.is_dir(),
+                !std::fs::metadata(&current)?.is_dir(),
                 "source directory links are not supported"
             );
         }
     }
-    ensure!(normalized.starts_with(root), "source link escapes root");
     Ok(normalized)
 }
 

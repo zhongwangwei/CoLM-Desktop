@@ -380,11 +380,25 @@ fn source_links_require_real_directories_before_parent_traversal() {
             )
             .unwrap();
             assert!(source_file_link(&portable, Path::new("crates/link.rs")).is_err());
+            assert!(source_file_link(
+                &portable.canonicalize().unwrap(),
+                Path::new("crates/link.rs")
+            )
+            .is_err());
             assert!(source_content_sha256(&portable).is_err());
         } else {
             assert_eq!(
                 std::fs::read(portable.join("crates/link.rs")).unwrap(),
                 b"target\n"
+            );
+            assert_eq!(
+                source_file_link(
+                    &portable.canonicalize().unwrap(),
+                    Path::new("crates/link.rs")
+                )
+                .unwrap()
+                .resolved_file,
+                portable.join("crates/target.rs").canonicalize().unwrap()
             );
         }
         #[cfg(unix)]
