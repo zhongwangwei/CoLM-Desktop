@@ -180,6 +180,59 @@ fn a_source_package_becomes_a_repository_with_a_base_commit() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[test]
+fn a_source_package_preserves_logical_links_without_requiring_link_privileges() {
+    let root = temp("tar-logical-links");
+    let repo = root.join("source");
+    source_repo(&repo);
+    std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let include = repo.join("vendor/CoLM202X/include");
+    std::fs::create_dir_all(&include).unwrap();
+    for name in ["Makeoptions", "Makeoptions.github"] {
+        std::fs::write(include.join(name), "FC = gfortran\n").unwrap();
+    }
+    std::fs::write(
+        repo.join(colm_remote::engine::SOURCE_LINKS_FILE),
+        r#"{"vendor/CoLM202X/include/Makeoptions":"Makeoptions.github"}"#,
+    )
+    .unwrap();
+    let expected = colm_remote::engine::source_content_sha256(&repo).unwrap();
+    let snapshot =
+        colm_remote::engine::snapshot(&colm_remote::engine::Source::Checkout(repo)).unwrap();
+    let archive = root.join("colm-src.tar.gz");
+    colm_remote::engine::pack_source(&snapshot, &archive).unwrap();
+    let workspace = Workspace::create(
+        &root.join("workspaces"),
+        "portable",
+        archive.to_str().unwrap(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(workspace.src().join("vendor/CoLM202X/include/Makeoptions"))
+            .unwrap(),
+        "FC = gfortran\n"
+    );
+    assert_eq!(
+        colm_remote::engine::source_content_sha256(&workspace.src()).unwrap(),
+        expected
+    );
+    #[cfg(windows)]
+    {
+        assert!(workspace
+            .src()
+            .join(colm_remote::engine::SOURCE_LINKS_FILE)
+            .is_file());
+        assert!(std::fs::symlink_metadata(
+            workspace.src().join("vendor/CoLM202X/include/Makeoptions")
+        )
+        .unwrap()
+        .is_file());
+    }
+    assert!(!git::is_dirty(&workspace.src()).unwrap());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 /// 几条命令同时结束、各记各的门槛：谁也不能把别人的记录覆盖掉。
 #[test]
 fn concurrent_gate_updates_do_not_lose_each_other() {

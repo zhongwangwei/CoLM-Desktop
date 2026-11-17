@@ -371,3 +371,254 @@ fn edits_made_with_outside_editors_are_snapshotted_against_the_official_source()
     let error = format!("{:#}", snapshot_external(&ws).unwrap_err());
     assert!(error.contains("oracle/golden/answer.txt"), "{error}");
 }
+
+const LINK_TARGET: &str = "vendor/CoLM202X/include/Makeoptions.github";
+const LINK_ALIAS: &str = "vendor/CoLM202X/include/Makeoptions";
+const LINK_CHAIN: &str = "scripts/Makeoptions";
+
+fn linked_workspace(tag: &str) -> (PathBuf, Workspace) {
+    let root = temp(tag);
+    let repo = root.join("source");
+    source_repo(&repo);
+    std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+    for path in [LINK_TARGET, LINK_ALIAS, LINK_CHAIN] {
+        std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+        std::fs::write(repo.join(path), "FF=old\n").unwrap();
+    }
+    std::fs::write(
+        repo.join(".colm-source-links.json"),
+        serde_json::to_vec(&std::collections::BTreeMap::from([
+            (LINK_ALIAS, "Makeoptions.github"),
+            (LINK_CHAIN, "../vendor/CoLM202X/include/Makeoptions"),
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    git::run(&repo, &["add", "-A"]).unwrap();
+    git::run(&repo, &["commit", "-q", "-m", "portable links"]).unwrap();
+    let ws = Workspace::create(&root.join("ws"), "demo", repo.to_str().unwrap(), None).unwrap();
+    (root, ws)
+}
+
+fn assert_linked_bytes(ws: &Workspace, expected: &str) {
+    for path in [LINK_TARGET, LINK_ALIAS, LINK_CHAIN] {
+        assert_eq!(
+            std::fs::read_to_string(ws.src().join(path)).unwrap(),
+            expected,
+            "{path}"
+        );
+    }
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    colm_remote::engine::source_content_sha256(&ws.src()).unwrap();
+}
+
+#[test]
+fn materialized_links_follow_text_edits_and_cannot_be_written_directly() {
+    let (_root, ws) = linked_workspace("links-write");
+    assert!(write_text(&ws, LINK_ALIAS, "bad\n", "alias", None).is_err());
+    assert!(write_text(&ws, ".colm-source-links.json", "{}", "metadata", None).is_err());
+    let result = write_text(&ws, LINK_TARGET, "FF=new\n", "compiler", None).unwrap();
+    assert!(result.applied.files.iter().any(|path| path == LINK_CHAIN));
+    assert_linked_bytes(&ws, "FF=new\n");
+    assert!(list(&ws, "vendor/CoLM202X/include")
+        .unwrap()
+        .iter()
+        .any(|e| e.path == LINK_ALIAS && e.kind == "link"));
+}
+
+#[test]
+fn materialized_links_follow_replacement_patch_and_single_file_restore() {
+    let (root, ws) = linked_workspace("links-patch");
+    let replacement = root.join("replacement");
+    std::fs::write(&replacement, "FF=put\n").unwrap();
+    put_file(&ws, LINK_TARGET, &replacement, "replace", false).unwrap();
+    assert_linked_bytes(&ws, "FF=put\n");
+    let diff = format!("diff --git a/{LINK_TARGET} b/{LINK_TARGET}\n--- a/{LINK_TARGET}\n+++ b/{LINK_TARGET}\n@@ -1 +1 @@\n-FF=put\n+FF=patch\n");
+    crate::patch::apply(&ws, &diff, "patch").unwrap();
+    assert_linked_bytes(&ws, "FF=patch\n");
+    let exported = crate::patch::export(&ws).unwrap();
+    assert!(!exported.contains(&format!("diff --git a/{LINK_ALIAS} ")));
+    assert!(!exported.contains(&format!("diff --git a/{LINK_CHAIN} ")));
+    crate::patch::revert_to(&ws, &ws.info.base_commit).unwrap();
+    crate::patch::apply(&ws, &exported, "import target edit").unwrap();
+    assert_linked_bytes(&ws, "FF=patch\n");
+    crate::patch::revert_file(&ws, LINK_TARGET, "restore").unwrap();
+    assert_linked_bytes(&ws, "FF=old\n");
+}
+
+#[test]
+fn materialized_links_follow_external_target_edits_but_preserve_conflicting_copies() {
+    let (_root, ws) = linked_workspace("links-external");
+    std::fs::write(ws.src().join(LINK_TARGET), "FF=external\n").unwrap();
+    snapshot_external(&ws).unwrap().unwrap();
+    assert_linked_bytes(&ws, "FF=external\n");
+    let head = ws.head().unwrap();
+    std::fs::write(ws.src().join(LINK_TARGET), "FF=target-edit\n").unwrap();
+    std::fs::write(ws.src().join(LINK_ALIAS), "FF=alias-edit\n").unwrap();
+    assert!(snapshot_external(&ws).is_err());
+    assert_eq!(ws.head().unwrap(), head);
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join(LINK_ALIAS)).unwrap(),
+        "FF=alias-edit\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join(LINK_CHAIN)).unwrap(),
+        "FF=external\n"
+    );
+}
+
+#[test]
+fn materialized_link_deletions_update_metadata_and_target_deletions_are_rejected() {
+    let (_root, ws) = linked_workspace("links-delete");
+    let head = ws.head().unwrap();
+    assert!(remove(&ws, LINK_TARGET, "delete target").is_err());
+    assert_eq!(ws.head().unwrap(), head);
+    assert_linked_bytes(&ws, "FF=old\n");
+    remove(&ws, LINK_CHAIN, "delete chain").unwrap();
+    assert!(crate::patch::revert_file(&ws, LINK_CHAIN, "restore alias").is_err());
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let links = colm_remote::engine::source_links(&ws.src()).unwrap();
+    assert!(!links.contains_key(Path::new(LINK_CHAIN)));
+    assert!(links.contains_key(Path::new(LINK_ALIAS)));
+    std::fs::remove_file(ws.src().join(LINK_ALIAS)).unwrap();
+    snapshot_external(&ws).unwrap().unwrap();
+    assert!(colm_remote::engine::source_links(&ws.src())
+        .unwrap()
+        .is_empty());
+    remove(&ws, LINK_TARGET, "delete unused target").unwrap();
+}
+
+#[test]
+fn materialized_links_follow_folder_replacement_without_losing_external_aliases() {
+    let (root, ws) = linked_workspace("links-folder");
+    let replacement = root.join("include");
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::write(replacement.join("Makeoptions.github"), "FF=folder\n").unwrap();
+    std::fs::write(replacement.join("Makeoptions"), "FF=folder\n").unwrap();
+    put_dir(&ws, "vendor/CoLM202X/include", &replacement, "folder").unwrap();
+    assert_linked_bytes(&ws, "FF=folder\n");
+    std::fs::remove_file(replacement.join("Makeoptions.github")).unwrap();
+    let head = ws.head().unwrap();
+    assert!(put_dir(
+        &ws,
+        "vendor/CoLM202X/include",
+        &replacement,
+        "broken folder"
+    )
+    .is_err());
+    assert_eq!(ws.head().unwrap(), head);
+    assert_linked_bytes(&ws, "FF=folder\n");
+}
+
+#[test]
+fn materialized_link_patches_preserve_atomic_refusal_and_reject_nonportable_deletion_exports() {
+    let (_root, ws) = linked_workspace("links-patch-invalid");
+    let head = ws.head().unwrap();
+    let deletion = format!("diff --git a/{LINK_TARGET} b/{LINK_TARGET}\ndeleted file mode 100644\n--- a/{LINK_TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-FF=old\n");
+    assert!(crate::patch::apply(&ws, &deletion, "delete target").is_err());
+    assert_eq!(ws.head().unwrap(), head);
+    assert_linked_bytes(&ws, "FF=old\n");
+    let alias_edit = format!("diff --git a/{LINK_ALIAS} b/{LINK_ALIAS}\n--- a/{LINK_ALIAS}\n+++ b/{LINK_ALIAS}\n@@ -1 +1 @@\n-FF=old\n+FF=conflict\n");
+    assert!(crate::patch::apply(&ws, &alias_edit, "alias edit").is_err());
+    assert_eq!(ws.head().unwrap(), head);
+    assert_linked_bytes(&ws, "FF=old\n");
+    let deletion = format!("diff --git a/{LINK_CHAIN} b/{LINK_CHAIN}\ndeleted file mode 100644\n--- a/{LINK_CHAIN}\n+++ /dev/null\n@@ -1 +0,0 @@\n-FF=old\n");
+    crate::patch::apply(&ws, &deletion, "delete chain").unwrap();
+    assert!(!colm_remote::engine::source_links(&ws.src())
+        .unwrap()
+        .contains_key(Path::new(LINK_CHAIN)));
+    let error = crate::patch::export(&ws).unwrap_err().to_string();
+    assert!(error.contains("full source package"), "{error}");
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    colm_remote::engine::source_content_sha256(&ws.src()).unwrap();
+}
+
+#[test]
+fn materialized_link_folder_conflicts_are_rejected_before_replacement() {
+    let (root, ws) = linked_workspace("links-folder-conflict");
+    let replacement = root.join("include");
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::write(replacement.join("Makeoptions.github"), "FF=new\n").unwrap();
+    std::fs::write(replacement.join("Makeoptions"), "FF=other\n").unwrap();
+    assert!(put_dir(&ws, "vendor/CoLM202X/include", &replacement, "conflict").is_err());
+    assert_linked_bytes(&ws, "FF=old\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn materialized_target_edit_exports_apply_to_native_links() {
+    let (root, ws) = linked_workspace("links-native-export");
+    write_text(&ws, LINK_TARGET, "FF=portable\n", "portable", None).unwrap();
+    let exported = crate::patch::export(&ws).unwrap();
+    let repo = root.join("source");
+    std::fs::remove_file(repo.join(".colm-source-links.json")).unwrap();
+    for (alias, target) in [
+        (LINK_ALIAS, "Makeoptions.github"),
+        (LINK_CHAIN, "../vendor/CoLM202X/include/Makeoptions"),
+    ] {
+        std::fs::remove_file(repo.join(alias)).unwrap();
+        std::os::unix::fs::symlink(target, repo.join(alias)).unwrap();
+    }
+    git::run(&repo, &["add", "-A"]).unwrap();
+    git::run(&repo, &["commit", "-q", "-m", "native links"]).unwrap();
+    let native =
+        Workspace::create(&root.join("ws"), "native", repo.to_str().unwrap(), None).unwrap();
+    crate::patch::apply(&native, &exported, "import portable target edit").unwrap();
+    assert_eq!(
+        colm_remote::engine::source_content_sha256(&native.src()).unwrap(),
+        colm_remote::engine::source_content_sha256(&ws.src()).unwrap()
+    );
+}
+
+#[test]
+fn materialized_link_metadata_cannot_be_edited_even_with_different_case() {
+    let (_root, ws) = linked_workspace("links-metadata");
+    let original = std::fs::read(ws.src().join(".colm-source-links.json")).unwrap();
+    let head = ws.head().unwrap();
+    for path in [".colm-source-links.json", ".COLM-SOURCE-LINKS.JSON"] {
+        assert!(write_text(&ws, path, "{}", "metadata", None).is_err());
+        let diff = format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{{}}\n");
+        assert!(crate::patch::apply(&ws, &diff, "metadata patch").is_err());
+        assert_eq!(
+            std::fs::read(ws.src().join(".colm-source-links.json")).unwrap(),
+            original
+        );
+    }
+    std::fs::write(ws.src().join(".colm-source-links.json"), "{}").unwrap();
+    assert!(snapshot_external(&ws).is_err());
+    assert_eq!(ws.head().unwrap(), head);
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join(".colm-source-links.json")).unwrap(),
+        "{}"
+    );
+    std::fs::write(ws.src().join(".colm-source-links.json"), original).unwrap();
+    assert_linked_bytes(&ws, "FF=old\n");
+}
+
+#[test]
+fn materialized_link_guards_use_existing_file_identity_without_folding_distinct_names() {
+    let (_root, ws) = linked_workspace("links-case-identity");
+    let alias = "vendor/CoLM202X/include/MAKEOPTIONS";
+    let target = "vendor/CoLM202X/include/MAKEOPTIONS.GITHUB";
+    let head = ws.head().unwrap();
+    if ws.src().join(alias).exists() {
+        assert!(write_text(&ws, alias, "FF=bad\n", "alternate case", None).is_err());
+        assert_eq!(ws.head().unwrap(), head);
+        assert_linked_bytes(&ws, "FF=old\n");
+        assert!(remove(&ws, target, "alternate case target").is_err());
+        assert_eq!(ws.head().unwrap(), head);
+        assert_linked_bytes(&ws, "FF=old\n");
+        assert!(remove(&ws, "VENDOR/COLM202X/INCLUDE", "alternate case directory").is_err());
+        assert_eq!(ws.head().unwrap(), head);
+        assert_linked_bytes(&ws, "FF=old\n");
+    } else {
+        create_text(&ws, alias, "independent\n", "distinct file").unwrap();
+        write_text(&ws, alias, "independent edit\n", "distinct edit", None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(ws.src().join(alias)).unwrap(),
+            "independent edit\n"
+        );
+        remove(&ws, alias, "remove distinct").unwrap();
+        assert_linked_bytes(&ws, "FF=old\n");
+    }
+}

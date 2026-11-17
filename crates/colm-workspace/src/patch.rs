@@ -107,6 +107,10 @@ pub fn touched_paths(diff: &str) -> Result<Vec<String>> {
 pub fn check_path(path: &str) -> Result<()> {
     ensure!(!path.is_empty(), "empty path in the patch");
     ensure!(
+        !path.eq_ignore_ascii_case(colm_remote::engine::SOURCE_LINKS_FILE),
+        "source link metadata is managed by the workspace"
+    );
+    ensure!(
         !path.starts_with('/') && !path.contains('\\') && !path.contains('\0'),
         "the patch must use relative paths inside the repository: {path:?}"
     );
@@ -152,7 +156,7 @@ pub fn apply(workspace: &Workspace, diff: &str, message: &str) -> Result<Applied
         !message.is_empty() && message.len() <= 200 && !message.contains('\n'),
         "the commit message must be one short line"
     );
-    let files = touched_paths(diff)?;
+    let mut files = touched_paths(diff)?;
     for file in &files {
         check_path(file)?;
     }
@@ -173,8 +177,19 @@ pub fn apply(workspace: &Workspace, diff: &str, message: &str) -> Result<Applied
     )
     .context("the patch does not apply to the current files")?;
     git::run_with_input(&src, &["apply", "--whitespace=nowarn", "-"], &bytes)?;
-    // 只加补丁碰过的路径：不顺手带进别的东西。
-    let mut add = vec!["add", "--"];
+    match crate::source_links::synchronize(&src) {
+        Ok(aliases) => files.extend(aliases),
+        Err(error) => {
+            git::run_with_input(
+                &src,
+                &["apply", "--reverse", "--whitespace=nowarn", "-"],
+                &bytes,
+            )
+            .context("cannot undo a patch with invalid source links")?;
+            return Err(error);
+        }
+    }
+    let mut add = vec!["--literal-pathspecs", "add", "--"];
     add.extend(files.iter().map(String::as_str));
     git::run(&src, &add)?;
     git::run(&src, &["commit", "-q", "-m", &format!("ws: {message}")])
@@ -320,6 +335,7 @@ pub fn revert_file(workspace: &Workspace, path: &str, message: &str) -> Result<A
         "the workspace has uncommitted changes; commit or revert them first"
     );
     checked_changed_file(workspace, path)?;
+    crate::source_links::check_restore(&src, path, workspace.official_base())?;
     git::run(
         &src,
         &[
@@ -333,24 +349,31 @@ pub fn revert_file(workspace: &Workspace, path: &str, message: &str) -> Result<A
             path,
         ],
     )?;
-    git::run(
-        &src,
-        &[
-            "--literal-pathspecs",
-            "commit",
-            "-q",
-            "--only",
-            "-m",
-            &format!("ws: {message}"),
-            "--",
-            path,
-        ],
-    )?;
+    let mut files = vec![path.to_owned()];
+    let aliases = crate::source_links::synchronize(&src)?;
+    if !aliases.is_empty() {
+        let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
+        add.extend(aliases.iter().map(String::as_str));
+        git::run(&src, &add)?;
+    }
+    files.extend(aliases);
+    let message = format!("ws: {message}");
+    let mut commit = vec![
+        "--literal-pathspecs",
+        "commit",
+        "-q",
+        "--only",
+        "-m",
+        &message,
+        "--",
+    ];
+    commit.extend(files.iter().map(String::as_str));
+    git::run(&src, &commit)?;
     let commit = git::head(&src)?;
     Ok(Applied {
         short: git::short(&src, &commit)?,
         commit,
-        files: vec![path.to_owned()],
+        files,
     })
 }
 
@@ -395,10 +418,44 @@ fn is_ancestor(dir: &Path, ancestor: &str, of: &str) -> Result<bool> {
 
 /// 把工作区相对基线的全部改动导出成一个补丁（D 级：界面上的“导出”按钮）。
 pub fn export(workspace: &Workspace) -> Result<String> {
-    git::run(
-        &workspace.src(),
-        &["diff", "--no-color", &workspace.info.base_commit, "HEAD"],
-    )
+    let src = workspace.src();
+    let links = colm_remote::engine::source_links(&src)?;
+    let metadata = colm_remote::engine::SOURCE_LINKS_FILE;
+    if git::blob(&src, &workspace.info.base_commit, metadata)?.is_some() {
+        let text = git::run(
+            &src,
+            &[
+                "show",
+                &format!("{}:{metadata}", workspace.info.base_commit),
+            ],
+        )?;
+        let baseline: std::collections::BTreeMap<std::path::PathBuf, std::path::PathBuf> =
+            serde_json::from_str(&text)?;
+        // shortcut: portable link deletions need Git mode translation; export a source package until that is supported.
+        ensure!(
+            baseline.keys().all(|path| links.contains_key(path)),
+            "cannot export a portable patch after deleting materialized symbolic links; export the full source package instead"
+        );
+    }
+    let mut exclusions = vec![":(exclude).colm-source-links.json".to_owned()];
+    // Copies follow their targets; exporting their byte changes would not apply to native links.
+    for path in links.keys() {
+        let path = path
+            .to_str()
+            .context("source path must be UTF-8")?
+            .replace('\\', "/");
+        exclusions.push(format!(":(exclude,literal){path}"));
+    }
+    let mut args = vec![
+        "diff",
+        "--no-color",
+        &workspace.info.base_commit,
+        "HEAD",
+        "--",
+        ".",
+    ];
+    args.extend(exclusions.iter().map(String::as_str));
+    git::run(&src, &args)
 }
 
 #[cfg(test)]

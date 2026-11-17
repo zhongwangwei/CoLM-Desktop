@@ -19,6 +19,7 @@ pub mod layout;
 pub mod parity;
 pub mod patch;
 pub mod sandbox;
+mod source_links;
 pub mod studies;
 pub mod testrun;
 pub mod version;

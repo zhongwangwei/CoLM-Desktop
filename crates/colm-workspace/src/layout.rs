@@ -257,15 +257,8 @@ impl Workspace {
             from.starts_with("https://") || from.starts_with("ssh://") || from.starts_with("git@");
         if is_tarball {
             ensure!(Path::new(from).is_file(), "{from} is not a file");
-            std::fs::create_dir_all(&src)?;
-            let status = Command::new("tar")
-                .arg("-xzf")
-                .arg(from)
-                .arg("-C")
-                .arg(&src)
-                .status()
-                .context("cannot run tar")?;
-            ensure!(status.success(), "cannot unpack {from}");
+            colm_remote::engine::unpack_source(Path::new(from), &src)
+                .with_context(|| format!("cannot unpack {from}"))?;
             git::run(&src, &["init", "-q"])?;
             git::set_identity(&src)?;
             git::run(&src, &["add", "-A"])?;

@@ -307,6 +307,169 @@ fn source_extraction_rejects_unsafe_links_before_writing_files() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn source_links_require_real_directories_before_parent_traversal() {
+    let root = std::env::temp_dir().join(format!("colm-link-parent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    for (prefix, valid) in [
+        ("missing", false),
+        ("target.rs", false),
+        ("directory", true),
+    ] {
+        let archive = root.join(format!("{prefix}.tar.gz"));
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut builder = tar::Builder::new(encoder);
+        for (path, bytes) in [
+            ("Cargo.toml", "[workspace]\n"),
+            ("crates/target.rs", "target\n"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o644);
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, path, bytes.as_bytes())
+                .unwrap();
+        }
+        let mut directory = tar::Header::new_gnu();
+        directory.set_entry_type(tar::EntryType::Directory);
+        directory.set_mode(0o755);
+        directory.set_size(0);
+        directory.set_cksum();
+        builder
+            .append_data(&mut directory, "crates/directory", &[][..])
+            .unwrap();
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_size(0);
+        builder
+            .append_link(
+                &mut link,
+                "crates/link.rs",
+                format!("{prefix}/../target.rs"),
+            )
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap();
+        assert_eq!(tarball_content_id(&archive).is_ok(), valid, "{prefix}");
+        let portable = root.join(format!("portable-{prefix}"));
+        assert_eq!(
+            unpack_source_with_links(&archive, &portable, true).is_ok(),
+            valid,
+            "{prefix}"
+        );
+        if !valid {
+            assert!(
+                !portable.exists(),
+                "invalid links must fail before extraction"
+            );
+            std::fs::create_dir_all(portable.join("crates")).unwrap();
+            std::fs::write(portable.join("Cargo.toml"), "[workspace]\n").unwrap();
+            std::fs::write(portable.join("crates/target.rs"), "target\n").unwrap();
+            std::fs::write(portable.join("crates/link.rs"), "target\n").unwrap();
+            std::fs::write(
+                portable.join(SOURCE_LINKS_FILE),
+                serde_json::to_vec(&std::collections::BTreeMap::from([(
+                    "crates/link.rs",
+                    format!("{prefix}/../target.rs"),
+                )]))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(source_file_link(&portable, Path::new("crates/link.rs")).is_err());
+            assert!(source_content_sha256(&portable).is_err());
+        } else {
+            assert_eq!(
+                std::fs::read(portable.join("crates/link.rs")).unwrap(),
+                b"target\n"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let native = root.join(format!("native-{prefix}"));
+            assert_eq!(
+                unpack_source_with_links(&archive, &native, false).is_ok(),
+                valid,
+                "{prefix}"
+            );
+            if valid {
+                assert_eq!(
+                    std::fs::read(native.join("crates/link.rs")).unwrap(),
+                    b"target\n"
+                );
+                assert_eq!(
+                    source_content_sha256(&native).unwrap(),
+                    source_content_sha256(&portable).unwrap()
+                );
+            } else {
+                assert!(!native.exists());
+                std::fs::create_dir_all(native.join("crates")).unwrap();
+                std::fs::write(native.join("Cargo.toml"), "[workspace]\n").unwrap();
+                std::fs::write(native.join("crates/target.rs"), "target\n").unwrap();
+                std::os::unix::fs::symlink(
+                    format!("{prefix}/../target.rs"),
+                    native.join("crates/link.rs"),
+                )
+                .unwrap();
+                assert!(source_file_link(&native, Path::new("crates/link.rs")).is_err());
+                assert!(source_content_sha256(&native).is_err());
+            }
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn packing_preserves_empty_directories_traversed_by_source_links() {
+    let root = linked_source_fixture("empty-directory");
+    let relative = Path::new("vendor/CoLM202X/include/Makeoptions");
+    std::fs::remove_file(root.join(relative)).unwrap();
+    std::fs::create_dir(root.join("vendor/CoLM202X/include/empty")).unwrap();
+    std::os::unix::fs::symlink("empty/../Makeoptions.github", root.join(relative)).unwrap();
+    for args in [["init", "-q"], ["add", "-A"]] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let original = snapshot(&Source::Checkout(root.clone())).unwrap();
+    let archive = root.join("source.tar.gz");
+    pack_source(&original, &archive).unwrap();
+    assert_eq!(tarball_content_id(&archive).unwrap(), original.id);
+    for materialize in [false, true] {
+        let extracted = root.join(format!("extracted-{materialize}"));
+        unpack_source_with_links(&archive, &extracted, materialize).unwrap();
+        assert_eq!(
+            std::fs::read(extracted.join(relative)).unwrap(),
+            b"FF=mpif90\n"
+        );
+        assert_eq!(
+            source_content_sha256(&extracted).unwrap(),
+            source_content_sha256(&root).unwrap()
+        );
+        for args in [["init", "-q"], ["add", "-A"]] {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&extracted)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let repacked = root.join(format!("repacked-{materialize}.tar.gz"));
+        pack_source(&snapshot(&Source::Checkout(extracted)).unwrap(), &repacked).unwrap();
+        assert_eq!(tarball_content_id(&repacked).unwrap(), original.id);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn compile_configuration_content_and_link_selection_both_change_source_identity() {

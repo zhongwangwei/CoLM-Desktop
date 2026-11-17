@@ -131,6 +131,11 @@ fn check_message(message: &str) -> Result<String> {
 
 /// 工作区里的一个路径：规则同补丁；已存在的每一段都不能是符号链接。
 fn target(workspace: &Workspace, path: &str) -> Result<PathBuf> {
+    crate::source_links::check_edit(&workspace.src(), path)?;
+    physical_target(workspace, path)
+}
+
+fn physical_target(workspace: &Workspace, path: &str) -> Result<PathBuf> {
     check_path(path)?;
     let mut current = workspace.src();
     for part in path.split('/') {
@@ -157,15 +162,18 @@ fn clean(workspace: &Workspace) -> Result<()> {
 
 fn commit(workspace: &Workspace, path: &str, message: &str) -> Result<Applied> {
     let src = workspace.src();
-    // 只加这一个路径（含删除）：不顺手带进别的东西。`-f`：被 .gitignore 忽略的名字也要能放进来。
-    git::run(&src, &["add", "-A", "-f", "--", path])?;
+    let mut files = vec![path.to_owned()];
+    files.extend(crate::source_links::synchronize(&src)?);
+    let mut add = vec!["--literal-pathspecs", "add", "-A", "-f", "--"];
+    add.extend(files.iter().map(String::as_str));
+    git::run(&src, &add)?;
     git::run(&src, &["commit", "-q", "-m", &format!("ws: {message}")])
         .context("nothing changed")?;
     let commit = git::head(&src)?;
     Ok(Applied {
         short: git::short(&src, &commit)?,
         commit,
-        files: vec![path.to_owned()],
+        files,
     })
 }
 
@@ -235,13 +243,18 @@ pub fn snapshot_external(workspace: &Workspace) -> Result<Option<Applied>> {
     if files.is_empty() {
         return Ok(None);
     }
+    crate::source_links::synchronize(&src)?;
     git::run(&src, &["add", "-A"])?;
     // 上面查的是 status 那一刻的文件；编辑器在这之后、add 之前又写的文件也会被 add 带进来，没经过检查
     // （复验 D2-06）。按真正要提交的那一份重查，有违规就撤回暂存、整次拒绝。
     let staged = git::run(&src, &["diff", "--cached", "--name-only", "-z"])?;
     let mut files = Vec::new();
     for path in staged.split('\0').filter(|path| !path.is_empty()) {
-        if let Err(error) = check_path(path) {
+        if let Err(error) = if path == colm_remote::engine::SOURCE_LINKS_FILE {
+            Ok(())
+        } else {
+            check_path(path)
+        } {
             let _ = git::run(&src, &["reset", "-q"]);
             return Err(error.context(format!("{path} was changed outside the app")));
         }
@@ -274,21 +287,23 @@ pub fn list(workspace: &Workspace, dir: &str) -> Result<Vec<Entry>> {
         target(workspace, dir)?
     };
     ensure!(base.is_dir(), "{dir} is not a directory");
+    let links = colm_remote::engine::source_links(&workspace.src())?;
     let mut entries = Vec::new();
     for entry in std::fs::read_dir(&base)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if dir.is_empty() && name == ".git" {
+        if dir.is_empty() && (name == ".git" || name == colm_remote::engine::SOURCE_LINKS_FILE) {
             continue;
         }
         let meta = std::fs::symlink_metadata(entry.path())?;
-        let kind = if meta.file_type().is_symlink() {
-            "link"
-        } else if meta.is_dir() {
-            "dir"
-        } else {
-            "file"
-        };
+        let kind =
+            if meta.file_type().is_symlink() || links.contains_key(&Path::new(dir).join(&name)) {
+                "link"
+            } else if meta.is_dir() {
+                "dir"
+            } else {
+                "file"
+            };
         entries.push(Entry {
             path: if dir.is_empty() {
                 name.clone()
@@ -521,6 +536,7 @@ pub fn put_dir(workspace: &Workspace, path: &str, from: &Path, message: &str) ->
         check_path(&format!("{path}/{}", relative.replace('\\', "/")))?;
     }
     clean(workspace)?;
+    crate::source_links::check_removal(&workspace.src(), path, Some(from))?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
     }
@@ -538,8 +554,9 @@ pub fn put_dir(workspace: &Workspace, path: &str, from: &Path, message: &str) ->
 /// 删除工作区里的一个文件或目录并提交。
 pub fn remove(workspace: &Workspace, path: &str, message: &str) -> Result<Applied> {
     let message = check_message(message)?;
-    let item = target(workspace, path)?;
+    let item = physical_target(workspace, path)?;
     clean(workspace)?;
+    crate::source_links::check_removal(&workspace.src(), path, None)?;
     match std::fs::symlink_metadata(&item) {
         Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&item)?,
         Ok(_) => std::fs::remove_file(&item)?,

@@ -47,7 +47,8 @@ pub const PACK_EXTRA_PATHS: [&str; 1] = ["docs"];
 /// Logical file links materialized by Windows extraction, kept when freezing/copying sources.
 pub const SOURCE_LINKS_FILE: &str = ".colm-source-links.json";
 
-fn source_links(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, PathBuf>> {
+/// Read and validate the relative paths recorded for materialized source links.
+pub fn source_links(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, PathBuf>> {
     let path = root.join(SOURCE_LINKS_FILE);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -103,7 +104,8 @@ pub fn source_file_link(root: &Path, relative: &Path) -> Result<SourceFileLink> 
     Ok(link)
 }
 
-fn resolve_source_file_link(
+/// Resolve a link using validated metadata, without requiring its materialized copy to be current.
+pub fn resolve_source_file_link(
     root: &Path,
     relative: &Path,
     links: &std::collections::BTreeMap<PathBuf, PathBuf>,
@@ -150,7 +152,12 @@ fn resolve_source_file_link(
                 ensure!(seen.insert(current.clone()), "source link cycle");
                 let next = match logical_target {
                     Some(target) => target.clone(),
-                    None => std::fs::read_link(&current)?,
+                    None => {
+                        current.canonicalize().with_context(|| {
+                            format!("source link is broken or cyclic: {}", current.display())
+                        })?;
+                        std::fs::read_link(&current)?
+                    }
                 };
                 ensure!(
                     !next.is_absolute()
@@ -201,6 +208,10 @@ fn normalize_inside(root: &Path, path: &Path) -> Result<PathBuf> {
         match part {
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => {
+                ensure!(
+                    std::fs::symlink_metadata(&normalized)?.is_dir(),
+                    "source link traverses a missing directory, file or directory link"
+                );
                 ensure!(normalized.pop(), "source link escapes root");
             }
             other => normalized.push(other.as_os_str()),
@@ -604,6 +615,7 @@ pub fn tarball_content_id(path: &Path) -> Result<String> {
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
     let mut files = std::collections::BTreeMap::<String, Vec<u8>>::new();
     let mut links = std::collections::BTreeMap::<String, PathBuf>::new();
+    let mut directories = std::collections::BTreeSet::from([String::new()]);
     for entry in archive
         .entries()
         .context("not a gzip-compressed tar archive")?
@@ -619,7 +631,13 @@ pub fn tarball_content_id(path: &Path) -> Result<String> {
         );
         let name = logical_path(&path)?.trim_start_matches("./").to_owned();
         let kind = entry.header().entry_type();
+        let mut parent = Path::new(&name).parent();
+        while let Some(path) = parent {
+            directories.insert(logical_path(path)?);
+            parent = path.parent();
+        }
         if kind.is_dir() {
+            directories.insert(name);
             continue;
         }
         ensure!(
@@ -695,8 +713,10 @@ pub fn tarball_content_id(path: &Path) -> Result<String> {
                 if index + 1 < components.len() {
                     let prefix = logical_path(&relative)?;
                     ensure!(
-                        !links.contains_key(&prefix) && !files.contains_key(&prefix),
-                        "source archive link traverses a file or directory link"
+                        directories.contains(&prefix)
+                            && !links.contains_key(&prefix)
+                            && !files.contains_key(&prefix),
+                        "source archive link traverses a missing directory, file or directory link"
                     );
                 }
             }
@@ -1096,9 +1116,33 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
     // 源码读取器接受普通文件和符号链接，稀疏输入也必须写成普通文件条目。
     archive.sparse(false);
     let links = source_links(repo)?;
+    let mut directories = std::collections::BTreeSet::new();
     for path in files {
-        if links.contains_key(Path::new(&path)) {
+        if links.contains_key(Path::new(&path))
+            || std::fs::symlink_metadata(repo.join(&path))?
+                .file_type()
+                .is_symlink()
+        {
             let link = source_file_link(repo, Path::new(&path))?;
+            let mut traversed = Path::new(&path)
+                .parent()
+                .unwrap_or(Path::new(""))
+                .to_path_buf();
+            for part in link.target.components() {
+                match part {
+                    std::path::Component::ParentDir => {
+                        // Git omits empty directories, but the OS must traverse them before `..`.
+                        if !traversed.as_os_str().is_empty()
+                            && directories.insert(traversed.clone())
+                        {
+                            archive.append_dir(&traversed, repo.join(&traversed))?;
+                        }
+                        traversed.pop();
+                    }
+                    std::path::Component::CurDir => {}
+                    part => traversed.push(part.as_os_str()),
+                }
+            }
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(tar::EntryType::Symlink);
             header.set_mode(0o777);

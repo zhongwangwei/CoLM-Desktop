@@ -402,6 +402,20 @@ jobs:
           # A second startup exercises the published source and frozen model caches.
           & $cli model-list --model-root $modelRoot
           if ($LASTEXITCODE -ne 0) { throw "Cached model-list exited $LASTEXITCODE" }
+          $workspaceRoot = Join-Path $SmokeRoot 'workspaces'
+          & $cli ws-create --name installed-smoke --from app --root $workspaceRoot
+          if ($LASTEXITCODE -ne 0) { throw "Installed workspace creation exited $LASTEXITCODE" }
+          $source = Join-Path $workspaceRoot 'installed-smoke/src'
+          $config = Join-Path $source 'vendor/CoLM202X/include/Makeoptions.github'
+          $edited = Join-Path $SmokeRoot 'Makeoptions.edited'
+          ([IO.File]::ReadAllText($config) + "`n# Installed workspace validation`n") | Set-Content -LiteralPath $edited
+          & $cli ws-write --name installed-smoke --root $workspaceRoot --path vendor/CoLM202X/include/Makeoptions.github --text-file $edited --message 'installed configuration edit'
+          if ($LASTEXITCODE -ne 0) { throw "Installed workspace edit exited $LASTEXITCODE" }
+          $info = & $cli ws-source-info --name installed-smoke --root $workspaceRoot
+          if ($LASTEXITCODE -ne 0) { throw "Edited source identity exited $LASTEXITCODE" }
+          if (($info | ConvertFrom-Json).content_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Edited source has no valid identity' }
+          & $cli engine-pack --source $source --out (Join-Path $SmokeRoot 'edited-source.tar.gz')
+          if ($LASTEXITCODE -ne 0) { throw "Edited source packing exited $LASTEXITCODE" }
           '@ | Set-Content -LiteralPath $script
           # Hosted Windows runners disable UAC, so a limited administrator token is insufficient.
           $user = 'colm-smoke'
