@@ -5281,11 +5281,11 @@ fn bounded_site_probe<T: Send + 'static>(
         if Instant::now() >= deadline {
             return Err(site_probe_timeout());
         }
-        if active
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                (n < 4).then_some(n + 1)
-            })
-            .is_ok()
+        let slots = active.load(Ordering::SeqCst);
+        if slots < 4
+            && active
+                .compare_exchange(slots, slots + 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
         {
             break;
         }
