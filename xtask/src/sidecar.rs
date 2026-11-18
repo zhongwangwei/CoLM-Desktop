@@ -272,6 +272,7 @@ mod tests {
         std::fs::create_dir_all(root.join("checkout/docs")).unwrap();
         std::fs::create_dir_all(root.join("engine")).unwrap();
         let checkout = root.join("checkout");
+        std::fs::write(checkout.join("Cargo.toml"), "[workspace]\n").unwrap();
         for name in [
             "design-ai-assistant.md",
             "colm-process-knowledge.md",
@@ -287,11 +288,9 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        let snapshot = colm_remote::engine::Snapshot {
-            id: String::new(),
-            source: colm_remote::engine::Source::Checkout(checkout.clone()),
-            files: Vec::new(),
-        };
+        let snapshot =
+            colm_remote::engine::snapshot(&colm_remote::engine::Source::Checkout(checkout.clone()))
+                .unwrap();
         colm_remote::engine::pack_source(&snapshot, &archive).unwrap();
         std::fs::write(
             checkout.join("docs/colm-process-knowledge.md"),
