@@ -398,7 +398,13 @@ jobs:
           Set-Location $SmokeRoot
           $output = & $cli model-list --model-root $modelRoot
           if ($LASTEXITCODE -ne 0) { throw "Installed model-list exited $LASTEXITCODE" }
-          if (@($output | ConvertFrom-Json).Count -eq 0) { throw 'Installed model-list returned no official model' }
+          $official = $output | ConvertFrom-Json | Where-Object { $_.version.id -eq 'official' } | Select-Object -First 1
+          if (!$official) { throw 'Installed model-list returned no official model' }
+          $request = @{ name = 'Installed draft'; note = 'Check compatibility with frozen CLIs'; parent = $official.version } | ConvertTo-Json -Compress
+          $draft = ($request | & $cli model-create --model-root $modelRoot --json '-') | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $draft.code.source_sha256 -ne $official.code.source_sha256) { throw 'Installed draft did not inherit official code' }
+          $stored = Get-Content -LiteralPath (Join-Path $modelRoot "drafts/$($draft.id).json") -Raw | ConvertFrom-Json -AsHashtable
+          if ($stored.ContainsKey('code_editable')) { throw 'Stored draft must be readable by older frozen CLIs' }
           # A second startup exercises the published source and frozen model caches.
           & $cli model-list --model-root $modelRoot
           if ($LASTEXITCODE -ne 0) { throw "Cached model-list exited $LASTEXITCODE" }
@@ -419,6 +425,8 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $clone.content_sha256 -notmatch '^[0-9a-f]{64}$' -or $clone.content_sha256 -ne $baseline.content_sha256) { throw 'Workspace clone changed source bytes' }
           $config = Join-Path $source 'vendor/CoLM202X/include/Makeoptions.github'
           $original = (Get-FileHash -LiteralPath $config -Algorithm SHA256).Hash
+          & $cli ws-rm --name installed-smoke --root $workspaceRoot --path vendor/CoLM202X/include/Makeoptions.github --message 'reject removal of a linked configuration'
+          if ($LASTEXITCODE -eq 0) { throw 'Removal of a linked configuration was accepted' }
           & $cli ws-put --name installed-smoke --root $workspaceRoot --path vendor/CoLM202X/include/Makeoptions.github --from $config --message 'reject self replacement'
           if ($LASTEXITCODE -eq 0) { throw 'Self replacement was accepted' }
           $hardlink = Join-Path $SmokeRoot 'same-config.txt'

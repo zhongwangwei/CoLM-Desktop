@@ -1362,8 +1362,12 @@ export const commandContract = {
       "rust_type": "String"
     },
     "revision": {
-      "required": true,
-      "rust_type": "u32"
+      "required": false,
+      "rust_type": "Option<u32>"
+    },
+    "generation": {
+      "required": false,
+      "rust_type": "Option<u64>"
     },
     "dir": {
       "required": true,
@@ -1376,8 +1380,12 @@ export const commandContract = {
       "rust_type": "String"
     },
     "revision": {
-      "required": true,
-      "rust_type": "u32"
+      "required": false,
+      "rust_type": "Option<u32>"
+    },
+    "generation": {
+      "required": false,
+      "rust_type": "Option<u64>"
     },
     "path": {
       "required": true,

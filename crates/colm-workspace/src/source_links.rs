@@ -1,7 +1,7 @@
 //! Keep Windows source-link copies consistent with their targets when committing edits.
 
-use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 use colm_remote::engine::{resolve_source_file_link, source_links, SOURCE_LINKS_FILE};
@@ -72,58 +72,149 @@ fn regular_path(root: &Path, path: &Path) -> Result<PathBuf> {
     Ok(current)
 }
 
-fn next_path(path: &Path, target: &Path) -> Result<PathBuf> {
-    let mut result = path
+// Include tracked native links without following directory links or scanning ignored trees.
+fn all_links(root: &Path) -> Result<BTreeMap<PathBuf, PathBuf>> {
+    let mut links = source_links(root)?;
+    for file in git::run(root, &["ls-files", "-z"])?
+        .split('\0')
+        .filter(|file| !file.is_empty())
+    {
+        if std::fs::symlink_metadata(root.join(file))
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            links.insert(PathBuf::from(file), std::fs::read_link(root.join(file))?);
+        }
+    }
+    Ok(links)
+}
+
+// Keep the directories traversed before `..`, which lexical normalization would erase.
+fn link_paths(alias: &Path, target: &Path) -> Result<(PathBuf, Vec<PathBuf>)> {
+    ensure!(
+        !target.is_absolute()
+            && !target.components().any(|part| matches!(
+                part,
+                std::path::Component::Prefix(_) | std::path::Component::RootDir
+            )),
+        "source link must be relative"
+    );
+    let mut selected = alias
         .parent()
         .context("source link has no parent")?
         .to_path_buf();
-    for part in target.components() {
-        match part {
-            Component::Normal(part) => result.push(part),
-            Component::CurDir => (),
-            Component::ParentDir => ensure!(result.pop(), "source link escapes root"),
-            _ => anyhow::bail!("source link must be relative"),
+    let parts = target
+        .to_str()
+        .context("source link target must be UTF-8")?
+        .split(|c| c == '/' || (cfg!(windows) && c == '\\'))
+        .collect::<Vec<_>>();
+    let mut directories = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        match *part {
+            "" | "." => (),
+            ".." => ensure!(selected.pop(), "source link escapes root"),
+            part => selected.push(part),
+        }
+        if index + 1 < parts.len() && !selected.as_os_str().is_empty() {
+            directories.push(selected.clone());
         }
     }
-    Ok(result)
+    Ok((selected, directories))
+}
+
+pub(crate) fn preserve_traversal_directories(from: &Path, to: &Path) -> Result<()> {
+    // A sparse source can omit link targets that exist in the full destination checkout.
+    let links = all_links(to)?;
+    for (alias, target) in &links {
+        for directory in link_paths(alias, target)?.1 {
+            if !to.join(&directory).exists() {
+                ensure!(
+                    std::fs::symlink_metadata(from.join(&directory))?.is_dir(),
+                    "source link traverses a missing directory or directory link"
+                );
+                std::fs::create_dir_all(to.join(directory))?;
+            }
+        }
+    }
+    for alias in links.keys() {
+        resolve_source_file_link(to, alias, &links)?;
+    }
+    Ok(())
+}
+
+// Canonicalize parent spelling, but keep a native alias distinct from its target.
+fn entry_identity(root: &Path, path: &Path) -> Result<PathBuf> {
+    if !std::fs::symlink_metadata(root.join(path))
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return relative_identity(root, path);
+    }
+    let parent = path.parent().context("source path has no parent")?;
+    Ok(relative_identity(root, parent)?.join(path.file_name().context("source path has no name")?))
 }
 
 /// Check destructive replacements before deleting anything, including links outside the directory.
-pub(crate) fn check_removal(root: &Path, path: &str, replacement: Option<&Path>) -> Result<()> {
-    let links = source_links(root)?;
+/// Return required empty directories that a replacement must preserve.
+pub(crate) fn check_removal(
+    root: &Path,
+    path: &str,
+    replacement: Option<&Path>,
+) -> Result<BTreeSet<PathBuf>> {
+    let copies = source_links(root)?;
+    let links = all_links(root)?;
     if links.is_empty() {
-        return Ok(());
+        return Ok(BTreeSet::new());
     }
-    let removed = relative_identity(root, Path::new(path))?;
-    let survives = |file: &Path| -> Result<bool> {
-        Ok(relative_identity(root, file)?
-            .strip_prefix(&removed)
-            .map_or(true, |suffix| {
-                replacement.is_some_and(|dir| dir.join(suffix).is_file())
-            }))
+    let removed = entry_identity(root, Path::new(path))?;
+    let projected = |file: &Path| -> Result<PathBuf> {
+        let identity = entry_identity(root, file)?;
+        Ok(match identity.strip_prefix(&removed) {
+            Ok(suffix) => replacement.map(|dir| dir.join(suffix)).unwrap_or_default(),
+            Err(_) => root.join(file),
+        })
     };
+    let mut directories = BTreeSet::new();
     for alias in links.keys() {
-        if !survives(alias)? {
+        let inside = entry_identity(root, alias)?.starts_with(&removed);
+        // Native links in a replaced tree disappear; only materialized aliases retain metadata.
+        if inside && (!copies.contains_key(alias) || !projected(alias)?.is_file()) {
             continue;
         }
-        // Validate the original chain before walking its logical metadata.
-        resolve_source_file_link(root, alias, &links)?;
+        if let Err(error) = resolve_source_file_link(root, alias, &links) {
+            if copies.contains_key(alias) {
+                return Err(error);
+            }
+            continue;
+        }
         let mut selected = alias.clone();
         while let Some(target) = links.get(&selected) {
-            selected = next_path(&selected, target)?;
+            if selected != *alias
+                && entry_identity(root, &selected)?.starts_with(&removed)
+                && !copies.contains_key(&selected)
+            {
+                // A native intermediate link becomes the replacement's regular file.
+                break;
+            }
+            let (next, traversed) = link_paths(&selected, target)?;
+            for directory in traversed {
+                ensure!(
+                    projected(&directory)?.is_dir(),
+                    "cannot remove {} while source link {} traverses it",
+                    directory.display(),
+                    alias.display()
+                );
+                if let Ok(suffix) = entry_identity(root, &directory)?.strip_prefix(&removed) {
+                    directories.insert(suffix.to_path_buf());
+                }
+            }
+            selected = next;
             ensure!(
-                survives(&selected)?,
+                projected(&selected)?.is_file(),
                 "cannot remove {} while source link {} still uses it",
                 selected.display(),
                 alias.display()
             );
         }
-        if let Some(replacement) = replacement {
-            let projected = |file: &Path| -> Result<PathBuf> {
-                Ok(relative_identity(root, file)?
-                    .strip_prefix(&removed)
-                    .map_or_else(|_| root.join(file), |suffix| replacement.join(suffix)))
-            };
+        if replacement.is_some() && copies.contains_key(alias) {
             let copy = std::fs::read(projected(alias)?)?;
             ensure!(
                 copy == std::fs::read(projected(&selected)?)?
@@ -131,6 +222,32 @@ pub(crate) fn check_removal(root: &Path, path: &str, replacement: Option<&Path>)
                 "source-link conflict: replacement of {} differs from its target",
                 alias.display()
             );
+        }
+    }
+    Ok(directories)
+}
+
+// Preserve legacy workspaces with unrelated unsupported links while protecting valid ones.
+pub(crate) fn valid_native_links(root: &Path) -> Result<Vec<PathBuf>> {
+    let links = all_links(root)?;
+    Ok(links
+        .keys()
+        .filter(|alias| {
+            std::fs::symlink_metadata(root.join(alias))
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && resolve_source_file_link(root, alias, &links).is_ok()
+        })
+        .cloned()
+        .collect())
+}
+
+pub(crate) fn check_native_links(root: &Path, aliases: &[PathBuf]) -> Result<()> {
+    let links = source_links(root)?;
+    for alias in aliases {
+        if std::fs::symlink_metadata(root.join(alias))
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            resolve_source_file_link(root, alias, &links)?;
         }
     }
     Ok(())

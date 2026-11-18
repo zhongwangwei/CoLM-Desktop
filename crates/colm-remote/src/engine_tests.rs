@@ -41,6 +41,42 @@ fn source_upload_directory_is_private_and_refuses_existing_paths() {
 }
 
 #[test]
+fn packing_rejects_changed_sources_without_replacing_previous_output() {
+    let root = std::env::temp_dir().join(format!("colm-stale-pack-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("crates")).unwrap();
+    std::fs::write(root.join("Cargo.lock"), "lock").unwrap();
+    std::fs::write(root.join("crates/main.rs"), "original").unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["init", "-q"])
+        .status()
+        .unwrap()
+        .success());
+    let original = snapshot(&Source::Checkout(root.clone())).unwrap();
+    let archive = root.join("source.tar.gz");
+    pack_source(&original, &archive).unwrap();
+    let previous = std::fs::read(&archive).unwrap();
+    std::fs::write(root.join("crates/main.rs"), "changed").unwrap();
+    let error = pack_source(&original, &archive).unwrap_err();
+    assert!(error.to_string().contains("source changed"), "{error:#}");
+    assert_eq!(std::fs::read(&archive).unwrap(), previous);
+    let missing = root.join("new.tar.gz");
+    assert!(pack_source(&original, &missing).is_err());
+    assert!(!missing.exists());
+    assert!(!std::fs::read_dir(&root).unwrap().any(|entry| entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".colm-source-stage-")));
+    let current = snapshot(&Source::Checkout(root.clone())).unwrap();
+    pack_source(&current, &archive).unwrap();
+    assert_eq!(tarball_content_id(&archive).unwrap(), current.id);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn source_identity_schema_preserves_legacy_and_binds_embedded_inputs() {
     let root = std::env::temp_dir().join(format!("colm-source-schema-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);

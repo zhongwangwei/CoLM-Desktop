@@ -458,3 +458,125 @@ fn local_clone_preserves_clean_crlf_bytes_but_not_ignored_files_or_newer_revisio
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn clean_sparse_source_clones_omitted_files_and_preserves_available_bytes() {
+    let root = temp("clone-sparse");
+    let repo = root.join("source");
+    source_repo(&repo);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            "../vendor/CoLM202X/main/MOD_Demo.F90",
+            repo.join("crates/alias"),
+        )
+        .unwrap();
+        git::run(&repo, &["add", "-A"]).unwrap();
+        git::run(&repo, &["commit", "-qm", "cross-tree link"]).unwrap();
+    }
+    git::run(&repo, &["sparse-checkout", "set", "--cone", "crates"]).unwrap();
+    assert!(!repo.join("vendor/CoLM202X/main/MOD_Demo.F90").exists());
+    let ws = Workspace::create(&root.join("ws"), "demo", repo.to_str().unwrap(), None).unwrap();
+    assert!(ws.src().join("vendor/CoLM202X/main/MOD_Demo.F90").is_file());
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+}
+
+#[test]
+fn clean_clone_preserves_only_link_traversal_directories() {
+    let root = temp("clone-link-dirs");
+    let repo = root.join("source");
+    source_repo(&repo);
+    std::fs::create_dir_all(repo.join("crates/empty")).unwrap();
+    std::fs::create_dir_all(repo.join("unrelated-empty")).unwrap();
+    std::fs::write(repo.join("crates/target"), "same\n").unwrap();
+    std::fs::write(repo.join("crates/alias"), "same\n").unwrap();
+    std::fs::write(
+        repo.join(".colm-source-links.json"),
+        r#"{"crates/alias":"empty/../target"}"#,
+    )
+    .unwrap();
+    git::run(&repo, &["add", "-A"]).unwrap();
+    git::run(&repo, &["commit", "-qm", "links"]).unwrap();
+    let ws = Workspace::create(&root.join("ws"), "demo", repo.to_str().unwrap(), None).unwrap();
+    assert!(ws.src().join("crates/empty").is_dir());
+    assert!(!ws.src().join("unrelated-empty").exists());
+    colm_remote::engine::resolve_source_file_link(
+        &ws.src(),
+        Path::new("crates/alias"),
+        &colm_remote::engine::source_links(&ws.src()).unwrap(),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        std::fs::remove_file(repo.join(".colm-source-links.json")).unwrap();
+        std::fs::remove_file(repo.join("crates/alias")).unwrap();
+        std::os::unix::fs::symlink("empty/../target", repo.join("crates/alias")).unwrap();
+        git::run(&repo, &["add", "-A"]).unwrap();
+        git::run(&repo, &["commit", "-qm", "native link"]).unwrap();
+        let native =
+            Workspace::create(&root.join("ws"), "native", repo.to_str().unwrap(), None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(native.src().join("crates/alias")).unwrap(),
+            "same\n"
+        );
+        assert!(!native.src().join("unrelated-empty").exists());
+    }
+}
+
+#[test]
+fn selected_revision_and_dirty_source_keep_selected_link_traversal_directories() {
+    let root = temp("clone-selected-link-dirs");
+    let repo = root.join("source");
+    source_repo(&repo);
+    std::fs::create_dir_all(repo.join("crates/empty")).unwrap();
+    std::fs::write(repo.join("crates/target"), "old\n").unwrap();
+    std::fs::write(repo.join("crates/alias"), "old\n").unwrap();
+    std::fs::write(
+        repo.join(".colm-source-links.json"),
+        r#"{"crates/alias":"empty/../target"}"#,
+    )
+    .unwrap();
+    git::run(&repo, &["add", "-A"]).unwrap();
+    git::run(&repo, &["commit", "-qm", "old links"]).unwrap();
+    let selected = git::head(&repo).unwrap();
+    std::fs::write(repo.join("crates/target"), "new\n").unwrap();
+    std::fs::write(repo.join("crates/alias"), "new\n").unwrap();
+    git::run(&repo, &["add", "-A"]).unwrap();
+    git::run(&repo, &["commit", "-qm", "new bytes"]).unwrap();
+    let older = Workspace::create(
+        &root.join("ws"),
+        "older",
+        repo.to_str().unwrap(),
+        Some(&selected),
+    )
+    .unwrap();
+    assert!(older.src().join("crates/empty").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(older.src().join("crates/target")).unwrap(),
+        "old\n"
+    );
+    std::fs::write(repo.join("crates/target"), "dirty\n").unwrap();
+    std::fs::write(repo.join("crates/alias"), "dirty\n").unwrap();
+    std::fs::write(
+        repo.join(".colm-source-links.json"),
+        r#"{"crates/alias":"missing/../target"}"#,
+    )
+    .unwrap();
+    let current =
+        Workspace::create(&root.join("ws"), "dirty", repo.to_str().unwrap(), None).unwrap();
+    assert!(current.src().join("crates/empty").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(current.src().join("crates/target")).unwrap(),
+        "new\n"
+    );
+    for ws in [&older, &current] {
+        colm_remote::engine::resolve_source_file_link(
+            &ws.src(),
+            Path::new("crates/alias"),
+            &colm_remote::engine::source_links(&ws.src()).unwrap(),
+        )
+        .unwrap();
+        assert!(!git::is_dirty(&ws.src()).unwrap());
+        assert!(!ws.src().join("crates/missing").exists());
+    }
+}

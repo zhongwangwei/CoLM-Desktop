@@ -542,6 +542,7 @@ fn normalize(path: &Path) -> PathBuf {
 /// Preserve the selected clean working tree, including historical CRLF sources.
 /// Only tracked regular files at the same commit are copied; ignored files never travel.
 pub fn preserve_checkout_bytes(from: &Path, to: &Path) -> Result<()> {
+    crate::source_links::preserve_traversal_directories(from, to)?;
     if git::head(from)? != git::head(to)? || git::is_dirty(from)? {
         return Ok(());
     }
@@ -550,12 +551,22 @@ pub fn preserve_checkout_bytes(from: &Path, to: &Path) -> Result<()> {
             git::run(to, &["config", key, &value])?;
         }
     }
-    for file in git::run(from, &["ls-files", "-z"])?
+    for entry in git::run(from, &["ls-files", "-t", "-z"])?
         .split('\0')
         .filter(|p| !p.is_empty())
     {
+        let file = &entry[2..];
         let source = from.join(file);
-        if std::fs::symlink_metadata(&source)?.file_type().is_file() {
+        let metadata = match std::fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if entry.starts_with("S ") && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                continue
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_file() {
             let target = to.join(file);
             ensure!(
                 std::fs::symlink_metadata(&target)?.file_type().is_file(),

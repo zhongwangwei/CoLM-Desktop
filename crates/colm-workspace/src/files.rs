@@ -604,9 +604,12 @@ pub fn put_dir(workspace: &Workspace, path: &str, from: &Path, message: &str) ->
         check_path(&format!("{path}/{}", relative.replace('\\', "/")))?;
     }
     clean(workspace)?;
-    crate::source_links::check_removal(&workspace.src(), path, Some(from))?;
+    let directories = crate::source_links::check_removal(&workspace.src(), path, Some(from))?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
+    }
+    for directory in directories {
+        std::fs::create_dir_all(dir.join(directory))?;
     }
     for file in &files {
         let destination = dir.join(file);

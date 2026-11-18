@@ -32,7 +32,7 @@ const byteLength = (text: string) => new TextEncoder().encode(text).length;
 /**
  * 修改版的代码文件：浏览源码目录，文本文件直接在这里编辑保存；任何文件或整个目录都能用本机的
  * 文件、文件夹替换（可以是二进制，比如查找表），也能新增和删除。每次改动都是工作区里的一次提交。
- * 给了 `source`（一个冻结版本）就只读浏览它冻结时的代码，不能改。
+ * 给了 `source`（冻结版本或草稿代次）就只读浏览它保存的源码，不能改。
  *
  * 这个组件是源码缓冲区的唯一持有者。未保存状态通过 `onStateChange` 交给 CodeWorkspace / VersionsPage，
  * 让离开页面、切工作区、关窗、编译、冻结都能统一处理（GUI-02）。保存/新建/替换时把工作区名、
@@ -61,7 +61,7 @@ export default function CodeFiles({
   onStateChange?: (state: SourceEditState | null) => void;
   /** 外部改动被快照记成提交后 +1：干净缓冲区自动重载，脏缓冲区显示冲突（GUI-03）。 */
   externalChangeToken?: number;
-  source?: { id: string; revision: number };
+  source?: { id: string; revision?: number; generation?: number };
   /** 用来打开文件的本地程序（`CodeWorkspace` 里选的）；空着用系统默认程序。 */
   editor?: string;
 }) {
@@ -85,7 +85,7 @@ export default function CodeFiles({
   const opEpoch = useRef(0);
   // 上下文身份（工作区 + 冻结版本）：换了对象之后，任何在飞的读取/保存响应都不许回写。
   const contextRef = useRef('');
-  contextRef.current = `${name}\u0000${source?.id ?? ''}\u0000${source?.revision ?? ''}`;
+  contextRef.current = `${name}\u0000${source?.id ?? ''}\u0000${source?.revision ?? ''}\u0000${source?.generation ?? ''}`;
   // 异步返回后要用"现在"的说明、回调，而不是发起时那一帧闭包里的。
   const latest = useRef({ message, onChanged, disabled });
   latest.current = { message, onChanged, disabled };
@@ -140,7 +140,7 @@ export default function CodeFiles({
     });
     return invalidatePending;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name, source?.id, source?.revision]);
+  }, [name, source?.id, source?.revision, source?.generation]);
   useEffect(
     () => () => {
       alive.current = false;

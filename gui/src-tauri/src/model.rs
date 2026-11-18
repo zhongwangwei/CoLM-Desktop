@@ -2996,34 +2996,73 @@ pub fn model_fields() -> Vec<crate::config::Field> {
         .collect()
 }
 
-/// 只读浏览冻结版本的代码：列一个目录。
-#[tauri::command]
-pub async fn model_code_files(id: String, revision: u32, dir: String) -> Result<Value, String> {
-    cli(vec![
-        "model-code-ls".into(),
-        "--version".into(),
-        id,
-        "--revision".into(),
-        revision.to_string(),
-        "--dir".into(),
-        dir,
-    ])
-    .await
+fn code_selection_args(
+    id: String,
+    revision: Option<u32>,
+    generation: Option<u64>,
+) -> Result<Vec<String>, String> {
+    match (revision, generation) {
+        (Some(revision), None) => Ok(vec![
+            "--version".into(),
+            id,
+            "--revision".into(),
+            revision.to_string(),
+        ]),
+        (None, Some(generation)) => Ok(vec![
+            "--draft-id".into(),
+            id,
+            "--expected-generation".into(),
+            generation.to_string(),
+        ]),
+        _ => Err("select one frozen revision or draft generation".into()),
+    }
 }
 
-/// 只读浏览冻结版本的代码：读一个文件（二进制或超过 2 MB 时只给大小）。
+#[cfg(test)]
+mod code_selection_tests {
+    use super::code_selection_args;
+
+    #[test]
+    fn source_selection_preserves_revisions_and_pins_draft_generations() {
+        assert_eq!(
+            code_selection_args("model".into(), Some(2), None).unwrap(),
+            ["--version", "model", "--revision", "2"]
+        );
+        assert_eq!(
+            code_selection_args("draft".into(), None, Some(3)).unwrap(),
+            ["--draft-id", "draft", "--expected-generation", "3"]
+        );
+        assert!(code_selection_args("model".into(), None, None).is_err());
+        assert!(code_selection_args("model".into(), Some(2), Some(3)).is_err());
+    }
+}
+
+/// 只读浏览冻结版本或草稿保存的代码：列一个目录。
 #[tauri::command]
-pub async fn model_code_file(id: String, revision: u32, path: String) -> Result<Value, String> {
-    cli(vec![
-        "model-code-file".into(),
-        "--version".into(),
-        id,
-        "--revision".into(),
-        revision.to_string(),
-        "--path".into(),
-        path,
-    ])
-    .await
+pub async fn model_code_files(
+    id: String,
+    revision: Option<u32>,
+    generation: Option<u64>,
+    dir: String,
+) -> Result<Value, String> {
+    let mut args = vec!["model-code-ls".into()];
+    args.extend(code_selection_args(id, revision, generation)?);
+    args.extend(["--dir".into(), dir]);
+    cli(args).await
+}
+
+/// 只读浏览保存的源码；二进制或超过 2 MB 的文件只给大小。
+#[tauri::command]
+pub async fn model_code_file(
+    id: String,
+    revision: Option<u32>,
+    generation: Option<u64>,
+    path: String,
+) -> Result<Value, String> {
+    let mut args = vec!["model-code-file".into()];
+    args.extend(code_selection_args(id, revision, generation)?);
+    args.extend(["--path".into(), path]);
+    cli(args).await
 }
 
 /// 给还在用父版本代码的草稿复制一份它自己的代码（版本页"开始修改代码"，约 3 秒）。

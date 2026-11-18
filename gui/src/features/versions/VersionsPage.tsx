@@ -1053,11 +1053,13 @@ export default function VersionsPage() {
   const codeEditable =
     !!draft &&
     (draft.code_editable ??
-      (!!parentCode &&
+      (draft.code.kind === 'workspace' &&
+        !!parentCode &&
         (draft.code.kind !== parentCode.kind ||
           draft.code.workspace !== parentCode.workspace ||
           draft.code.commit !== parentCode.commit ||
           draft.code.source_sha256 !== parentCode.source_sha256)));
+  const draftCodeSource = draft ? { id: draft.id, generation: draft.generation } : undefined;
   // 派生链：官方 r101 › 根系方案 r1 › 根系方案调参 r2。
   const backToResearch = !!draft && draft.id === researchDraft;
   const lineage = (() => {
@@ -1729,8 +1731,8 @@ export default function VersionsPage() {
                   <>
                     <p>
                       {t(
-                        '这个草稿还在用父版本的代码。要改代码，点下面的按钮：会复制一份父版本冻结时的代码（约 3 秒），之后可以直接改任意 Rust 或 Fortran 文件、替换或新增文件；冻结时这份代码随版本一起冻结。',
-                        'This draft still uses the parent’s code. To change code, start below: it copies the parent’s frozen code (about 3 seconds); then edit any Rust or Fortran file, replace or add files; freezing freezes this code with the version.',
+                        '这个草稿使用已保存的冻结源码。要改代码，点下面的按钮：会复制一份草稿当前引用的源码（约 3 秒），之后可以直接改任意 Rust 或 Fortran 文件、替换或新增文件；冻结时这份代码随版本一起冻结。',
+                        'This draft uses saved frozen code. To change code, start below: it copies the code currently referenced by this draft (about 3 seconds); then edit any Rust or Fortran file, replace or add files; freezing freezes this code with the version.',
                       )}
                     </p>
                     <div className="button-row">
@@ -1746,7 +1748,7 @@ export default function VersionsPage() {
                       </ActionButton>
                     </div>
                     <h3 className="versions-subhead">
-                      {t('父版本的代码（只读）', 'The parent’s code (read-only)')}
+                      {t('草稿引用的代码（只读）', 'The draft’s saved code (read-only)')}
                     </h3>
                     <CodeFiles
                       name=""
@@ -1754,7 +1756,7 @@ export default function VersionsPage() {
                       en={state.language === 'en'}
                       disabled={false}
                       onChanged={async () => {}}
-                      source={draft.parent}
+                      source={draftCodeSource}
                     />
                     <Advanced
                       action="version-reuse-workspace-advanced"

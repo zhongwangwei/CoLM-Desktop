@@ -1987,9 +1987,9 @@ mod artifact_tests {
 }
 
 fn draft_code_editable(store: &Registry, draft: &ModelDraft) -> Result<bool> {
-    Ok(draft
-        .code_editable
-        .unwrap_or(draft.code != store.get(&draft.parent)?.code))
+    Ok(draft.code_editable.unwrap_or(
+        draft.code.kind == CodeKind::Workspace && draft.code != store.get(&draft.parent)?.code,
+    ))
 }
 
 /// 用自己代码工作区的草稿在冻结前要过的检查（[`colm_workspace::version::freeze_check`]）；沿用官方
@@ -2054,35 +2054,37 @@ fn branch_parent_code(
     parent: &colm_model::FrozenRevision,
     draft_id: &str,
 ) -> Result<CodeRef> {
-    let name = format!("ver-{}", draft_id.trim_start_matches("model-"));
-    // 官方版优先用源码缓存里的普通目录：从源码包建仓库时被 .gitignore 忽略的文件不会被跟踪，
-    // 内容哈希只算跟踪的文件，就和冻结时对不上（官方 r99 实测）。
-    let plain = cache_dir(opts, &parent.code)?.join("source");
-    let snapshot = match parent.code.kind {
-        CodeKind::Official if plain.is_dir() => plain,
-        _ => cached_source_dir(opts, &parent.code)?,
-    };
-    ensure!(
-        snapshot.exists(),
-        "the source frozen with {}#{} is no longer in the model registry; its code cannot be copied",
-        parent.version.id,
-        parent.version.revision
-    );
     let label = format!(
         "{} ({}#{})",
         parent.name, parent.version.id, parent.version.revision
     );
+    branch_saved_code(opts, &parent.code, &label, draft_id)
+}
+
+fn branch_saved_code(opts: &Opts, saved: &CodeRef, label: &str, draft_id: &str) -> Result<CodeRef> {
+    let name = format!("ver-{}", draft_id.trim_start_matches("model-"));
+    // 官方版优先用源码缓存里的普通目录：从源码包建仓库时被 .gitignore 忽略的文件不会被跟踪，
+    // 内容哈希只算跟踪的文件，就和冻结时对不上（官方 r99 实测）。
+    let plain = cache_dir(opts, saved)?.join("source");
+    let snapshot = match saved.kind {
+        CodeKind::Official if plain.is_dir() => plain,
+        _ => cached_source_dir(opts, saved)?,
+    };
+    ensure!(
+        snapshot.exists(),
+        "the saved source for {label} is no longer in the model registry; its code cannot be copied"
+    );
     let root = crate::provenance::workspace_root(opts.get("--workspace-root"));
-    let rev = match parent.code.kind {
-        CodeKind::Workspace => parent.code.commit.as_deref(),
+    let rev = match saved.kind {
+        CodeKind::Workspace => saved.commit.as_deref(),
         CodeKind::Official => None,
     };
     let mut workspace =
-        colm_workspace::Workspace::create_from_snapshot(&root, &name, &snapshot, &label, rev)?;
+        colm_workspace::Workspace::create_from_snapshot(&root, &name, &snapshot, label, rev)?;
     // 父版本自己基于一个工作区时，记下它是谁、官方源码是哪次提交：改动范围、要不要自己的内核都相对官方算。
-    let parent_info = match &parent.code.workspace {
+    let parent_info = match &saved.workspace {
         Some(parent_name) => {
-            let file = cache_dir(opts, &parent.code)?
+            let file = cache_dir(opts, saved)?
                 .join("workspaces")
                 .join(parent_name)
                 .join("workspace.json");
@@ -2105,14 +2107,10 @@ fn branch_parent_code(
         }
     })?;
     let copied = code(opts, Some(&name))?;
-    if copied.source_sha256 != parent.code.source_sha256 {
+    if copied.source_sha256 != saved.source_sha256 {
         // 不留一个代码和父版本不一样的副本。
         let _ = std::fs::remove_dir_all(&workspace.dir);
-        anyhow::bail!(
-            "the copied code differs from the code frozen with {}#{}",
-            parent.version.id,
-            parent.version.revision
-        );
+        anyhow::bail!("the copied code differs from the saved code for {label}");
     }
     Ok(copied)
 }
@@ -2132,11 +2130,15 @@ fn branch_draft_code(store: &Registry, opts: &Opts) -> Result<serde_json::Value>
         "this draft already has its own code"
     );
     let parent = store.get(&draft.parent)?;
-    ensure!(
-        draft.code == parent.code,
-        "this draft does not use its parent's code; choose its code workspace instead"
-    );
-    draft.code = branch_parent_code(opts, &parent, &draft.id)?;
+    let label = if draft.code == parent.code {
+        format!(
+            "{} ({}#{})",
+            parent.name, parent.version.id, parent.version.revision
+        )
+    } else {
+        format!("{} (saved draft code)", draft.name)
+    };
+    draft.code = branch_saved_code(opts, &draft.code, &label, &draft.id)?;
     draft.code_editable = Some(true);
     let generation = draft.generation;
     Ok(serde_json::to_value(store.save_draft(draft, generation)?)?)
@@ -4720,6 +4722,126 @@ mod inherited_draft_tests {
         assert_eq!(store.draft("inherited").unwrap().code, code);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn legacy_official_selection_different_from_parent_is_immutable() {
+        let root = std::env::temp_dir().join(unique_id());
+        let store = Registry::open(&root).unwrap();
+        let parent = store
+            .install_official(CodeRef {
+                kind: CodeKind::Official,
+                workspace: None,
+                commit: None,
+                source_sha256: "a".repeat(64),
+            })
+            .unwrap();
+        let draft: ModelDraft = serde_json::from_value(serde_json::json!({
+            "id":"legacy", "name":"Legacy", "note":"old saved official selection",
+            "parent":parent.version, "code": {"kind":"official", "workspace":null, "commit":null, "source_sha256":"b".repeat(64)},
+            "overlay":{}, "generation":0
+        })).unwrap();
+        assert!(!draft_code_editable(&store, &draft).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_official_draft_saves_freezes_and_copies_its_saved_source() {
+        let root = std::env::temp_dir().join(unique_id());
+        let mut opts = Opts {
+            positional: vec![],
+            flags: vec![
+                (
+                    "--model-root".into(),
+                    root.join("models").to_string_lossy().into_owned(),
+                ),
+                (
+                    "--workspace-root".into(),
+                    root.join("ws").to_string_lossy().into_owned(),
+                ),
+            ],
+        };
+        let store = registry(&opts).unwrap();
+        let parent = store
+            .install_official(CodeRef {
+                kind: CodeKind::Official,
+                workspace: None,
+                commit: None,
+                source_sha256: "a".repeat(64),
+            })
+            .unwrap();
+        let source = root.join("saved-source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(
+            source.join("Cargo.toml"),
+            "[workspace]\n# saved official source\n",
+        )
+        .unwrap();
+        let saved_code = CodeRef {
+            source_sha256: crate::remote_cmd::source_content_sha256(&source).unwrap(),
+            ..parent.code.clone()
+        };
+        let cache = cache_dir(&opts, &saved_code).unwrap();
+        copy_tree(&source, &cache.join("source")).unwrap();
+        std::fs::write(
+            cache.join("code.json"),
+            serde_json::to_vec(&saved_code).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(cache.join("artifacts.json"), "{}").unwrap();
+        std::fs::create_dir_all(cache.join("bin")).unwrap();
+        for (_, name) in colm_remote::engine::BINARIES {
+            std::fs::write(cache.join("bin").join(executable(name)), name).unwrap();
+        }
+        let programs =
+            crate::provenance::program_identities(&cache.join("bin").join(executable("colm-cli")))
+                .unwrap();
+        std::fs::write(
+            cache.join("bin/colm-build-source.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "source_sha256": saved_code.source_sha256, "program_sha256": programs
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let draft = store
+            .create_draft(
+                serde_json::from_value(serde_json::json!({
+                    "id":"legacy", "name":"Legacy", "note":"old saved official selection",
+                    "parent":parent.version, "code":saved_code, "overlay":{}, "generation":0
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        opts.flags.extend([
+            ("--json".into(), serde_json::to_string(&draft).unwrap()),
+            ("--expected-generation".into(), "1".into()),
+            ("--model-id".into(), draft.id.clone()),
+        ]);
+        cmd("model-save-draft", &opts).unwrap();
+        assert_eq!(store.draft(&draft.id).unwrap().code, saved_code);
+        cmd("model-freeze", &opts).unwrap();
+        assert_eq!(
+            store
+                .get(&VersionRef {
+                    id: draft.id.clone(),
+                    revision: 1
+                })
+                .unwrap()
+                .code,
+            saved_code
+        );
+        opts.flags.retain(|(key, _)| key != "--expected-generation");
+        opts.flags
+            .push(("--expected-generation".into(), "2".into()));
+        let branched = branch_draft_code(&store, &opts).unwrap();
+        assert_eq!(branched["code_editable"], true);
+        assert_eq!(branched["code"]["source_sha256"], saved_code.source_sha256);
+        assert_eq!(
+            std::fs::read_to_string(root.join("ws/ver-legacy/src/Cargo.toml")).unwrap(),
+            "[workspace]\n# saved official source\n"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn workspace_fixture() -> (
         PathBuf,
         Opts,
@@ -4776,6 +4898,89 @@ mod inherited_draft_tests {
             "overlay":parent.overlay, "generation":0
         })).unwrap()).unwrap();
         (root, opts, store, ws, draft)
+    }
+
+    #[test]
+    #[ignore = "requires COLM_LEGACY_CLI pointing to a released beta12 CLI"]
+    fn genuine_beta12_can_read_and_save_same_workspace_ownership() {
+        let legacy = std::env::var_os("COLM_LEGACY_CLI").expect("set COLM_LEGACY_CLI");
+        let (root, opts, store, _ws, base) = workspace_fixture();
+        let parent = store.freeze(&base.id, &root).unwrap();
+        let mut child = base.clone();
+        child.id = "same-workspace".into();
+        child.parent = parent.version;
+        let child = store.create_draft(child).unwrap();
+        // Simulate a still-unmigrated beta13 row unrelated to the selected draft.
+        std::fs::write(
+            store.root().join("drafts/editable.json"),
+            serde_json::to_vec(&base).unwrap(),
+        )
+        .unwrap();
+        store.prepare_legacy_drafts().unwrap();
+        let run = |command: &str, flags: &[(&str, String)]| {
+            let mut process = std::process::Command::new(&legacy);
+            process
+                .arg(command)
+                .env("COLM_AUDIT_BY_PARENT", "1")
+                .env("COLM_STUDY_BY_PARENT", "1");
+            for (key, value) in &opts.flags {
+                process.arg(key).arg(value);
+            }
+            for (key, value) in flags {
+                process.arg(key).arg(value);
+            }
+            process.output().unwrap()
+        };
+        for id in [&base.id, &child.id] {
+            let read = run("model-draft", &[("--model-id", id.clone())]);
+            assert!(
+                read.status.success(),
+                "{}",
+                String::from_utf8_lossy(&read.stderr)
+            );
+            let wire: serde_json::Value = serde_json::from_slice(&read.stdout).unwrap();
+            assert!(wire.get("code_editable").is_none());
+        }
+        let mut legacy_draft = child.clone();
+        legacy_draft.code_editable = None;
+        legacy_draft.note = "saved by real beta12".into();
+        let result = run(
+            "model-save-draft",
+            &[
+                ("--json", serde_json::to_string(&legacy_draft).unwrap()),
+                ("--expected-generation", child.generation.to_string()),
+            ],
+        );
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let saved = store.draft(&child.id).unwrap();
+        assert_eq!(saved.code_editable, Some(true));
+        assert_eq!(saved.code, child.code);
+        assert_eq!(saved.generation, child.generation + 1);
+        assert_eq!(saved.note, "saved by real beta12");
+        let study = root.join("empty-study");
+        std::fs::create_dir(&study).unwrap();
+        for preview in [true, false] {
+            let mut flags = vec![
+                ("--model-id", child.id.clone()),
+                ("--study-dir", study.to_string_lossy().into_owned()),
+            ];
+            if preview {
+                flags.push(("--preview", "1".into()));
+            } else {
+                flags.push(("--expected-generation", saved.generation.to_string()));
+            }
+            let result = run("model-import-study", &flags);
+            assert!(!result.status.success());
+            let error = String::from_utf8_lossy(&result.stderr);
+            assert!(!error.contains("unknown field"), "{error}");
+            assert!(error.contains("cannot verify the Study member"), "{error}");
+        }
+        assert_eq!(store.draft(&child.id).unwrap(), saved);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

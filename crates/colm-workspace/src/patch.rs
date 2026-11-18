@@ -176,8 +176,11 @@ pub fn apply(workspace: &Workspace, diff: &str, message: &str) -> Result<Applied
         &bytes,
     )
     .context("the patch does not apply to the current files")?;
+    let native_links = crate::source_links::valid_native_links(&src)?;
     git::run_with_input(&src, &["apply", "--whitespace=nowarn", "-"], &bytes)?;
-    match crate::source_links::synchronize(&src) {
+    match crate::source_links::check_native_links(&src, &native_links)
+        .and_then(|()| crate::source_links::synchronize(&src))
+    {
         Ok(aliases) => files.extend(aliases),
         Err(error) => {
             git::run_with_input(

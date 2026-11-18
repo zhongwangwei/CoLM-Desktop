@@ -105,7 +105,7 @@ pub struct Applicability {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelDraft {
-    /// Whether this draft follows a live workspace rather than inherited frozen code.
+    /// Whether this draft follows a live workspace; Registry stores this outside legacy draft JSON.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_editable: Option<bool>,
     pub id: String,

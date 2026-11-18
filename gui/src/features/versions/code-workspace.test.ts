@@ -359,5 +359,16 @@ test('inherited workspace code stays read-only while explicit workspace choices 
   );
   assert.equal(editable({ code: { ...code, workspace: 'copy' } }), true, 'legacy owned copy');
   assert.equal(editable({ code }, null), false, 'missing parent must not expose live source');
+  assert.equal(
+    editable({ code: { kind: 'official', workspace: null, commit: null, source_sha256: '456' } }),
+    false,
+    'legacy official selection is immutable even when it differs from parent',
+  );
   assert.equal(editable(null), false);
+});
+
+test('readonly draft browsing selects its saved generation even without a matching frozen revision', () => {
+  const draft = { id: 'legacy', generation: 3, parent: { id: 'official', revision: 1 } };
+  const selected = evaluate('./VersionsPage.tsx', 'draftCodeSource', 'const', { draft });
+  assert.deepEqual(selected, { id: 'legacy', generation: 3 });
 });

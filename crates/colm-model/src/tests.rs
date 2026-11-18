@@ -2455,3 +2455,161 @@ fn freezing_a_refreshed_candidate_is_atomic_for_draft_state() {
         .unwrap();
     assert!(reg.freeze_draft_keeping(candidate, &tmp.0, true).is_err());
 }
+
+#[test]
+fn draft_ownership_is_compatible_with_legacy_readers_and_writers() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let parent = reg.install_official(code()).unwrap();
+    let mut input = draft(parent.version);
+    input.code_editable = Some(false);
+    let saved = reg.create_draft(input).unwrap();
+    let path = reg.root().join("drafts/experiment.json");
+    let mut legacy: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(
+        legacy.get("code_editable").is_none(),
+        "old pinned readers reject unknown fields"
+    );
+    legacy["generation"] = 2.into();
+    legacy["note"] = "written by beta12".into();
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let loaded = reg.draft(&saved.id).unwrap();
+    assert_eq!(loaded.code_editable, Some(false));
+    assert_eq!(loaded.generation, 2);
+    assert_eq!(loaded.note, "written by beta12");
+}
+
+#[test]
+fn legacy_preflight_migrates_all_beta13_drafts() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let parent = reg.install_official(code()).unwrap();
+    let saved = reg.create_draft(draft(parent.version)).unwrap();
+    let path = reg.root().join("drafts/experiment.json");
+    let mut inline = saved.clone();
+    inline.code_editable = Some(false);
+    fs::write(&path, serde_json::to_vec(&inline).unwrap()).unwrap();
+    let reg = Registry::open(reg.root()).unwrap();
+    reg.prepare_legacy_drafts().unwrap();
+    assert_eq!(reg.draft(&saved.id).unwrap(), inline);
+    let disk: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(disk.get("code_editable").is_none());
+}
+
+#[test]
+fn explicit_same_workspace_ownership_survives_legacy_overlay_writes() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let official = reg.install_official(code()).unwrap();
+    let mut base = draft(official.version);
+    base.id = "workspace-base".into();
+    base.code.kind = CodeKind::Workspace;
+    base.code.workspace = Some("shared".into());
+    base.code.commit = Some("a".repeat(40));
+    let base = reg.create_draft(base).unwrap();
+    let parent = reg.freeze(&base.id, &tmp.0).unwrap();
+    let mut child = draft(parent.version);
+    child.code = parent.code;
+    child.code_editable = Some(true);
+    let child = reg.create_draft(child).unwrap();
+    let path = reg.root().join("drafts/experiment.json");
+    let mut legacy: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert!(legacy.get("code_editable").is_none());
+    legacy["generation"] = 2.into();
+    legacy["overlay"]["physics"]["DEF_TUNING_CSOILC"] = "0.006".into();
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let current = reg.draft(&child.id).unwrap();
+    assert_eq!(current.code_editable, Some(true));
+    assert_eq!(current.overlay.physics["DEF_TUNING_CSOILC"], "0.006");
+    // Old writers changing the code identity cannot reuse ownership of another source.
+    legacy["code"]["source_sha256"] = "b".repeat(64).into();
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(reg.draft(&child.id).unwrap().code_editable, None);
+}
+
+#[test]
+fn failed_draft_publication_cannot_grant_ownership_after_a_legacy_save() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let parent = reg.install_official(code()).unwrap();
+    let mut input = draft(parent.version);
+    input.code_editable = Some(false);
+    let old = reg.create_draft(input).unwrap();
+    let mut requested = old.clone();
+    requested.code_editable = Some(true);
+    let obstacle = reg
+        .root()
+        .join(format!("drafts/experiment.tmp-{}", std::process::id()));
+    fs::create_dir(&obstacle).unwrap();
+    assert!(reg.save_draft(requested, old.generation).is_err());
+    assert_eq!(reg.draft(&old.id).unwrap(), old);
+    fs::remove_dir(&obstacle).unwrap();
+    let path = reg.root().join("drafts/experiment.json");
+    let mut legacy: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    legacy["generation"] = 2.into();
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert_eq!(reg.draft(&old.id).unwrap().code_editable, Some(false));
+}
+
+#[test]
+fn malformed_ownership_metadata_fails_closed_and_inline_beta13_can_recover_it() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let parent = reg.install_official(code()).unwrap();
+    let mut input = draft(parent.version);
+    input.code_editable = Some(false);
+    let saved = reg.create_draft(input).unwrap();
+    let metadata = reg.root().join("draft-metadata/experiment.json");
+    fs::write(&metadata, "broken").unwrap();
+    assert!(reg
+        .draft(&saved.id)
+        .unwrap_err()
+        .to_string()
+        .contains("invalid draft ownership metadata"));
+    assert!(reg.save_draft(saved.clone(), saved.generation).is_err());
+    // Beta13's inline value is authoritative and can repair an interrupted migration.
+    fs::write(
+        reg.root().join("drafts/experiment.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    reg.prepare_legacy_drafts().unwrap();
+    assert_eq!(reg.draft(&saved.id).unwrap(), saved);
+}
+
+#[test]
+fn pending_ownership_recovers_before_delegation_and_survives_later_legacy_writes() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let parent = reg.install_official(code()).unwrap();
+    let mut input = draft(parent.version);
+    input.code_editable = Some(false);
+    let old = reg.create_draft(input).unwrap();
+    let path = reg.root().join("drafts/experiment.json");
+    let metadata_path = reg.root().join("draft-metadata/experiment.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+    metadata["previous"] = metadata["ownership"].clone();
+    metadata["ownership"]["editable"] = true.into();
+    let mut next = old.clone();
+    next.code_editable = None;
+    next.generation += 1;
+    metadata["pending"] = crate::registry::digest_json(&next).unwrap().into();
+    fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+    assert_eq!(
+        reg.draft(&old.id).unwrap(),
+        old,
+        "preparing alone cannot change ownership"
+    );
+    fs::write(&path, serde_json::to_vec(&next).unwrap()).unwrap();
+    assert_eq!(
+        reg.draft(&old.id).unwrap().code_editable,
+        Some(true),
+        "published draft recovers the pending ownership"
+    );
+    reg.prepare_legacy_drafts().unwrap();
+    next.generation += 1;
+    next.note = "legacy writer after recovery".into();
+    fs::write(&path, serde_json::to_vec(&next).unwrap()).unwrap();
+    assert_eq!(reg.draft(&old.id).unwrap().code_editable, Some(true));
+}

@@ -156,7 +156,7 @@ usage:
                    # freeze: --model-id ID --asset-root DIR [--keep-draft 1]; migrate-case/rollback: <case-dir>
                    # prune JSON: {keep:[{id,revision}],dry_run?}: drop unused old official revisions
                    # make-run: <case-dir> --out DIR --operation-id ID; attach-network: --model-id ID --expected-generation N + hybrid-install flags
-  colm-cli model-code-ls|model-code-file --model-root DIR --version ID --revision N [--dir D | --path P]
+  colm-cli model-code-ls|model-code-file --model-root DIR (--version ID --revision N | --draft-id ID --expected-generation N) [--dir D | --path P]
                    # 只读：冻结版本的代码（修改版按冻结的那次提交读），列目录或读一个文件
   colm-cli model-changes --model-root DIR --version ID --revision N [--against ID --against-revision N]
                    # 只读：代码相对官方源码改了的文件，参数/物理方案/过程文件/AI 网络相对父版本（或 --against）的不同，来源研究
@@ -371,6 +371,14 @@ fn main() -> Result<()> {
             bail!("{reason}");
         }
     };
+    if pinned_program.is_some() && opts.get("--model-root").is_some() {
+        if let Err(error) =
+            model_version::registry(&opts).and_then(|store| store.prepare_legacy_drafts())
+        {
+            drain_stdin();
+            return Err(error);
+        }
+    }
     let delegated_auth = if pinned_program.is_some() && reads_stdin_auth && auth_on_stdin {
         Some(read_stdin_auth_line()?)
     } else {

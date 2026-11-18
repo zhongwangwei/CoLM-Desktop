@@ -854,6 +854,27 @@ fn create_source_upload_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn source_archive_directory(parent: &Path) -> Result<PathBuf> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let directory = parent.join(format!(
+        ".colm-source-stage-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    create_source_upload_directory(&directory)?;
+    Ok(directory)
+}
+
+fn verify_source_archive(snapshot: &Snapshot, archive: &Path) -> Result<()> {
+    let actual = tarball_content_id(archive)?;
+    ensure!(
+        actual == snapshot.id,
+        "source changed since snapshot {} (archive is {actual}); refresh the snapshot and retry",
+        snapshot.id
+    );
+    Ok(())
+}
+
 /// 把快照传上去（已经在就跳过）。
 pub fn upload(ssh: &Ssh, root: &str, snapshot: &Snapshot) -> Result<bool> {
     if uploaded(ssh, root, &snapshot.id)? {
@@ -869,25 +890,24 @@ pub fn upload(ssh: &Ssh, root: &str, snapshot: &Snapshot) -> Result<bool> {
         .trim()
         .to_owned();
     let result: Result<()> = (|| {
-        match &snapshot.source {
-            Source::Checkout(repo) => {
-                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let directory = std::env::temp_dir().join(format!(
-                    "colm-source-upload-{}-{}",
-                    std::process::id(),
-                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                ));
-                create_source_upload_directory(&directory)?;
-                let archive = directory.join("source.tar.gz");
-                let result = (|| {
-                    pack_source_files(repo, &snapshot.files, &archive)?;
-                    ssh.upload_tarball(&archive, &stage)
-                })();
-                let _ = std::fs::remove_dir_all(&directory);
-                result?;
+        let directory = source_archive_directory(&std::env::temp_dir())?;
+        let archive = directory.join("source.tar.gz");
+        let result = (|| {
+            match &snapshot.source {
+                Source::Checkout(repo) => pack_source_files(repo, &snapshot.files, &archive)?,
+                Source::Tarball(path) => {
+                    // Verify and send the same private copy even if the installed package changes.
+                    std::io::copy(
+                        &mut std::fs::File::open(path)?,
+                        &mut std::fs::File::create(&archive)?,
+                    )?;
+                }
             }
-            Source::Tarball(path) => ssh.upload_tarball(path, &stage)?,
-        }
+            verify_source_archive(snapshot, &archive)?;
+            ssh.upload_tarball(&archive, &stage)
+        })();
+        let _ = std::fs::remove_dir_all(&directory);
+        result?;
         ssh.run_ok(&publish_source_script(&stage, &dest))?;
         Ok(())
     })();
@@ -1201,7 +1221,18 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
     files.extend(git_files(repo, &PACK_EXTRA_PATHS)?);
     files.sort();
     files.dedup();
-    pack_source_files(repo, &files, out)
+    let parent = out.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let directory = source_archive_directory(parent)?;
+    let archive = directory.join("source.tar.gz");
+    let result = (|| {
+        pack_source_files(repo, &files, &archive)?;
+        verify_source_archive(snapshot, &archive)?;
+        std::fs::rename(&archive, out)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&directory);
+    result
 }
 
 fn pack_source_files(repo: &Path, files: &[String], out: &Path) -> Result<()> {

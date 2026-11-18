@@ -66,3 +66,66 @@ fn a_frozen_version_is_browsed_at_its_frozen_commit_and_read_only_inside_its_sou
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn legacy_draft_browses_saved_source_without_a_matching_frozen_revision() {
+    let root = std::env::temp_dir().join(format!("colm-draft-code-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let store = colm_model::Registry::open(root.join("models")).unwrap();
+    let parent = store
+        .install_official(colm_model::CodeRef {
+            kind: CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        })
+        .unwrap();
+    let saved = colm_model::CodeRef {
+        source_sha256: "b".repeat(64),
+        ..parent.code.clone()
+    };
+    let draft = store
+        .create_draft(
+            serde_json::from_value(serde_json::json!({
+                "id":"legacy", "name":"Legacy", "note":"old saved code", "parent":parent.version,
+                "code":saved, "overlay":{}, "generation":0,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let mut opts = Opts {
+        positional: vec![],
+        flags: vec![
+            (
+                "--model-root".into(),
+                store.root().to_string_lossy().into_owned(),
+            ),
+            ("--draft-id".into(), draft.id.clone()),
+            ("--expected-generation".into(), draft.generation.to_string()),
+            ("--path".into(), "saved.txt".into()),
+        ],
+    };
+    let source = crate::model_version::cache_dir(&opts, &saved)
+        .unwrap()
+        .join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("saved.txt"), "saved draft source").unwrap();
+    assert_eq!(list(&opts).unwrap()[0].name, "saved.txt");
+    assert_eq!(
+        read(&opts).unwrap().text.as_deref(),
+        Some("saved draft source")
+    );
+    opts.flags.retain(|(key, _)| key != "--expected-generation");
+    opts.flags
+        .push(("--expected-generation".into(), "0".into()));
+    assert!(read(&opts)
+        .unwrap_err()
+        .to_string()
+        .contains("draft changed"));
+    opts.flags.extend([
+        ("--version".into(), "official".into()),
+        ("--revision".into(), "1".into()),
+    ]);
+    assert!(read(&opts).unwrap_err().to_string().contains("not both"));
+    std::fs::remove_dir_all(root).unwrap();
+}

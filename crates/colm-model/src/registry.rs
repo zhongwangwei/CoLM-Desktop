@@ -15,6 +15,50 @@ const REGISTRY_LOCK_WAIT: Duration = Duration::from_secs(60);
 pub struct Registry {
     pub(crate) root: PathBuf,
 }
+// Ownership is kept outside draft JSON because pinned beta12 readers reject new fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftOwnership {
+    id: String,
+    parent: VersionRef,
+    created_unix: u64,
+    code: CodeRef,
+    editable: Option<bool>,
+}
+impl DraftOwnership {
+    fn from_draft(draft: &ModelDraft) -> Self {
+        Self {
+            id: draft.id.clone(),
+            parent: draft.parent.clone(),
+            created_unix: draft.created_unix,
+            code: draft.code.clone(),
+            editable: draft.code_editable,
+        }
+    }
+    fn applies(&self, draft: &ModelDraft) -> bool {
+        self.id == draft.id
+            && self.parent == draft.parent
+            && self.created_unix == draft.created_unix
+            && self.code == draft.code
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftMetadata {
+    ownership: DraftOwnership,
+    // A prepared write grants ownership only once the matching draft has been published.
+    pending: Option<String>,
+    previous: Option<DraftOwnership>,
+}
+impl DraftMetadata {
+    fn effective(&self, disk: &ModelDraft) -> Result<Option<DraftOwnership>> {
+        let selected = match &self.pending {
+            Some(pending) if *pending != digest_json(disk)? => self.previous.as_ref(),
+            _ => Some(&self.ownership),
+        };
+        Ok(selected.filter(|owner| owner.applies(disk)).cloned())
+    }
+}
 struct Lock(PathBuf);
 impl Drop for Lock {
     fn drop(&mut self) {
@@ -28,6 +72,125 @@ impl Registry {
         fs::create_dir_all(root.join("versions"))?;
         fs::create_dir_all(root.join("drafts"))?;
         Ok(Self { root })
+    }
+    fn metadata_path(&self, id: &str) -> PathBuf {
+        self.root.join("draft-metadata").join(format!("{id}.json"))
+    }
+    fn draft_ownership(&self, disk: &ModelDraft) -> Result<Option<DraftOwnership>> {
+        if disk.code_editable.is_some() {
+            return Ok(Some(DraftOwnership::from_draft(disk)));
+        }
+        let path = self.metadata_path(&disk.id);
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let metadata: DraftMetadata = serde_json::from_slice(&bytes)
+                    .with_context(|| format!("invalid draft ownership metadata {}; restore it from backup before editing this draft", path.display()))?;
+                metadata.effective(disk)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+        }
+    }
+    // All callers hold write.lock. Keep the old identity during an interrupted publication.
+    fn write_draft(&self, draft: &ModelDraft) -> Result<()> {
+        let file = self.root.join("drafts").join(format!("{}.json", draft.id));
+        let previous = if file.exists() {
+            self.draft_ownership(&read_json::<ModelDraft>(&file)?)?
+        } else {
+            None
+        };
+        let mut disk = draft.clone();
+        disk.code_editable = None;
+        if draft.code_editable.is_none() && !self.metadata_path(&draft.id).exists() {
+            return write_json(&file, &disk);
+        }
+        fs::create_dir_all(self.root.join("draft-metadata"))?;
+        let path = self.metadata_path(&draft.id);
+        let mut metadata = DraftMetadata {
+            ownership: DraftOwnership::from_draft(draft),
+            pending: Some(digest_json(&disk)?),
+            previous,
+        };
+        write_json(&path, &metadata)?;
+        if let Err(error) = write_json(&file, &disk) {
+            metadata.ownership = metadata.previous.take().unwrap_or_else(|| DraftOwnership {
+                editable: None,
+                ..metadata.ownership.clone()
+            });
+            metadata.pending = None;
+            write_json(&path, &metadata)
+                .context("cannot roll back draft ownership after a failed save")?;
+            return Err(error);
+        }
+        metadata.pending = None;
+        metadata.previous = None;
+        // The draft is already published; pending metadata can recover this committed write.
+        if let Err(error) = write_json(&path, &metadata) {
+            eprintln!("draft {} was saved, but ownership metadata finalization is pending at {}: {error:#}; recovery is required before legacy delegation", draft.id, path.display());
+        }
+        Ok(())
+    }
+    /// Permanently upgrade beta13 storage before any older pinned program sees the registry.
+    /// Completed metadata is generation-independent so legacy writers can still save overlays.
+    pub fn prepare_legacy_drafts(&self) -> Result<()> {
+        let mut pending = Vec::new();
+        for entry in fs::read_dir(self.root.join("drafts"))? {
+            let path = entry?.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let value: serde_json::Value = match read_json(&path) {
+                Ok(value) => value,
+                Err(_) => continue, // Existing damaged drafts are diagnosed when read, as before.
+            };
+            let inline = value.get("code_editable").is_some();
+            let unfinished = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|id| read_json::<DraftMetadata>(&self.metadata_path(id)).ok())
+                .is_some_and(|metadata| metadata.pending.is_some());
+            if inline || unfinished {
+                pending.push(path);
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let _lock = self.lock()?;
+        for path in pending {
+            let value: serde_json::Value = read_json(&path)?;
+            let inline = value.get("code_editable").is_some();
+            let disk: ModelDraft = serde_json::from_value(value)?;
+            validation::identifier(&disk.id)?;
+            ensure!(
+                path.file_stem().and_then(|s| s.to_str()) == Some(&disk.id),
+                "draft identity mismatch"
+            );
+            let mut draft = disk.clone();
+            draft.code_editable = self
+                .draft_ownership(&disk)?
+                .and_then(|owner| owner.editable);
+            let metadata = self.metadata_path(&draft.id);
+            if inline {
+                self.write_draft(&draft)?;
+            } else {
+                write_json(
+                    &metadata,
+                    &DraftMetadata {
+                        ownership: DraftOwnership::from_draft(&draft),
+                        pending: None,
+                        previous: None,
+                    },
+                )?;
+            }
+            if metadata.exists() {
+                ensure!(
+                    read_json::<DraftMetadata>(&metadata)?.pending.is_none(),
+                    "cannot finalize draft ownership before delegating to a legacy program"
+                );
+            }
+        }
+        Ok(())
     }
     pub fn root(&self) -> &Path {
         &self.root
@@ -323,8 +486,11 @@ impl Registry {
         validation::identifier(id)?;
         let mut draft: ModelDraft =
             read_json(&self.root.join("drafts").join(format!("{id}.json")))?;
-        draft.overlay = model_overlay(&draft.overlay);
         ensure!(draft.id == id, "draft identity mismatch");
+        draft.code_editable = self
+            .draft_ownership(&draft)?
+            .and_then(|owner| owner.editable);
+        draft.overlay = model_overlay(&draft.overlay);
         Self::validate_draft_metadata(&draft)?;
         Ok(draft)
     }
@@ -374,7 +540,7 @@ impl Registry {
         draft.generation = 1;
         draft.created_unix = now()?;
         self.validate_draft(&draft)?;
-        write_json(&file, &draft)?;
+        self.write_draft(&draft)?;
         Ok(draft)
     }
     /// Delete a draft and the assets staged for it. Frozen revisions never read either: freezing
@@ -387,6 +553,11 @@ impl Registry {
         ensure!(file.is_file(), "draft {id} does not exist");
         fs::remove_file(&file)?;
         let mut removed = vec![file];
+        let metadata = self.metadata_path(id);
+        if metadata.exists() {
+            fs::remove_file(&metadata)?;
+            removed.push(metadata);
+        }
         let assets = self.root.join("draft-assets").join(id);
         if assets.is_dir() {
             fs::remove_dir_all(&assets)?;
@@ -427,10 +598,7 @@ impl Registry {
             .context("draft generation overflow")?;
         normalize_overlay(&mut draft.overlay);
         self.validate_draft(&draft)?;
-        write_json(
-            &self.root.join("drafts").join(format!("{}.json", draft.id)),
-            &draft,
-        )?;
+        self.write_draft(&draft)?;
         Ok(draft)
     }
     fn validate_draft(&self, draft: &ModelDraft) -> Result<()> {

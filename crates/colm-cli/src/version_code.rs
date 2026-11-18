@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, ensure, Context, Result};
-use colm_model::{CodeKind, FrozenRevision, VersionRef};
+use colm_model::{CodeKind, VersionRef};
 use colm_workspace::files::{Entry, FileText, MAX_TEXT_BYTES};
 use colm_workspace::git;
 
@@ -22,19 +22,37 @@ enum Source {
 
 fn source(opts: &Opts) -> Result<Source> {
     let store = crate::model_version::registry(opts)?;
-    let revision: FrozenRevision = store.get(&VersionRef {
-        id: opts.need_str("--version")?,
-        revision: opts
-            .need_str("--revision")?
-            .parse()
-            .context("revision must be a number")?,
-    })?;
-    let cache = crate::model_version::cache_dir(opts, &revision.code)?;
-    match (&revision.code.kind, &revision.code.workspace) {
+    let code = if let Some(id) = opts.get("--draft-id") {
+        ensure!(
+            opts.get("--version").is_none() && opts.get("--revision").is_none(),
+            "choose a draft or a frozen revision, not both"
+        );
+        let draft = store.draft_metadata(&id)?;
+        let generation = opts
+            .need_str("--expected-generation")?
+            .parse::<u64>()
+            .context("draft generation must be a number")?;
+        ensure!(
+            draft.generation == generation,
+            "draft changed; reload it before browsing its code"
+        );
+        draft.code
+    } else {
+        store
+            .get(&VersionRef {
+                id: opts.need_str("--version")?,
+                revision: opts
+                    .need_str("--revision")?
+                    .parse()
+                    .context("revision must be a number")?,
+            })?
+            .code
+    };
+    let cache = crate::model_version::cache_dir(opts, &code)?;
+    match (&code.kind, &code.workspace) {
         (CodeKind::Workspace, Some(name)) => Ok(Source::Git {
             dir: cache.join("workspaces").join(name).join("src"),
-            commit: revision
-                .code
+            commit: code
                 .commit
                 .clone()
                 .context("a workspace version records its commit")?,

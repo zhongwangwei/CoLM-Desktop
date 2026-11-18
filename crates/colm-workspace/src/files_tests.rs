@@ -769,3 +769,104 @@ fn ordinary_staged_renames_still_snapshot() {
     assert_eq!(std::fs::read(ws.src().join("renamed.F90")).unwrap(), bytes);
     assert!(!git::is_dirty(&ws.src()).unwrap());
 }
+
+#[cfg(unix)]
+#[test]
+fn native_links_preflight_target_and_traversal_removal_and_replacement() {
+    let (root, ws) = fresh("native-link-removal");
+    let src = ws.src();
+    std::fs::create_dir_all(src.join("crates/config/empty")).unwrap();
+    std::fs::write(src.join("crates/config/target"), "old\n").unwrap();
+    std::os::unix::fs::symlink("config/empty/../target", src.join("crates/alias")).unwrap();
+    git::run(&src, &["add", "-A"]).unwrap();
+    git::run(&src, &["commit", "-qm", "native link"]).unwrap();
+    let head = ws.head().unwrap();
+    for path in [
+        "crates/config/target",
+        "crates/config/empty",
+        "crates/config",
+    ] {
+        assert!(remove(&ws, path, "remove target").is_err(), "{path}");
+        assert_eq!(ws.head().unwrap(), head);
+        assert_eq!(
+            std::fs::read_to_string(src.join("crates/alias")).unwrap(),
+            "old\n"
+        );
+    }
+    let replacement = root.join("replacement");
+    std::fs::create_dir_all(&replacement).unwrap();
+    std::fs::write(replacement.join("target"), "new\n").unwrap();
+    assert!(put_dir(&ws, "crates/config", &replacement, "missing traversal").is_err());
+    assert_eq!(ws.head().unwrap(), head);
+    std::fs::create_dir(replacement.join("empty")).unwrap();
+    put_dir(&ws, "crates/config", &replacement, "valid replacement").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(src.join("crates/alias")).unwrap(),
+        "new\n"
+    );
+    let deletion = "diff --git a/crates/config/target b/crates/config/target\ndeleted file mode 100644\n--- a/crates/config/target\n+++ /dev/null\n@@ -1 +0,0 @@\n-new\n";
+    assert!(crate::patch::apply(&ws, deletion, "delete linked target").is_err());
+    assert_eq!(
+        std::fs::read_to_string(src.join("crates/alias")).unwrap(),
+        "new\n"
+    );
+    assert!(!git::is_dirty(&src).unwrap());
+    remove(&ws, "crates", "remove aliases with targets").unwrap();
+}
+
+#[test]
+fn materialized_links_preserve_required_empty_directories_during_replacement() {
+    let (root, ws) = fresh("logical-link-traversal");
+    let src = ws.src();
+    std::fs::create_dir_all(src.join("crates/config/empty")).unwrap();
+    std::fs::write(src.join("crates/config/target"), "old\n").unwrap();
+    std::fs::write(src.join("crates/alias"), "old\n").unwrap();
+    std::fs::write(
+        src.join(".colm-source-links.json"),
+        r#"{"crates/alias":"config/empty/../target"}"#,
+    )
+    .unwrap();
+    git::run(&src, &["add", "-A"]).unwrap();
+    git::run(&src, &["commit", "-qm", "logical link"]).unwrap();
+    let head = ws.head().unwrap();
+    assert!(remove(&ws, "crates/config/empty", "remove traversed dir").is_err());
+    let replacement = root.join("replacement");
+    std::fs::create_dir_all(&replacement).unwrap();
+    std::fs::write(replacement.join("target"), "new\n").unwrap();
+    assert!(put_dir(&ws, "crates/config", &replacement, "missing traversal").is_err());
+    assert_eq!(ws.head().unwrap(), head);
+    std::fs::create_dir(replacement.join("empty")).unwrap();
+    put_dir(&ws, "crates/config", &replacement, "valid traversal").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(src.join("crates/alias")).unwrap(),
+        "new\n"
+    );
+    assert!(!git::is_dirty(&src).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn unrelated_invalid_native_links_do_not_block_removal_or_replacement() {
+    let (root, ws) = fresh("invalid-native-unrelated");
+    let src = ws.src();
+    std::fs::create_dir(src.join("bad-links")).unwrap();
+    for (alias, target) in [("absolute", "/tmp"), ("dangling", "missing")] {
+        std::os::unix::fs::symlink(target, src.join("bad-links").join(alias)).unwrap();
+    }
+    git::run(&src, &["add", "-A"]).unwrap();
+    git::run(&src, &["commit", "-qm", "legacy links"]).unwrap();
+    remove(&ws, MODULE, "remove unrelated module").unwrap();
+    let replacement = root.join("replacement");
+    std::fs::create_dir(&replacement).unwrap();
+    std::fs::write(replacement.join("new.rs"), "new\n").unwrap();
+    put_dir(
+        &ws,
+        "crates/colm-core/src",
+        &replacement,
+        "replace unrelated tree",
+    )
+    .unwrap();
+    remove(&ws, "bad-links", "remove unsupported aliases").unwrap();
+    assert!(!src.join("bad-links").exists());
+    assert!(!git::is_dirty(&src).unwrap());
+}

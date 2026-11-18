@@ -46,7 +46,7 @@ fn connection_failures_say_what_to_do() {
 #[cfg(unix)]
 #[test]
 fn staged_source_upload_retries_partial_transfers_without_local_cat() {
-    use crate::engine::{self, Snapshot, Source};
+    use crate::engine::{self, Source};
     use std::os::unix::fs::PermissionsExt;
     // Isolate PATH overrides from other tests and never contact a real SSH host.
     const CHILD: &str = "COLM_UPLOAD_STUB_CHILD";
@@ -55,7 +55,15 @@ fn staged_source_upload_retries_partial_transfers_without_local_cat() {
         let bin = root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         for (name, script) in [
-            ("ssh", "#!/bin/bash\nexec /bin/bash -c \"${!#}\"\n"),
+            (
+                "ssh",
+                r#"#!/bin/bash
+if [[ "${!#}" == *"tar -xzf -"* && -n "$COLM_MUTATE_SOURCE_TARBALL" ]]; then
+  printf changed > "$COLM_MUTATE_SOURCE_TARBALL"
+fi
+exec /bin/bash -c "${!#}"
+"#,
+            ),
             (
                 "cat",
                 "#!/bin/bash\necho local-cat-forbidden >&2; exit 99\n",
@@ -74,6 +82,7 @@ fn staged_source_upload_retries_partial_transfers_without_local_cat() {
                 "--nocapture",
             ])
             .env(CHILD, &root)
+            .env_remove("COLM_MUTATE_SOURCE_TARBALL")
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .output()
             .unwrap();
@@ -92,22 +101,21 @@ fn staged_source_upload_retries_partial_transfers_without_local_cat() {
     std::fs::write(source.join("Cargo.lock"), "lock").unwrap();
     std::fs::write(source.join("complete.rs"), "complete").unwrap();
     let tarball = root.join("source.tar.gz");
-    assert!(Command::new("tar")
-        .args(["-czf"])
-        .arg(&tarball)
-        .arg("-C")
-        .arg(&source)
-        .arg(".")
-        .status()
-        .unwrap()
-        .success());
+    let pack = || {
+        assert!(Command::new("tar")
+            .args(["-czf"])
+            .arg(&tarball)
+            .arg("-C")
+            .arg(&source)
+            .arg(".")
+            .status()
+            .unwrap()
+            .success());
+    };
+    pack();
     let server = root.join("server").to_string_lossy().into_owned();
     let ssh = Ssh::new("stub-only").unwrap();
-    let snapshot = Snapshot {
-        id: "test-snapshot".into(),
-        source: Source::Tarball(tarball.clone()),
-        files: vec![],
-    };
+    let snapshot = engine::snapshot(&Source::Tarball(tarball.clone())).unwrap();
     let dest = std::path::PathBuf::from(engine::engine_dir(&server, &snapshot.id)).join("src");
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("Cargo.lock"), "partial transfer").unwrap();
@@ -120,8 +128,44 @@ fn staged_source_upload_retries_partial_transfers_without_local_cat() {
         std::fs::read_to_string(dest.join("Cargo.lock")).unwrap(),
         "partial transfer"
     );
+    std::fs::write(source.join("Cargo.lock"), "changed lock").unwrap();
+    pack();
+    let error = engine::upload(&ssh, &server, &snapshot).unwrap_err();
+    assert!(error.to_string().contains("source changed"), "{error:#}");
+    assert!(!engine::uploaded(&ssh, &server, &snapshot.id).unwrap());
+    assert_eq!(
+        std::fs::read_to_string(dest.join("Cargo.lock")).unwrap(),
+        "partial transfer"
+    );
+    assert_eq!(
+        std::fs::read_dir(dest.parent().unwrap()).unwrap().count(),
+        1
+    );
+
+    std::fs::write(source.join("Cargo.lock"), "lock").unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&source)
+        .args(["init", "-q"])
+        .status()
+        .unwrap()
+        .success());
+    let checkout = engine::snapshot(&Source::Checkout(source.clone())).unwrap();
+    std::fs::write(source.join("Cargo.lock"), "changed checkout lock").unwrap();
+    let error = engine::upload(&ssh, &server, &checkout).unwrap_err();
+    assert!(error.to_string().contains("source changed"), "{error:#}");
+    assert!(!engine::uploaded(&ssh, &server, &checkout.id).unwrap());
+
     std::fs::write(&tarball, valid).unwrap();
+    // The fake SSH process changes the original after validation and before reading stdin.
+    std::env::set_var("COLM_MUTATE_SOURCE_TARBALL", &tarball);
     assert!(engine::upload(&ssh, &server, &snapshot).unwrap());
+    std::env::remove_var("COLM_MUTATE_SOURCE_TARBALL");
+    assert_eq!(std::fs::read(&tarball).unwrap(), b"changed");
+    assert_eq!(
+        std::fs::read_to_string(dest.join("Cargo.lock")).unwrap(),
+        "lock"
+    );
     assert!(dest.join("complete.rs").is_file());
     assert!(engine::uploaded(&ssh, &server, &snapshot.id).unwrap());
     assert!(!engine::upload(&ssh, &server, &snapshot).unwrap());
