@@ -1187,6 +1187,37 @@ fn killed_workspace_writer_does_not_leave_the_lock_held() {
 }
 
 #[test]
+fn private_index_detects_same_size_edits_with_the_original_timestamp() {
+    use std::fs::{File, FileTimes};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let (_root, ws) = fresh("racy-private-index");
+    let src = ws.src();
+    let path = src.join("target");
+    let time = FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1_700_000_000));
+    let stamp = |path: &Path| File::options().write(true).open(path)?.set_times(time);
+    git::run(&src, &["config", "core.trustctime", "false"]).unwrap();
+    git::run(&src, &["config", "core.checkStat", "minimal"]).unwrap();
+    std::fs::write(&path, "old\n").unwrap();
+    stamp(&path).unwrap();
+    git::run(&src, &["add", "target"]).unwrap();
+    git::run(&src, &["commit", "-qm", "fixture"]).unwrap();
+    stamp(&src.join(".git/index")).unwrap();
+
+    let paths = ["target".to_owned()];
+    let mut edit = git::Edit::begin(&ws, paths.to_vec()).unwrap();
+    edit.change(&paths, || {
+        std::fs::write(&path, "new\n")?;
+        stamp(&path)?;
+        Ok(())
+    })
+    .unwrap();
+    edit.stage(&["add", "--", "target"]).unwrap();
+    assert_eq!(git::run(&src, &["show", ":target"]).unwrap(), "new");
+    edit.finish(Ok(())).unwrap();
+}
+
+#[test]
 fn private_index_handles_split_index_and_rollback() {
     let (root, ws) = fresh("private-split-index");
     git::run(&ws.src(), &["update-index", "--split-index"]).unwrap();

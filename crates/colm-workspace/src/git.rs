@@ -445,12 +445,19 @@ impl Edit {
     }
 
     fn change_index(&mut self, commands: &[(&[&str], &[u8])]) -> Result<()> {
+        use std::fs::{File, FileTimes};
         use std::io::Write;
         self.checkpoint()?;
         let index = self.root.join(".git/index");
+        let modified = std::fs::metadata(&index)?.modified()?;
         let original = std::fs::read(&index)?;
         let staged = self.backup.join("staged-index");
-        std::fs::write(&staged, &original)?;
+        // Git uses the index timestamp to decide whether to recheck a file's contents.
+        {
+            let mut copy = File::create(&staged)?;
+            copy.write_all(&original)?;
+            copy.set_times(FileTimes::new().set_modified(modified))?;
+        }
         for (args, input) in commands {
             let mut child = Command::new("git")
                 .arg("-C")
@@ -498,12 +505,14 @@ impl Edit {
             .create_new(true)
             .open(&lock_path)?;
         let result = (|| -> Result<()> {
-            use std::io::Write;
             anyhow::ensure!(
                 std::fs::read(&index)? == original,
                 "the Git index changed outside this operation; preserve and review its staging"
             );
-            lock.write_all(&std::fs::read(&staged)?)?;
+            let mut prepared = File::open(&staged)?;
+            let modified = prepared.metadata()?.modified()?;
+            std::io::copy(&mut prepared, &mut lock)?;
+            lock.set_times(FileTimes::new().set_modified(modified))?;
             lock.sync_all()?;
             drop(lock);
             std::fs::rename(&lock_path, &index)?;
