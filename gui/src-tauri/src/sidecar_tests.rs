@@ -210,6 +210,14 @@ fn bgc_case_requires_its_runtime_inputs() {
             value: "1".into(),
         },
     ]);
+    assert!(
+        validate_bgc_runtime(root.to_str(), &fields).is_ok(),
+        "zero planting day and fertilizer alone do not activate crop"
+    );
+    fields.push(crate::config::FieldChange {
+        path: "DEF_USE_CROP".into(),
+        value: ".true.".into(),
+    });
     assert!(validate_bgc_runtime(root.to_str(), &fields)
         .unwrap_err()
         .contains("播种日期运行时目录缺少数据"));
