@@ -79,10 +79,10 @@ export type ServerPreset = {
   notes: [string, string][];
   fields: Partial<Server>;
   /**
-   * How a checked server is recognised as this cluster: its scheduler and the partitions or
-   * queues it lists, never its address (login nodes, jump hosts and VPN addresses change).
+   * How a checked server is recognised: scheduler, queues and, when needed, the hostname
+   * reported by the server. This is independent of the configured SSH address.
    */
-  match: { scheduler: string; queues: string[] };
+  match: { scheduler: string; queues: string[]; hostname?: string };
 };
 export const SERVER_PRESETS: ServerPreset[] = [
   {
@@ -139,15 +139,15 @@ export const SERVER_PRESETS: ServerPreset[] = [
       runtime_dir: '/shr03/CoLMruntime',
       forcing_dir: '/shr03/CoLM_Forcing/JRA3Q',
     },
-    match: { scheduler: 'slurm', queues: ['first', 'second', 'largemem'] },
+    match: { scheduler: 'slurm', queues: ['first'], hostname: 'land02' },
     notes: [
       [
-        '分区 first：7 个节点，每节点 48 核 / 320 GB，单作业最多 3 节点；second：64–80 核 / 512 GB–1 TB，单作业 1 节点；largemem：48 核 / 1.5 TB。',
-        'Partition first: 7 nodes of 48 cores / 320 GB, up to 3 nodes per job; second: 64–80 cores / 512 GB–1 TB, one node per job; largemem: 48 cores / 1.5 TB.',
+        '新任务请从 land02 提交。在服务器地址中填写 land02 或指向它的 SSH 别名，再点“检查连接”。',
+        'Submit new jobs from land02. Enter land02 or an SSH alias that points to it, then check the connection.',
       ],
       [
-        '不写内存的作业会占满整个节点的内存，应用提交时自动按核分配内存；second 常被别人的作业占满内存，排队时可改用 first。',
-        'A job without a memory request takes the whole node’s memory; the app requests memory per core. second is often full, so try first when queued.',
+        '默认分区为 first。提交前可在连接检查结果中查看当前每作业节点上限和节点规格。未指定内存时，应用按核申请内存。',
+        'The default partition is first. Check the current node limit and node sizes before submitting. The app requests memory per core when memory is unspecified.',
       ],
       [
         '默认数据目录是课题组共享的 /shr03 下的 CoLMrawdata、CoLMruntime 与 CoLM_Forcing。',
@@ -157,8 +157,9 @@ export const SERVER_PRESETS: ServerPreset[] = [
   },
 ];
 
-/** The preset a checked server looks like, by its scheduler and every partition the preset names. */
+/** Match a preset to the scheduler and partitions reported by the checked server. */
 export function recognisedPreset(probe: ResourceCheck['probe'] | undefined): ServerPreset | null {
+  const hostname = probe?.hostname?.trim().split('.', 1)[0]?.toLowerCase();
   const schedulers = probe?.schedulers ?? [];
   const queues = new Set([
     ...(probe?.queues ?? []),
@@ -168,6 +169,7 @@ export function recognisedPreset(probe: ResourceCheck['probe'] | undefined): Ser
     SERVER_PRESETS.find(
       (preset) =>
         schedulers.includes(preset.match.scheduler) &&
+        (!preset.match.hostname || hostname === preset.match.hostname) &&
         preset.match.queues.every((queue) => queues.has(queue)),
     ) ?? null
   );

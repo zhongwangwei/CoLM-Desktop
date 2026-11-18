@@ -348,7 +348,7 @@ test('a preset fills scheduling settings and only the data folders still empty',
   assert.equal(next.runtime_dir, '/shr03/CoLMruntime');
 });
 
-test('a checked server is recognised by its scheduler and partitions, not its address', () => {
+test('the LAND preset recognises the current login node with only its first partition', () => {
   const partitions = (names: string[]) =>
     names.map(
       (name) =>
@@ -359,11 +359,28 @@ test('a checked server is recognised by its scheduler and partitions, not its ad
     );
   assert.equal(
     recognisedPreset({
+      hostname: 'land02.example.test',
       schedulers: ['slurm'],
-      partitions: partitions(['first', 'largemem', 'second']),
+      partitions: partitions(['first']),
     })?.id,
     'land',
   );
+  assert.equal(
+    recognisedPreset({
+      hostname: 'land02',
+      schedulers: ['slurm'],
+      queues: ['first', 'second', 'largemem'],
+    })?.id,
+    'land',
+  );
+  assert.equal(
+    recognisedPreset({ hostname: 'another-host', schedulers: ['slurm'], queues: ['first'] }),
+    null,
+  );
+  assert.equal(recognisedPreset({ hostname: 'land02', schedulers: ['slurm'], queues: [] }), null);
+});
+
+test('other checked clusters are recognised by their scheduler and partition names', () => {
   assert.equal(
     recognisedPreset({ schedulers: ['slurm'], queues: ['deimos', 'phobos', 'debug'] })?.id,
     'tianhe-xingyi',

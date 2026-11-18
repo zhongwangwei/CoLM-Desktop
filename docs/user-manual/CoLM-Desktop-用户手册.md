@@ -1,6 +1,6 @@
 # CoLM Desktop 用户手册
 
-**适用版本：** `0.3.0-beta.17`（测试版）\
+**适用版本：** `0.3.0-beta.18`（测试版）\
 **平台：** macOS（Apple Silicon / Intel）、Windows x86_64、Linux x86_64  
 **手册截图：** 2026-11-07/08 在 macOS 上由真实窗口采集；示例项目为 `~/Desktop/Github/CoLM-Desktop/tmp/manual-project`（CN-Cng 示例算例，缩到 2008-01-01 → 2008-01-03 便于演示）。  
 **附录：** [CLI 命令参考](#appendix-c) · [配置字段总表（964 项）](#appendix-a) · [参数库索引（1369 项）](#appendix-b)
@@ -476,7 +476,7 @@ tmp/manual-project/CN-Cng/runs/07fddf66…/
 | 字段 | 说明 |
 |---|---|
 | 显示名称 | 便于识别这条服务器连接的名称 |
-| SSH 别名/主机 | `~/.ssh/config` 里的 Host，或 `user@host`；land 集群当前使用登录节点别名 `land` |
+| SSH 别名/主机 | `~/.ssh/config` 里的 Host，或 `user@host`。LAND 集群的新任务通过 `land02` 提交，可填写指向该节点的 SSH 别名。 |
 | 认证方式 | SSH config、密钥、密码或密钥与密码；按当前用户的服务器登录要求选择 |
 | 工作根目录 | 服务器上的 CoLM-Desktop 根目录（引擎、内核、作业、算例副本都在此） |
 | 调度器 | `auto` / `bare` / `slurm` / `lsf` / `pbs`；分区/队列、账号、时限 |
@@ -488,6 +488,8 @@ tmp/manual-project/CN-Cng/runs/07fddf66…/
 需要私钥口令或登录密码时，应用会弹出输入框。按提示输入后按 Enter 或点击“继续”，当前操作会接着执行。经过跳板机或需要多项认证时，按每次弹窗的提示依次输入。
 
 默认数据路径可以点击“选择目录”浏览服务器，强迫场也可以选择单个文件。选择集群预设或成功检查连接后，空着的路径会先填入预设值，项目目录可采用已填写的服务器工作目录。已有自定义路径会保留，填入后可继续修改和检查。
+
+已有 LAND 连接如果指向旧登录节点，请在资源页添加 `land02` 连接，检查连接后为新任务选择这条连接和默认分区 `first`。`second` 和 `largemem` 恢复后，重新检查连接即可在分区下拉框中选择。
 
 Slurm 用户先点击“检查连接”，再到“高级设置”中的“分区 / 队列”下拉框选择分区。LSF 用户在同一位置填写队列名称。节点数量和每节点核数决定申请的计算资源，调度器据此分配计算节点。需要指定具体节点时，可在“调度指令（每行一条）”中填写 Slurm 的 `--nodelist=节点名` 或 LSF 的 `-m "节点名"`，提交时由调度器核验节点和权限。
 
@@ -1000,7 +1002,7 @@ EXIT:0
 | CLI `history-catalog` | 实际执行 | 输出 48 步、变量目录 JSON |
 | 真实远程 Slurm（Rust/Fortran、pack、ranks=1） | 已在 tianhe 实测 | 见 `docs/implementation-verification.md` 2026-11-07 验收章节 |
 
-*手册生成日期：2026-11-13；软件版本 0.3.0-beta.17。*
+*手册生成日期：2026-11-18；软件版本 0.3.0-beta.18。*
 
 
 <div class="appendix-a">

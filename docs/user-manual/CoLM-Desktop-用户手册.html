@@ -179,7 +179,7 @@ body{margin:0;font-family:"PingFang SC","Hiragino Sans GB","Songti SC",sans-seri
  </div>
  <div class="cover-info">
   <table class="cover-table">
-   <tr><th>适用版本</th><td>v0.3.0-beta.17（测试版）</td></tr>
+   <tr><th>适用版本</th><td>v0.3.0-beta.18（测试版）</td></tr>
    <tr><th>编写日期</th><td>2026-11-13</td></tr>
    <tr><th>适用平台</th><td>macOS · Windows · Linux</td></tr>
    <tr><th>截图来源</th><td>真实窗口截图：GUI 全页面、区域/流域、AI 助手等 48 张</td></tr>
@@ -191,7 +191,7 @@ body{margin:0;font-family:"PingFang SC","Hiragino Sans GB","Songti SC",sans-seri
 
 <h1 id="colm-desktop-用户手册">CoLM Desktop 用户手册</h1>
 <p><strong>适用版本：</strong>
-<code>0.3.0-beta.17</code>（测试版）<br />
+<code>0.3.0-beta.18</code>（测试版）<br />
 <strong>平台：</strong> macOS（Apple Silicon / Intel）、Windows
 x86_64、Linux x86_64<br />
 <strong>手册截图：</strong> 2026-11-07/08 在 macOS
@@ -887,8 +887,8 @@ MB，需要联网）。三个状态全部显示&quot;已安装&quot;后，&quot;
 <tr>
 <td>SSH 别名/主机</td>
 <td><code>~/.ssh/config</code> 里的 Host，或
-<code>user@host</code>；land 集群当前使用登录节点别名
-<code>land</code></td>
+<code>user@host</code>。LAND 集群的新任务通过 <code>land02</code>
+提交，可填写指向该节点的 SSH 别名。</td>
 </tr>
 <tr>
 <td>认证方式</td>
@@ -930,6 +930,10 @@ PLUMBER2s/Sitedata）</td>
 <p>需要私钥口令或登录密码时，应用会弹出输入框。按提示输入后按 Enter
 或点击“继续”，当前操作会接着执行。经过跳板机或需要多项认证时，按每次弹窗的提示依次输入。</p>
 <p>默认数据路径可以点击“选择目录”浏览服务器，强迫场也可以选择单个文件。选择集群预设或成功检查连接后，空着的路径会先填入预设值，项目目录可采用已填写的服务器工作目录。已有自定义路径会保留，填入后可继续修改和检查。</p>
+<p>已有 LAND 连接如果指向旧登录节点，请在资源页添加 <code>land02</code>
+连接，检查连接后为新任务选择这条连接和默认分区
+<code>first</code>。<code>second</code> 和 <code>largemem</code>
+恢复后，重新检查连接即可在分区下拉框中选择。</p>
 <p>Slurm 用户先点击“检查连接”，再到“高级设置”中的“分区 /
 队列”下拉框选择分区。LSF
 用户在同一位置填写队列名称。节点数量和每节点核数决定申请的计算资源，调度器据此分配计算节点。需要指定具体节点时，可在“调度指令（每行一条）”中填写
@@ -1651,7 +1655,7 @@ ID、原始键、默认值、作用域、可见性、源码位置）。</li>
 </tr>
 </tbody>
 </table>
-<p><em>手册生成日期：2026-11-13；软件版本 0.3.0-beta.17。</em></p>
+<p><em>手册生成日期：2026-11-18；软件版本 0.3.0-beta.18。</em></p>
 <div class="appendix-a">
 
 <p><a id="appendix-a"></a></p>

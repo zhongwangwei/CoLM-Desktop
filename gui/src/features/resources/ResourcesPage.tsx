@@ -1250,8 +1250,8 @@ export default function ResourcesPage() {
                 {recognised && recognised.id !== appliedPreset && (
                   <Notice>
                     {t(
-                      `这台服务器看起来是${recognised.zh}（按调度系统和分区认出，不看地址）。要套用这个预设吗？账号、地址和工作目录不会改。`,
-                      `This server looks like ${recognised.en} (recognised by its scheduler and partitions, not its address). Apply that preset? Account, address and work root stay as they are.`,
+                      `这台服务器与${recognised.zh}预设匹配。要套用调度设置和默认数据路径吗？`,
+                      `This server matches the ${recognised.en} preset. Apply its scheduling settings and default data paths?`,
                     )}{' '}
                     <ActionButton
                       action="resource-apply-preset"

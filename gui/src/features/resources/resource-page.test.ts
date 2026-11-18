@@ -51,6 +51,7 @@ function harness(
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
   const servers = hosts.map((host) => ({ ...resource.newServer(), host, root: '/data/colm' }));
   let failProbe = false;
+  let probeHostname = 'remote';
   let schedulers: unknown = ['slurm'];
   let probePartitions: resource.Partition[] = [
     {
@@ -126,7 +127,7 @@ function harness(
         await pendingProbe;
         if (failProbe) throw new Error('SSH unavailable');
         return {
-          hostname: 'remote',
+          hostname: probeHostname,
           schedulers,
           qsub_unverified: unverifiedQsub,
           root_writable: true,
@@ -374,6 +375,9 @@ function harness(
     schedulers: (value: unknown) => {
       schedulers = value;
     },
+    hostname: (value: string) => {
+      probeHostname = value;
+    },
     partitions: (value: resource.Partition[]) => {
       probePartitions = value;
     },
@@ -553,42 +557,17 @@ test('a recognised cluster preset is applied from its notice and only edits the 
   const page = harness();
   await page.ready();
   assert.ok(!page.contract().actions.some((action) => action.id === 'resource-apply-preset'));
+  page.hostname('land02');
   page.partitions([
     {
       name: 'first',
       default: true,
       exclusive: false,
-      nodes: 7,
+      nodes: 16,
       cores_min: 48,
-      cores_max: 48,
-      memory_gb_min: 312,
-      memory_gb_max: 375,
-      max_nodes: 3,
-      max_time: '7-00:00:00',
-      whole_node_memory: true,
-    },
-    {
-      name: 'second',
-      default: false,
-      exclusive: false,
-      nodes: 7,
-      cores_min: 64,
       cores_max: 80,
-      memory_gb_min: 502,
-      memory_gb_max: 1006,
-      max_nodes: 1,
-      max_time: '7-00:00:00',
-      whole_node_memory: true,
-    },
-    {
-      name: 'largemem',
-      default: false,
-      exclusive: false,
-      nodes: 1,
-      cores_min: 48,
-      cores_max: 48,
-      memory_gb_min: 1500,
-      memory_gb_max: 1500,
+      memory_gb_min: 312,
+      memory_gb_max: 1375,
       max_nodes: 1,
       max_time: '7-00:00:00',
       whole_node_memory: true,
@@ -1543,7 +1522,8 @@ test('server path browser rejects a busy or locked operation before opening', ()
 test('successful checks suggest shared cluster paths without overwriting settings or verifying new defaults', async () => {
   const page = harness();
   await page.ready();
-  page.partitions(['first', 'second', 'largemem'].map((name) => ({ name }) as resource.Partition));
+  page.hostname('land02');
+  page.partitions([{ name: 'first' } as resource.Partition]);
   page.fill('resource-host', 'user-chosen-alias');
   page.fill('resource-rawdata_dir', '/my/surface');
   page.fill('resource-auth', 'key-password');
@@ -1576,7 +1556,8 @@ test('successful checks suggest shared cluster paths without overwriting setting
 test('late connection checks cannot prefill changed drafts', async () => {
   const page = harness();
   await page.ready();
-  page.partitions(['first', 'second', 'largemem'].map((name) => ({ name }) as resource.Partition));
+  page.hostname('land02');
+  page.partitions([{ name: 'first' } as resource.Partition]);
   const release = page.pauseProbe();
   const pending = page.action('resource-check');
   page.render();
