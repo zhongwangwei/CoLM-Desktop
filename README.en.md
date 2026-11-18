@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.16"><img src="https://img.shields.io/badge/version-v0.3.0--beta.16-orange" alt="Current beta version: v0.3.0-beta.16"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.17"><img src="https://img.shields.io/badge/version-v0.3.0--beta.17-orange" alt="Current beta version: v0.3.0-beta.17"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="Status: Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platforms">
@@ -20,14 +20,14 @@
 CoLM Desktop brings CoLM202X site and spatial case setup, parameter constraints, the three-stage run and result evaluation together in one graphical interface. All three stages — surface data (`mksrfdata`), initial conditions (`mkinidata`) and the model main loop (`colm`) — run on the **Rust engine**, and the results are **bit-for-bit identical** to the original CoLM202X. The installers work out of the box: you do not need a Rust, Fortran, MPI or NetCDF toolchain.
 
 > [!WARNING]
-> **This is the `0.3.0-beta.16` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
+> **This is the `0.3.0-beta.17` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
 
 > [!IMPORTANT]
 > Both **site** and **spatial** simulations are supported. Spatial runs cover watershed, regional and **0.1° global** extents on lat-lon, unstructured and catchment grids. The Rust engine's spatial loop supports **Linux multi-node** execution (`srun`/`mpiexec`) with block-level SPMD, validated by a 10-day 0.1° global run on 8 tianhe nodes. Several sites can run concurrently as independent cases. Calibration, uncertainty analysis and AI studies also work on basin, regional and global cases.
 
 ## Download
 
-Get the installer for your platform from the [v0.3.0-beta.16 prerelease page](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.16):
+Get the installer for your platform from the [v0.3.0-beta.17 prerelease page](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.17):
 
 | Platform | Architecture | Format |
 |---|---|---|
@@ -43,6 +43,13 @@ Each installer contains the desktop app, the `colm-cli` command line, the Rust e
 Run `colm-agent chat --project-root /your/project` without the desktop window. It supports streaming responses, explicit approvals and saved conversations. `colm-agent config` sets the provider, model, API format and reasoning options, or selects the existing Codex, Claude Code or OpenCode backend.
 
 pip distribution is temporarily paused: wheel generation and publishing are disabled. The desktop app and native CLI remain available. See [terminal usage](docs/terminal-assistant.md).
+
+## What's new in 0.3.0-beta.17
+
+- Shows the CROP switch as read-only when the site data requires crop processes. Bounds the wait for site probes and workspace write locks.
+- Accepts multiple Namelist assignments per line. Workspace locks recognize older processes, and Git patch previews are limited to worktree-only operations.
+- Lets users close an unresolved packed job after verifying its station processes have stopped, preserving the submission and operator audit.
+- Fixes intermittent SSH authentication disconnects on macOS when prompt data arrives in multiple reads.
 
 ## What's new in 0.3.0-beta.16
 

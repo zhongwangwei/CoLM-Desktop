@@ -26,6 +26,9 @@ export function plainError(text: string): string {
  * 且用户看不出该做什么。
  */
 export function knownBackendError(text: string): string {
+  const siteCrop = '由作物站点文件决定，固定开启作物过程';
+  if (text.endsWith(siteCrop))
+    return bilingual(text, text.replace(siteCrop, 'The site file requires crop processes'));
   if (text === '强迫场配置在校验期间已改变，请重新加载后保存')
     return bilingual(
       text,

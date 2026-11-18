@@ -191,48 +191,73 @@ pub struct FileChange {
 /// The stable OS lock survives as a file; its ownership ends when the process exits.
 pub(crate) struct WriteLock {
     _file: std::fs::File,
+    legacy: std::path::PathBuf,
+    owner: String,
+}
+
+impl Drop for WriteLock {
+    fn drop(&mut self) {
+        // Old versions coordinate through this marker, so keep it until our write ends.
+        if std::fs::read_to_string(&self.legacy).ok().as_ref() == Some(&self.owner) {
+            let _ = std::fs::remove_file(&self.legacy);
+        }
+    }
 }
 
 impl WriteLock {
     pub(crate) fn acquire(workspace: &crate::layout::Workspace) -> Result<Self> {
-        let file = colm_case::file_lock::exclusive(&workspace.dir.join(".source-write.guard"))?;
+        let file = colm_case::file_lock::exclusive_timeout(
+            &workspace.dir.join(".source-write.guard"),
+            std::time::Duration::from_secs(15),
+        )
+        .map_err(|error| {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|cause| cause.kind() == std::io::ErrorKind::TimedOut)
+            {
+                error.context("workspace is busy; timed out waiting for its writer")
+            } else {
+                error.context("cannot acquire workspace writer lock")
+            }
+        })?;
         let legacy = workspace.dir.join("source-write.lock");
         match std::fs::read_to_string(&legacy) {
             Ok(owner) => {
                 let pid = owner.trim().parse::<u32>().context(
                     "workspace has an unreadable legacy write lock; inspect source-write.lock before removing it",
                 )?;
-                anyhow::ensure!(pid > 0, "invalid legacy workspace writer PID");
-                #[cfg(unix)]
-                let output = Command::new("ps")
-                    .args(["-p", &pid.to_string(), "-o", "pid="])
-                    .output()?;
-                #[cfg(windows)]
-                let output = Command::new("tasklist")
-                    .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-                    .output()?;
-                #[cfg(unix)]
-                let absent = output.status.code() == Some(1)
-                    && output.stdout.is_empty()
-                    && output.stderr.is_empty();
-                #[cfg(windows)]
-                let absent = output.status.success()
-                    && !String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-                        line.split(',')
-                            .nth(1)
-                            .is_some_and(|field| field.trim_matches('"') == pid.to_string())
-                    });
+                let absent = !colm_case::file_lock::process_is_alive(pid)
+                    .context("cannot inspect legacy workspace writer")?;
                 anyhow::ensure!(
                     absent,
                     "workspace is busy or its legacy writer cannot be checked; inspect {}",
                     legacy.display()
                 );
-                std::fs::remove_file(legacy)?;
+                anyhow::ensure!(
+                    std::fs::read_to_string(&legacy)? == owner,
+                    "workspace is busy; legacy writer changed while checking its owner"
+                );
+                std::fs::remove_file(&legacy)?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error).context("cannot inspect legacy workspace writer"),
         }
-        Ok(Self { _file: file })
+        let owner = std::process::id().to_string();
+        let mut marker = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&legacy)
+            .context("workspace is busy; cannot claim legacy writer marker")?;
+        let lock = Self {
+            _file: file,
+            legacy,
+            owner,
+        };
+        use std::io::Write;
+        marker
+            .write_all(lock.owner.as_bytes())
+            .context("cannot write workspace writer marker")?;
+        Ok(lock)
     }
 }
 
@@ -555,6 +580,18 @@ impl Edit {
         args: &[&str],
         input: &[u8],
     ) -> Result<()> {
+        // Both preview and execution share the real Git directory: admit only worktree operations.
+        let worktree_only = match args {
+            ["apply", "--whitespace=nowarn", "-"] => true,
+            ["--literal-pathspecs", "restore", "--source", source, "--worktree", "--", path] => {
+                !source.starts_with('-') && paths == [*path]
+            }
+            _ => false,
+        };
+        anyhow::ensure!(
+            worktree_only,
+            "git_change only accepts worktree-only apply or restore"
+        );
         self.checkpoint()?;
         let staged = self.backup.join("worktree");
         std::fs::create_dir_all(&staged)?;

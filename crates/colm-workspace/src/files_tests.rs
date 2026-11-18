@@ -1299,3 +1299,69 @@ fn replacing_imports_keeps_source_permissions_and_text_edits_keep_them() {
     assert!(!git::is_dirty(&ws.src()).unwrap());
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn git_preview_rejects_index_mutating_commands_before_any_change() {
+    let (root, ws) = fresh("preview-index-guard");
+    let before = std::fs::read(ws.src().join(".git/index")).unwrap();
+    let original = std::fs::read(ws.src().join(MODULE)).unwrap();
+    let mut edit = git::Edit::begin(&ws, vec![MODULE.into()]).unwrap();
+    for args in [
+        vec!["add", "--", MODULE],
+        vec!["apply", "--index", "-"],
+        vec![
+            "--literal-pathspecs",
+            "restore",
+            "--source",
+            "HEAD",
+            "--staged",
+            "--",
+            MODULE,
+        ],
+    ] {
+        let error = edit.git_change(&[MODULE.into()], &args, &[]).unwrap_err();
+        assert!(error.to_string().contains("worktree-only"));
+        assert_eq!(std::fs::read(ws.src().join(".git/index")).unwrap(), before);
+        assert_eq!(std::fs::read(ws.src().join(MODULE)).unwrap(), original);
+    }
+    edit.finish(Ok(())).unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_guard_excludes_legacy_writers_and_releases_their_marker() {
+    let (root, ws) = fresh("legacy-writer-bridge");
+    let path = ws.dir.join("source-write.lock");
+    let guard = git::WriteLock::acquire(&ws).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        std::process::id().to_string()
+    );
+    let old_writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path);
+    assert_eq!(
+        old_writer.unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    drop(guard);
+    assert!(!path.exists());
+    let old_writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    std::fs::write(&path, std::process::id().to_string()).unwrap();
+    assert!(git::WriteLock::acquire(&ws).is_err());
+    drop(old_writer);
+    assert!(path.exists());
+    std::fs::remove_file(&path).unwrap();
+    drop(git::WriteLock::acquire(&ws).unwrap());
+    assert!(!path.exists());
+    let guard = git::WriteLock::acquire(&ws).unwrap();
+    std::fs::write(&path, "foreign marker").unwrap();
+    drop(guard);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "foreign marker");
+    let _ = std::fs::remove_dir_all(root);
+}

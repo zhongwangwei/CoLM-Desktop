@@ -807,3 +807,59 @@ fn crop_profile_preserves_fortran_spatial_intent_and_reports_unknown_site() {
     assert!(case_profile_of(&dir, false).unwrap().crop_problem.is_none());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn missing_site_is_only_skipped_by_repair_probe() {
+    let dir = tmp("missing-site-probe");
+    let doc = colm_namelist::parse("&nl_colm\n SITE_fsitedata='missing.nc'\n/\n").unwrap();
+    assert!(!site_crop_if_present(&dir, &doc).unwrap());
+    assert!(site_crop(&dir, &doc).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn timed_out_crop_probe_does_not_populate_cache() {
+    let dir = tmp("crop-deadline-cache");
+    let site = dir.join("site.nc");
+    std::fs::write(&site, b"fixture").unwrap();
+    let cache = SiteCropCache::default();
+    let checks = std::cell::Cell::new(0);
+    let result = cache.read_checked(
+        &site,
+        "12".into(),
+        || Ok(true),
+        || {
+            checks.set(checks.get() + 1);
+            if checks.get() > 1 {
+                Err("timed out".into())
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert_eq!(result.unwrap_err(), "timed out");
+    assert!(!cache.read(&site, "12".into(), || Ok(false)).unwrap());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn failed_site_probe_preserves_explicit_observation_without_discovery() {
+    let dir = tmp("crop-failed-observation");
+    std::fs::write(
+        dir.join("case.nml"),
+        "&nl_colm\n SITE_fsitedata='missing.nc'\n/\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(".colm-desktop.json"),
+        r#"{"obs_file":"/unavailable/Observation/explicit.nc"}"#,
+    )
+    .unwrap();
+    let profile = case_profile_of(&dir, false).unwrap();
+    assert!(profile.crop_problem.is_some());
+    assert_eq!(
+        profile.obs_file.as_deref(),
+        Some("/unavailable/Observation/explicit.nc")
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

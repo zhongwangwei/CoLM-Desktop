@@ -799,9 +799,12 @@ fn command_server(config: &RemoteConfig, args: &[String]) -> Result<Option<Serve
         return Ok(None);
     };
     if pending
-        && args
-            .first()
-            .is_some_and(|command| matches!(command.as_str(), "remote-fetch" | "remote-cancel"))
+        && args.first().is_some_and(|command| {
+            matches!(
+                command.as_str(),
+                "remote-fetch" | "remote-cancel" | "remote-confirm-stopped"
+            )
+        })
     {
         return Err("远程提交尚未确认，请先核对原作业状态；确认前不能取消或取回".into());
     }
@@ -1041,9 +1044,12 @@ async fn ssh_cli_json_for_run(
         crate::model::options(&mut args, None)?;
     }
     let mut event = crate::history::command_start_for_run(&args, run.map(|(_, id, _)| id))?;
-    let study_cancel = args
-        .first()
-        .is_some_and(|command| matches!(command.as_str(), "remote-study-cancel" | "remote-cancel"));
+    let study_cancel = args.first().is_some_and(|command| {
+        matches!(
+            command.as_str(),
+            "remote-study-cancel" | "remote-cancel" | "remote-confirm-stopped"
+        )
+    });
     let submitted = matches!(
         args.first().map(String::as_str),
         Some("remote-run" | "remote-study-run" | "remote-build-kernel")
@@ -2163,6 +2169,32 @@ pub async fn remote_cancel(app: tauri::AppHandle, case: String) -> Result<Value,
         .map(|(_, _, target)| target)
         .unwrap_or_else(|| case.clone());
     let args = vec!["remote-cancel".into(), target];
+    let server = command_server(&remote_config(app)?, &args)?;
+    ssh_cli_json(args, None, server.as_ref()).await
+}
+
+/// Explicit operator attestation; this command never sends a kill or fabricates an exit code.
+#[tauri::command]
+pub async fn remote_confirm_stopped(
+    app: tauri::AppHandle,
+    case: String,
+    job: String,
+    confirmed: bool,
+) -> Result<Value, String> {
+    if !confirmed {
+        return Err("Confirm station processes have stopped before closing the record".into());
+    }
+    let target = run_record(&case)?
+        .map(|(_, _, target)| target)
+        .unwrap_or(case);
+    let args = vec![
+        "remote-confirm-stopped".into(),
+        target,
+        "--job".into(),
+        job,
+        "--confirmed-stopped".into(),
+        "1".into(),
+    ];
     let server = command_server(&remote_config(app)?, &args)?;
     ssh_cli_json(args, None, server.as_ref()).await
 }

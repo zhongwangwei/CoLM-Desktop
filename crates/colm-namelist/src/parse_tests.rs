@@ -313,10 +313,132 @@ fn inline_empty_groups_allow_insertion_and_quoted_slashes_are_values() {
         parsed.get("path"),
         Some(&Value::Str("O'Brien/!data.nc".into()))
     );
-    for source in ["& /\n", "&g a=1 / b=2\n", "&g a=1, b=2 /\n"] {
+    for source in ["& /\n", "&g a=1 / b=2\n"] {
         assert!(
             parse(source).is_err(),
             "unsupported syntax must not silently lose fields: {source}"
         );
+    }
+}
+
+#[test]
+fn multiple_assignments_preserve_values_separators_and_quotes() {
+    for source in [
+        "&nl_colm path=\"/tmp/a\" DEF_TUNING_CROP_PLANTING_DAY=120 /\n",
+        "&g a=1,2,3,b=.true., c='x, y=2 / ! O''Brien' / ! note\r\n",
+        "&g\n a=1 b=2\t c=3 ! untouched a=9\n/",
+        "&g field( 1 ) %member(2) = 1, b=2 /",
+    ] {
+        let parsed = doc(source);
+        assert_eq!(parsed.to_string(), source);
+        assert!(parsed.paths().len() >= 2);
+    }
+    let parsed = doc("&g a=1,2,3,b=.true., c='x, y=2 / ! O''Brien' /\n");
+    assert_eq!(
+        parsed.get("a"),
+        Some(&Value::List(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3)
+        ]))
+    );
+    assert_eq!(parsed.get("b"), Some(&Value::Bool(true)));
+    assert_eq!(
+        parsed.get("c"),
+        Some(&Value::Str("x, y=2 / ! O'Brien".into()))
+    );
+}
+
+#[test]
+fn editing_inline_assignments_preserves_other_entries_and_reparses() {
+    for source in ["&g a=1,b=2,c=3 /\r\n", "&g\n a=1 b=2 c=3 ! note\n/\n"] {
+        for key in ["a", "b", "c"] {
+            let mut parsed = doc(source);
+            parsed.set(key, Value::Int(9)).unwrap();
+            let expected = source.replace(
+                &format!(
+                    "{key}={}",
+                    match key {
+                        "a" => 1,
+                        "b" => 2,
+                        _ => 3,
+                    }
+                ),
+                &format!("{key}=9"),
+            );
+            assert_eq!(parsed.to_string(), expected);
+            assert_eq!(doc(&expected).get(key), Some(&Value::Int(9)));
+            parsed.remove(key).unwrap();
+            let edited = doc(&parsed.to_string());
+            assert_eq!(edited.paths().len(), 2);
+            assert!(edited.get(key).is_none());
+            parsed.insert("d", Value::Int(4), "g").unwrap();
+            assert_eq!(doc(&parsed.to_string()).get("d"), Some(&Value::Int(4)));
+        }
+        let mut parsed = doc(source);
+        for key in ["a", "b", "c"] {
+            parsed.remove(key).unwrap();
+        }
+        assert!(doc(&parsed.to_string()).paths().is_empty());
+    }
+}
+
+#[test]
+fn inline_unsupported_values_and_paths_are_explicit_errors() {
+    for source in [
+        "&g a=1 b=3*2 /",
+        "&g a=1 b(1:2)=3 /",
+        "&g a=1 b(1,2)=3 /",
+        "&g a=1 b=(2,3) /",
+        "&g a=1 b= /",
+        "&g a=1 b='unclosed /",
+        "&g a=1 invalid-name=2 /",
+        "&g a=1, 2bad=3 /",
+        "&g a=1 b='x'c='y' /",
+    ] {
+        assert!(parse(source).is_err(), "accepted {source}");
+    }
+}
+
+#[test]
+fn inline_duplicate_assignments_obey_last_write_and_remove_all() {
+    let mut parsed = doc("&g a=1, A=2, b=3 /\n");
+    assert_eq!(parsed.get("a"), Some(&Value::Int(2)));
+    parsed.set("a", Value::Int(4)).unwrap();
+    assert_eq!(parsed.to_string(), "&g a=1, A=4, b=3 /\n");
+    parsed.remove("a").unwrap();
+    let reparsed = doc(&parsed.to_string());
+    assert_eq!(reparsed.paths(), vec!["b"]);
+}
+
+#[test]
+fn spaced_derived_indices_are_addressable_and_invalid_names_are_refused() {
+    let parsed = doc("&g field( 1 ) %member( 2 ) = 3, flag=.true. /\n");
+    assert_eq!(parsed.get("field(1)%member(2)"), Some(&Value::Int(3)));
+    for name in ["two fields", "bad-name", "1field", "field%", "field(1,2)"] {
+        assert!(Path::parse(name).is_err(), "accepted {name}");
+    }
+}
+
+#[test]
+fn same_line_values_match_gfortran_oracle_fixtures() {
+    // Checked with gfortran: read(*, nml=g) yields 1,2,3,120,7,T and the path.
+    for (source, path) in [
+        (
+            "&g path=\"/tmp/a\" b=120 a=1,2,3 field(1)%member(2)=7 flag=.true. /\n",
+            "/tmp/a",
+        ),
+        (
+            "&g a=1,2,3,b=120, path='O''Brien/! x=2',field( 1 ) %member( 2 )=7,flag=.true. / ! note\n",
+            "O'Brien/! x=2",
+        ),
+    ] {
+        let parsed = doc(source);
+        assert_eq!(parsed.to_string(), source);
+        assert_eq!(parsed.get("a"), Some(&Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])));
+        assert_eq!(parsed.get("b"), Some(&Value::Int(120)));
+        assert_eq!(parsed.get("field(1)%member(2)"), Some(&Value::Int(7)));
+        assert_eq!(parsed.get("flag"), Some(&Value::Bool(true)));
+        assert_eq!(parsed.get("path"), Some(&Value::Str(path.into())));
     }
 }

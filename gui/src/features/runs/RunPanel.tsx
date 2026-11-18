@@ -213,6 +213,7 @@ export default function RunPanel({
       error?: string;
     }>({}),
     [loadBusy, setLoadBusy] = useState(false);
+  const [stoppedJob, setStoppedJob] = useState('');
   // “更多选项与说明”是补充说明与指纹开关，默认收起；即使设置里开了“默认展开专家设置”
   // 也不该把这一块顶到运行按钮前面（用户 2026-11-08 反馈）。
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -907,7 +908,7 @@ export default function RunPanel({
     });
   }
   async function remoteAction(
-    command: 'remote_status' | 'remote_cancel' | 'remote_fetch',
+    command: 'remote_status' | 'remote_cancel' | 'remote_fetch' | 'remote_confirm_stopped',
     target = casePath,
     quiet = false,
     // The caller already holds the panel lock (the Check button checks several stations at once).
@@ -945,6 +946,17 @@ export default function RunPanel({
       throw new Error(
         bilingual('先核对服务器任务身份与运行状态', 'Reconcile job identity and state first'),
       );
+    const confirmedJob = (targetRemote as { record?: { job?: string } } | null)?.record?.job;
+    if (
+      command === 'remote_confirm_stopped' &&
+      (!permissions.confirmStopped || !confirmedJob || stoppedJob !== confirmedJob)
+    )
+      throw new Error(
+        bilingual(
+          '请核实站点进程已停止并输入作业号',
+          'Verify the station processes have stopped and enter the job ID',
+        ),
+      );
     if (command === 'remote_fetch' && !permissions.fetch)
       throw new Error(bilingual('先核对服务器任务的真实终态', 'Confirm terminal state first'));
     if (!held) lock.current = true;
@@ -956,14 +968,21 @@ export default function RunPanel({
         command,
         command === 'remote_fetch'
           ? { case: target, host: null, all: false, overwriteNewer: false }
-          : { case: target },
+          : command === 'remote_confirm_stopped'
+            ? { case: target, job: confirmedJob, confirmed: true }
+            : { case: target },
       );
       const fetchedCase =
         command === 'remote_fetch' && typeof result.run_case === 'string'
           ? result.run_case
           : undefined;
       if (!alive.current) return;
-      if (command === 'remote_cancel' || command === 'remote_fetch')
+      if (command === 'remote_confirm_stopped') setStoppedJob('');
+      if (
+        command === 'remote_cancel' ||
+        command === 'remote_fetch' ||
+        command === 'remote_confirm_stopped'
+      )
         result = await invokeJson<Record<string, unknown>>('remote_status', { case: target });
       const merged = reconcileRemoteRun(targetRemote, result);
       const accepts = (previous: RunState | undefined) => {
@@ -2415,6 +2434,35 @@ export default function RunPanel({
                 run={() => remoteAction('remote_fetch')}
               />
             </div>
+            {remotePermissions.confirmStopped && (
+              <Notice tone="warning">
+                <p>
+                  {t(
+                    '仅在已核实计算节点上的本站点进程全部停止后关闭记录。此操作不终止进程，不认定成功；保留原提交和人工复核记录，并允许重试。请输入作业号确认：',
+                    'Close this record only after verifying all station processes on the compute node have stopped. This does not kill processes or claim success; it preserves the submission and operator audit and permits retry. Enter the job ID to confirm:',
+                  )}{' '}
+                  {(remote as { record?: { job?: string } })?.record?.job}
+                </p>
+                <Input
+                  aria-label={t('已停止站点的作业号', 'Stopped station job ID')}
+                  value={stoppedJob}
+                  onChange={(event) => setStoppedJob(event.target.value)}
+                />
+                <ActionButton
+                  action="remote-confirm-stopped"
+                  kind="commit"
+                  label={t('确认已停止并关闭记录', 'Confirm stopped and close record')}
+                  disabled={
+                    busy ||
+                    monitor ||
+                    cancelling ||
+                    !stoppedJob ||
+                    stoppedJob !== (remote as { record?: { job?: string } })?.record?.job
+                  }
+                  run={() => remoteAction('remote_confirm_stopped')}
+                />
+              </Notice>
+            )}
             {lastCheck && (
               <p className="muted" role="status">
                 {t('上次核对', 'Last check')}{' '}

@@ -515,3 +515,25 @@ test('crop site metadata and CROP kernels cannot be presented as crop-off', () =
     assert.throws(() => apply(overlay(), 'DEF_USE_BGC', '.false.', env), /crop/i);
   }
 });
+
+test('the backend site decision takes precedence over an old false crop value', () => {
+  const options = setupChoices(
+    overlay(),
+    fields,
+    { ...environment, engine: 'rust', domain: 'site' },
+    [
+      {
+        name: 'DEF_USE_CROP',
+        mode: 'readonly',
+        configured_value: '.false.',
+        effective_value: '.true.',
+        provenance: 'SITE_fsitedata',
+        allowed_values: ['.true.'],
+        pending: false,
+      },
+    ],
+  );
+  const crop = options.find((option) => option.id === 'crop')!;
+  assert.equal(crop.value, '.true.');
+  assert.match(crop.choices.find((option) => option.value === '.false.')!.reason, /crop/i);
+});

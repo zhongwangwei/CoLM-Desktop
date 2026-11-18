@@ -236,6 +236,8 @@ usage:
   colm-cli remote-load --host <服务器>
                    # 只读：登录节点负载与内存、各分区占用、排队与自己的作业
                    # 默认预检；只清理身份已核实且已完成的独占服务器运行目录
+  colm-cli remote-confirm-stopped <case-dir> --job ID --confirmed-stopped 1
+                   # 人工核实本站点进程已全部停止后，关闭载体已丢失且有唯一回执的打包站点；保留审计并允许重试
   colm-cli study-preflight <case-root> --spec study.json
                    # 只校验 Study，不创建目录
   colm-cli study-create <case-root> --spec study.json
@@ -710,6 +712,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         command if command.starts_with("ws-") => ws_cmd::dispatch(command, opts)?,
         "remote-status" => remote_cmd::cmd_status(opts)?,
         "remote-cancel" => remote_cmd::cmd_cancel(opts)?,
+        "remote-confirm-stopped" => remote_cmd::cmd_confirm_stopped(opts)?,
         "remote-fetch" => remote_cmd::cmd_fetch(opts)?,
         "remote-read" => remote_cmd::cmd_read(opts)?,
         "remote-engine-progress" => remote_cmd::cmd_engine_progress(opts)?,

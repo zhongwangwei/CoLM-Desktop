@@ -447,6 +447,7 @@ export function historyKindLabel(kind: string, en = false): string {
     'remote-status': ['查看服务器作业', 'Server job status'],
     'remote-study-status': ['查看服务器研究', 'Server study status'],
     'remote-cancel': ['取消服务器作业', 'Cancel server job'],
+    'remote-confirm-stopped': ['复核并关闭站点作业', 'Review and close station job'],
     server: ['服务器', 'Server'],
     study: ['研究', 'Research'],
     'study-create': ['新建研究', 'New study'],

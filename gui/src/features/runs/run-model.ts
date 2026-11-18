@@ -184,6 +184,7 @@ export function remoteRunPermissions(value: unknown) {
   return {
     pending,
     terminal: finished || ended,
+    confirmStopped: confirmed && unresolvedStation,
     cancel:
       confirmed && (['queued', 'running'].includes(String(status.state)) || unresolvedStation),
     fetch: finished,

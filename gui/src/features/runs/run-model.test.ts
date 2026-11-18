@@ -130,6 +130,7 @@ it('pending run identity requires reconciliation before mutations or resubmissio
   assert.deepEqual(remoteRunPermissions(pending), {
     pending: true,
     terminal: false,
+    confirmStopped: false,
     cancel: false,
     fetch: false,
   });
@@ -338,6 +339,7 @@ test('a server job the scheduler cancelled before it ran is over, with nothing t
   assert.deepEqual(remoteRunPermissions(cancelled), {
     pending: false,
     terminal: true,
+    confirmStopped: false,
     cancel: false,
     fetch: false,
   });
@@ -532,6 +534,7 @@ test('a claimed station remains owned and cancellable after its carrier ends', (
     };
     assert.equal(remoteSubmissionBlocked(unresolved), true);
     assert.equal(remoteRunPermissions(unresolved).cancel, true);
+    assert.equal(remoteRunPermissions(unresolved).confirmStopped, true);
     assert.equal(remoteRunPermissions(unresolved).fetch, false);
     assert.equal(remoteRunPermissions(unresolved).terminal, false);
   }

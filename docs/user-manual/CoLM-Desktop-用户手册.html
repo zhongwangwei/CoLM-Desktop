@@ -179,7 +179,7 @@ body{margin:0;font-family:"PingFang SC","Hiragino Sans GB","Songti SC",sans-seri
  </div>
  <div class="cover-info">
   <table class="cover-table">
-   <tr><th>适用版本</th><td>v0.3.0-beta.16（测试版）</td></tr>
+   <tr><th>适用版本</th><td>v0.3.0-beta.17（测试版）</td></tr>
    <tr><th>编写日期</th><td>2026-11-13</td></tr>
    <tr><th>适用平台</th><td>macOS · Windows · Linux</td></tr>
    <tr><th>截图来源</th><td>真实窗口截图：GUI 全页面、区域/流域、AI 助手等 48 张</td></tr>
@@ -191,7 +191,7 @@ body{margin:0;font-family:"PingFang SC","Hiragino Sans GB","Songti SC",sans-seri
 
 <h1 id="colm-desktop-用户手册">CoLM Desktop 用户手册</h1>
 <p><strong>适用版本：</strong>
-<code>0.3.0-beta.16</code>（测试版）<br />
+<code>0.3.0-beta.17</code>（测试版）<br />
 <strong>平台：</strong> macOS（Apple Silicon / Intel）、Windows
 x86_64、Linux x86_64<br />
 <strong>手册截图：</strong> 2026-11-07/08 在 macOS
@@ -746,6 +746,7 @@ SinglePoint 不支持土地覆盖变化）。</li>
 <li>Rust
 空间算例的并行预算（节点×每节点核数）与站点打包互斥，界面只显示适用的那一种。</li>
 </ul>
+<p>载体退出后，如果站点一直没有返回退出码，运行记录会保留为待核实。确认对应站点在计算节点上的全部进程已经停止后，可在该站点的运行记录中输入作业号，选择「确认已停止并关闭记录」。这会保留原提交及复核依据，允许重新提交。系统会先检查是否已收到站点的实际结果。</p>
 <p>本次演示的批量结果：<strong>2 个站点全部完成，0 失败</strong>（与图
 17 一致）。</p>
 <hr />
@@ -1169,6 +1170,9 @@ $ head -c 300 sites.json
 <span id="cb12-18"><a href="#cb12-18" aria-hidden="true" tabindex="-1"></a><span class="ex">colm-cli</span> remote-status ./site1 <span class="at">--host</span> my-cluster <span class="at">--root</span> ...</span>
 <span id="cb12-19"><a href="#cb12-19" aria-hidden="true" tabindex="-1"></a><span class="ex">colm-cli</span> remote-cancel ./site1 <span class="at">--host</span> my-cluster <span class="at">--root</span> ...</span>
 <span id="cb12-20"><a href="#cb12-20" aria-hidden="true" tabindex="-1"></a><span class="ex">colm-cli</span> remote-fetch ./site1 <span class="at">--host</span> my-cluster <span class="at">--root</span> ... <span class="at">--vars</span> f_fevpa,f_fsena</span></code></pre></div>
+<p>核实站点进程已停止后，缺少实际退出结果的已认领打包作业可用
+<code>colm-cli remote-confirm-stopped ./site1 --job &lt;作业号&gt; --confirmed-stopped 1</code>
+关闭记录。命令使用原提交保存的服务器和作业身份。</p>
 <blockquote>
 <ul>
 <li>远程作业的 SSH 凭据可由桌面端以 stdin
@@ -1647,7 +1651,7 @@ ID、原始键、默认值、作用域、可见性、源码位置）。</li>
 </tr>
 </tbody>
 </table>
-<p><em>手册生成日期：2026-11-13；软件版本 0.3.0-beta.16。</em></p>
+<p><em>手册生成日期：2026-11-13；软件版本 0.3.0-beta.17。</em></p>
 <div class="appendix-a">
 
 <p><a id="appendix-a"></a></p>

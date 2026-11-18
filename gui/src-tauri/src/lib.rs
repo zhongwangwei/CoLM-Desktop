@@ -396,6 +396,7 @@ pub fn run() {
             remote_status,
             remote_job_record,
             remote_cancel,
+            remote_confirm_stopped,
             remote_fetch,
             hybrid_check,
             hybrid_climate,

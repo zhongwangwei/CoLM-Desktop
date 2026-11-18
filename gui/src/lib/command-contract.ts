@@ -1979,6 +1979,20 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "remote_confirm_stopped": {
+    "case": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "job": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "confirmed": {
+      "required": true,
+      "rust_type": "bool"
+    }
+  },
   "remote_fetch": {
     "case": {
       "required": true,

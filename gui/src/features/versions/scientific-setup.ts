@@ -127,7 +127,16 @@ export function setupChoices(
     methaneModes.every((m) => m !== null && [...riverModes, ...nonRiverModes].includes(m));
   const compiledCrop =
     !environment.autoClose && environment.kernel?.macros.includes('CROP') === true;
-  const requiredCrop = compiledCrop || (isSite(environment) && environment.siteCrop === true);
+  const siteCrop =
+    isSite(environment) &&
+    (environment.siteCrop === true ||
+      queryFields.some(
+        (field) =>
+          field.name === 'DEF_USE_CROP' &&
+          field.provenance === 'SITE_fsitedata' &&
+          field.effective_value === '.true.',
+      ));
+  const requiredCrop = compiledCrop || siteCrop;
   const crop =
     requiredCrop ||
     cropEnabled({

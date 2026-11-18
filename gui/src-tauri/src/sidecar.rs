@@ -5251,6 +5251,139 @@ fn capture_registered_command(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Filesystem calls can hang on a disconnected mount, so keep their workers bounded
+/// even after the caller's deadline has expired.
+pub(crate) fn site_probe<T: Send + 'static>(
+    work: impl FnOnce(SiteProbe) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    static ACTIVE: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
+    bounded_site_probe(
+        ACTIVE.get_or_init(|| Arc::new(AtomicUsize::new(0))).clone(),
+        Duration::from_secs(15),
+        work,
+    )
+}
+
+struct SiteProbeSlot(Arc<AtomicUsize>);
+impl Drop for SiteProbeSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn bounded_site_probe<T: Send + 'static>(
+    active: Arc<AtomicUsize>,
+    timeout: Duration,
+    work: impl FnOnce(SiteProbe) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(site_probe_timeout());
+        }
+        if active
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+                (n < 4).then_some(n + 1)
+            })
+            .is_ok()
+        {
+            break;
+        }
+        std::thread::sleep(
+            Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    let slot = SiteProbeSlot(active);
+    let probe = SiteProbe { deadline };
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("site-probe".into())
+        .spawn(move || {
+            let result = work(probe);
+            drop(slot);
+            let _ = send.send(result);
+        })
+        .map_err(|e| e.to_string())?;
+    receive
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => site_probe_timeout(),
+            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                "站点读取进程意外结束 / Site probe stopped".into()
+            }
+        })?
+}
+
+fn site_probe_timeout() -> String {
+    "站点读取超时，请检查文件或存储连接后重试 / Site probe timed out".into()
+}
+
+pub(crate) struct SiteProbe {
+    deadline: Instant,
+}
+impl SiteProbe {
+    pub(crate) fn check(&self) -> Result<(), String> {
+        if Instant::now() >= self.deadline {
+            Err(site_probe_timeout())
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn capture(&self, args: &[String]) -> Result<String, String> {
+        capture_with(args, |args| {
+            self.check()?;
+            let mut command = sidecar_command(resolve_cli());
+            command.args(args);
+            self.capture_command(&mut command)
+        })
+    }
+
+    fn capture_command(&self, command: &mut std::process::Command) -> Result<String, String> {
+        self.check()?;
+        let child = colm_kernel::run::top_level_sidecar(command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let pid = child.id();
+        let guard = register_child(pid, ChildOwner::Background);
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = send.send(child.wait_with_output());
+        });
+        loop {
+            if self.check().is_err() || guard.stopped() {
+                // The caller has its own deadline. Keep this slot until cleanup completes.
+                let terminated = terminate_process_tree(pid);
+                let _ = receive.recv();
+                terminated?;
+                return Err(if guard.stopped() {
+                    "operation cancelled".into()
+                } else {
+                    site_probe_timeout()
+                });
+            }
+            match receive.recv_timeout(Duration::from_millis(25)) {
+                Ok(output) => {
+                    let output = output.map_err(|e| e.to_string())?;
+                    self.check()?;
+                    return if output.status.success() {
+                        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+                    } else {
+                        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+                    };
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("Site probe output reader stopped".into())
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn capture_async(args: Vec<String>) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || capture(&args))
         .await

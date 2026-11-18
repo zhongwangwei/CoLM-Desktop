@@ -292,7 +292,7 @@ fn wizard_skips(name: &str) -> bool {
             .any(|part| lower.contains(part))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
     use crate::config::integer;
     let form = project_wizard_form(root.clone())?;
@@ -813,17 +813,29 @@ struct SiteCropCache {
 }
 
 impl SiteCropCache {
+    #[cfg(test)]
     fn read(
         &self,
         site: &Path,
         landtype: String,
         probe: impl FnOnce() -> Result<bool, String>,
     ) -> Result<bool, String> {
+        self.read_checked(site, landtype, probe, || Ok(()))
+    }
+
+    fn read_checked(
+        &self,
+        site: &Path,
+        landtype: String,
+        probe: impl FnOnce() -> Result<bool, String>,
+        check: impl Fn() -> Result<(), String>,
+    ) -> Result<bool, String> {
         let site = site
             .canonicalize()
             .map_err(|e| format!("{}: {e}", site.display()))?;
         let metadata = std::fs::metadata(&site).map_err(|e| e.to_string())?;
         let modified = metadata.modified().map_err(|e| e.to_string())?;
+        check()?;
         let key = (site.clone(), landtype);
         if let Some((size, stamp, crop)) = self.entries.lock().map_err(|e| e.to_string())?.get(&key)
         {
@@ -840,6 +852,7 @@ impl SiteCropCache {
                 site.display()
             ));
         }
+        check()?;
         let mut entries = self.entries.lock().map_err(|e| e.to_string())?;
         if entries.len() >= 256 {
             entries.clear();
@@ -850,6 +863,21 @@ impl SiteCropCache {
 }
 
 pub(crate) fn site_crop(dir: &Path, doc: &colm_namelist::Document) -> Result<bool, String> {
+    bounded_site_crop(dir, doc, false)
+}
+
+pub(crate) fn site_crop_if_present(
+    dir: &Path,
+    doc: &colm_namelist::Document,
+) -> Result<bool, String> {
+    bounded_site_crop(dir, doc, true)
+}
+
+fn bounded_site_crop(
+    dir: &Path,
+    doc: &colm_namelist::Document,
+    allow_missing: bool,
+) -> Result<bool, String> {
     let Some(colm_namelist::Value::Str(site)) = doc.get("SITE_fsitedata") else {
         return Ok(false);
     };
@@ -865,21 +893,34 @@ pub(crate) fn site_crop(dir: &Path, doc: &colm_namelist::Document) -> Result<boo
     if !landtype.is_empty() {
         args.extend(["--landtype".into(), landtype.clone()]);
     }
-    static CACHE: std::sync::OnceLock<SiteCropCache> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(Default::default)
-        .read(&site, landtype, || {
-            let json = crate::sidecar::capture(&args)?;
-            serde_json::from_str::<serde_json::Value>(&json)
-                .map_err(|e| e.to_string())?
-                .get("crop")
-                .and_then(serde_json::Value::as_bool)
-                .ok_or_else(|| "作物元数据响应无效 / Invalid crop metadata response".into())
-        })
+    crate::sidecar::site_probe(move |probe| {
+        if allow_missing {
+            match std::fs::metadata(&site) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(format!("{}: {error}", site.display())),
+                Ok(_) => {}
+            }
+        }
+        probe.check()?;
+        static CACHE: std::sync::OnceLock<SiteCropCache> = std::sync::OnceLock::new();
+        CACHE.get_or_init(Default::default).read_checked(
+            &site,
+            landtype,
+            || {
+                let json = probe.capture(&args)?;
+                serde_json::from_str::<serde_json::Value>(&json)
+                    .map_err(|e| e.to_string())?
+                    .get("crop")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| "作物元数据响应无效 / Invalid crop metadata response".into())
+            },
+            || probe.check(),
+        )
+    })
 }
 
 /// 「打开已有算例」：`dir` 必须是含 `case.nml` 的算例目录。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_case(dir: String) -> Result<OpenedCase, String> {
     let dir = PathBuf::from(dir);
     let nml = dir.join("case.nml");
@@ -929,13 +970,22 @@ pub(crate) fn case_profile_of(dir: &Path, spatial: bool) -> Result<CaseProfile, 
         .ok()
         .and_then(|bytes| serde_json::from_slice::<colm_model::MaterializedRun>(&bytes).ok())
         .is_some_and(|run| recorded_case(&run.source_case).remote_directory.is_some());
+    let mut site_probe_failed = false;
     if !profile.crop && !spatial && record.remote_directory.is_none() && !remote_source {
         match site_crop(dir, &effective) {
             Ok(crop) => profile.crop = crop,
-            Err(error) => profile.crop_problem = Some(error),
+            Err(error) => {
+                site_probe_failed = true;
+                profile.crop_problem = Some(error);
+            }
         }
     }
-    profile.obs_file = case_default_observation(dir, &record);
+    // Do not revisit a potentially stalled site mount for optional companion discovery.
+    profile.obs_file = if site_probe_failed {
+        record.obs_file.clone()
+    } else {
+        case_default_observation(dir, &record)
+    };
     profile.domain_kind = record.domain;
     profile.shapefile = record.shapefile;
     profile.engine = record.engine;

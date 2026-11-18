@@ -3015,3 +3015,41 @@ fn every_srun_step_gets_the_allocated_cpu_count_including_pure_fortran() {
         assert!(script.contains("RAYON_NUM_THREADS=6"), "{script}");
     }
 }
+
+#[test]
+fn operator_stop_requires_confirmation_expected_job_and_packed_record_before_ssh() {
+    let (fixture, mut pending) = PendingFixture::new("operator-stop");
+    let mut options = fixture.retry();
+    assert!(cmd_confirm_stopped(&options)
+        .unwrap_err()
+        .to_string()
+        .contains("explicit confirmation"));
+    options
+        .flags
+        .push(("--confirmed-stopped".into(), "1".into()));
+    options.flags.push(("--job".into(), "wrong-job".into()));
+    std::fs::write(
+        fixture.0.join(RECORD),
+        serde_json::to_vec(&pending.record).unwrap(),
+    )
+    .unwrap();
+    assert!(cmd_confirm_stopped(&options)
+        .unwrap_err()
+        .to_string()
+        .contains("recorded job changed"));
+    options.flags.last_mut().unwrap().1 = pending.record.job.clone();
+    assert!(cmd_confirm_stopped(&options)
+        .unwrap_err()
+        .to_string()
+        .contains("only packed stations"));
+    pending.record.scheduler = "slurm-pack".into();
+    std::fs::write(
+        fixture.0.join(RECORD),
+        serde_json::to_vec(&pending.record).unwrap(),
+    )
+    .unwrap();
+    assert!(cmd_confirm_stopped(&options)
+        .unwrap_err()
+        .to_string()
+        .contains("scheduler job ID is missing"));
+}

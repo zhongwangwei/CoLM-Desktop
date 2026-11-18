@@ -21,6 +21,7 @@
 //!                        只取所选变量与月份（先在服务器上裁剪压缩，R5）；不给就取全部
 //! colm-cli remote-status <case> [--lines N]
 //! colm-cli remote-cancel <case>
+//! colm-cli remote-confirm-stopped <case> --job ID --confirmed-stopped 1  # only after verifying station processes stopped
 //! ```
 //!
 //! `--dry-run 1` 只生成作业脚本全文（含调度指令）打印出来，不上传、不提交；`--scheduler auto` 先探测服务器有什么
@@ -2883,18 +2884,8 @@ pub(super) fn cmd_load(opts: &Opts) -> Result<()> {
 pub(super) fn cmd_cancel(opts: &Opts) -> Result<()> {
     let case = opts.positional_case()?;
     let record = read_record(&case)?;
-    job::check_id(&record.job)?;
     let ssh = Ssh::new(&record.host)?;
-    let marker = quote(&format!("# colm-engine-snapshot: {}", record.engine));
-    let mut identity = format!("set -e\ncd {}\ngrep -Fqx -- {marker} script.sh || {{ echo 'engine identity changed' >&2; exit 1; }}\n[ \"$(cat scheduler 2>/dev/null || echo bare)\" = {} ] || {{ echo 'scheduler identity changed' >&2; exit 1; }}\n", quote(&job::job_dir(&record.root, &record.job)), quote(&record.scheduler));
-    if record.scheduler != "bare" {
-        let id = record
-            .scheduler_id
-            .as_deref()
-            .filter(|id| !id.is_empty())
-            .context("recorded scheduler job ID is missing")?;
-        identity.push_str(&format!("[ \"$(cat sched_id)\" = {} ] || {{ echo 'scheduler job identity changed' >&2; exit 1; }}\n", quote(id)));
-    }
+    let identity = cancel_identity(&record)?;
     let result = remote_study::cancel_job(
         &ssh,
         &record.root,
@@ -2905,6 +2896,60 @@ pub(super) fn cmd_cancel(opts: &Opts) -> Result<()> {
     crate::history_cmd::observe_remote_outcome(&result);
     crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &result)?;
     println!("{result}");
+    Ok(())
+}
+
+fn cancel_identity(record: &Record) -> Result<String> {
+    job::check_id(&record.job)?;
+    let marker = quote(&format!("# colm-engine-snapshot: {}", record.engine));
+    let mut identity = format!("set -e\ncd {}\ngrep -Fqx -- {marker} script.sh || {{ echo 'engine identity changed' >&2; exit 1; }}\n[ \"$(cat scheduler 2>/dev/null || echo bare)\" = {} ] || {{ echo 'scheduler identity changed' >&2; exit 1; }}\n", quote(&job::job_dir(&record.root, &record.job)), quote(&record.scheduler));
+    if record.scheduler != "bare" {
+        let id = record
+            .scheduler_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .context("recorded scheduler job ID is missing")?;
+        identity.push_str(&format!("[ \"$(cat sched_id)\" = {} ] || {{ echo 'scheduler job identity changed' >&2; exit 1; }}\n", quote(id)));
+    }
+    Ok(identity)
+}
+
+pub(super) fn cmd_confirm_stopped(opts: &Opts) -> Result<()> {
+    ensure!(
+        opts.get("--confirmed-stopped").as_deref() == Some("1"),
+        "explicit confirmation that station processes have stopped is required"
+    );
+    let record = read_record(&opts.positional_case()?)?;
+    ensure!(
+        record.job == opts.need_str("--job")?,
+        "the recorded job changed; inspect it again"
+    );
+    ensure!(
+        record.scheduler.ends_with("-pack"),
+        "only packed stations can be reconciled"
+    );
+    let identity = cancel_identity(&record)?;
+    let ssh = Ssh::new(&record.host)?;
+    let mut lease =
+        colm_remote::engine_inventory::LifecycleLock::acquire_exclusive(&ssh, &record.root)?;
+    let report = lease.run(|| {
+        let text = ssh.run_ok(&format!(
+            "{identity}\n{}",
+            job::confirm_stopped_script(&record.root, &record.job)
+        ))?;
+        job::parse_report(&text)
+    })?;
+    lease.finish()?;
+    let ended = job::ended(&report.status);
+    let operator_closed = report
+        .status
+        .detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("operator verified station processes stopped"));
+    let outcome = json!({"job":record.job,"outcome":if operator_closed { "operator_confirmed_stopped" } else { "observed" },"operator_confirmed_stopped":operator_closed,"terminal":report.terminal,"ended":ended,"status":report.status});
+    crate::history_cmd::observe_remote_outcome(&outcome);
+    crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &outcome)?;
+    println!("{outcome}");
     Ok(())
 }
 

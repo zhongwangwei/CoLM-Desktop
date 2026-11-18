@@ -23,6 +23,8 @@ export type ConfigurationField = {
   parent_gate?: string | null;
   parent_gate_enabled?: boolean;
   built_in_default?: string | null;
+  effective_value?: string | null;
+  provenance?: string | null;
 };
 const fractionationChildren = new Set([
   'DEF_ISO_KINETIC_SCHEME',

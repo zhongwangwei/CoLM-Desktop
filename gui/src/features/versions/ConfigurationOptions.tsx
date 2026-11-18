@@ -487,6 +487,7 @@ export default function ConfigurationOptions({
   }
   function row(field: ModelField) {
     const context = values.fields.find((f) => f.name === field.name),
+      siteCrop = field.name === 'DEF_USE_CROP' && context?.provenance === 'SITE_fsitedata',
       configured = removedCaseKeys.includes(field.name)
         ? null
         : (modelSettingValue(overlay, field.name) ?? context?.configured_value ?? null),
@@ -505,9 +506,11 @@ export default function ConfigurationOptions({
           )
         : '',
       fileInput = cnInitialFile || urbanAlbedoFile || vicFile,
-      rawValue = forcedResistance ? '0' : (configured ?? defaultValue),
+      rawValue = forcedResistance
+        ? '0'
+        : ((siteCrop ? context?.effective_value : configured) ?? defaultValue),
       value = fileInput && /^(null|none)?$/i.test(unquote(rawValue).trim()) ? vicDefault : rawValue,
-      overridden = !forcedResistance && configured !== null && configured !== '';
+      overridden = !forcedResistance && !siteCrop && configured !== null && configured !== '';
     const inactive = ['disabled', 'readonly', 'read-only'].includes(context?.mode ?? ''),
       cannot = !ready || !!inactive || forcedResistance,
       id = `configuration-${field.name}`,

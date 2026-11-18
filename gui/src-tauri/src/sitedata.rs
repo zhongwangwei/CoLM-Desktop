@@ -91,13 +91,18 @@ pub struct SiteClassifications {
 
 #[tauri::command]
 pub async fn site_classifications(dir: String) -> Result<SiteClassifications, String> {
-    let case_dir = std::path::Path::new(&dir);
-    let doc = case_site_document(case_dir)?;
-    let site = case_site_file(case_dir, &doc)?;
-    let json =
-        crate::sidecar::capture_async(vec!["site-classes".into(), site.display().to_string()])
-            .await?;
-    serde_json::from_str(&json).map_err(|e| format!("colm-cli site-classes 的输出解析不了：{e}"))
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::sidecar::site_probe(move |probe| {
+            let case_dir = std::path::Path::new(&dir);
+            let doc = case_site_document(case_dir)?;
+            let site = case_site_file(case_dir, &doc)?;
+            let json = probe.capture(&["site-classes".into(), site.display().to_string()])?;
+            serde_json::from_str(&json)
+                .map_err(|e| format!("colm-cli site-classes 的输出解析不了：{e}"))
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn pft_site_input(case_dir: &std::path::Path) -> Result<(std::path::PathBuf, Option<i64>), String> {

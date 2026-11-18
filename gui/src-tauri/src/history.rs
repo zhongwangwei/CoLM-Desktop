@@ -332,6 +332,7 @@ fn assistant_ui_event(
                     | "run-submit"
                     | "run-cancel"
                     | "remote-cancel"
+                    | "remote-confirm-stopped"
                     | "remote-fetch"
                     | "remote-study-cancel"
                     | "remote-study-fetch"
@@ -816,7 +817,11 @@ pub(crate) fn finish<T>(
                         .map_err(std::io::Error::other)?;
                 } else if matches!(
                     action,
-                    "remote-run" | "remote-status" | "remote-fetch" | "remote-cancel"
+                    "remote-run"
+                        | "remote-status"
+                        | "remote-fetch"
+                        | "remote-cancel"
+                        | "remote-confirm-stopped"
                 ) {
                     h.import_case(path)?;
                 }
@@ -1516,6 +1521,7 @@ fn command_event(args: &[String], run_id: Option<&str>) -> Result<Option<Event>,
             | "remote-run"
             | "remote-status"
             | "remote-cancel"
+            | "remote-confirm-stopped"
             | "remote-fetch"
             | "remote-study-run"
             | "remote-study-status"
@@ -1687,6 +1693,7 @@ fn reconcile_remote_attempt(
         action,
         "remote-status"
             | "remote-cancel"
+            | "remote-confirm-stopped"
             | "remote-fetch"
             | "remote-study-status"
             | "remote-study-cancel"

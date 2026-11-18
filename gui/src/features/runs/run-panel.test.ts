@@ -31,6 +31,7 @@ function panel(
     migrate?: (dir: string) => Promise<unknown>;
     submit?: () => Promise<unknown>;
     remote?: boolean;
+    stoppedJob?: string;
     remoteBatch?: boolean;
     recordInputFingerprints?: boolean;
     ranks?: string;
@@ -120,6 +121,8 @@ function panel(
   };
   const context = {
     state,
+    stoppedJob: options.stoppedJob ?? '',
+    setStoppedJob: () => {},
     latest,
     lock: { current: false },
     cancelLock: { current: false },
@@ -1321,4 +1324,54 @@ test('known kernel conflicts stop before migration or submission', async () => {
   const p = panel({ engine: 'fortran', ranks: '2', kernelMacros: ['SinglePoint', 'LULC_IGBP'] });
   await assert.rejects(p.run(), /USEMPI/);
   assert.deepEqual(p.calls, []);
+});
+
+test('operator closure requires the typed owned packed job and refreshes its terminal result', async () => {
+  const record = { host: 'server', job: 'packed-station', scheduler: 'slurm-pack' };
+  const terminal = { record, status: { state: 'lost' }, ended: 'cancelled' };
+  for (const typed of ['', 'different-job', 'packed-station']) {
+    const p = panel({ remote: true, stoppedJob: typed, ipc: async () => terminal });
+    p.state.running['/good'] = {
+      case: '/good',
+      run_id: 'owned-run',
+      location: 'remote',
+      status: 'unknown',
+      running: true,
+      logs: [],
+      stages: {},
+      progress: { host: 'server', remote: { record, status: { state: 'unknown' } } },
+    };
+    if (typed !== record.job) {
+      await assert.rejects(p.remoteAction('remote_confirm_stopped'), /作业号/);
+      assert.deepEqual(p.calls, []);
+      assert.equal(p.state.running['/good'].running, true);
+    } else {
+      await p.remoteAction('remote_confirm_stopped');
+      assert.deepEqual(
+        p.calls.map((call) => call.command),
+        ['remote_confirm_stopped', 'remote_status'],
+      );
+      assert.deepEqual(p.calls[0].args, { case: '/good', job: record.job, confirmed: true });
+      assert.equal(p.state.running['/good'].running, false);
+      assert.equal(p.state.running['/good'].status, 'cancelled');
+    }
+  }
+  for (const scheduler of ['slurm', 'bare']) {
+    const p = panel({ remote: true, stoppedJob: record.job });
+    p.state.running['/good'] = {
+      case: '/good',
+      run_id: 'owned-run',
+      location: 'remote',
+      status: 'unknown',
+      running: true,
+      logs: [],
+      stages: {},
+      progress: {
+        host: 'server',
+        remote: { record: { ...record, scheduler }, status: { state: 'unknown' } },
+      },
+    };
+    await assert.rejects(p.remoteAction('remote_confirm_stopped'));
+    assert.deepEqual(p.calls, []);
+  }
 });

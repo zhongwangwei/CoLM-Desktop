@@ -235,6 +235,7 @@ fn action_kind(command: &str) -> Option<&'static str> {
         | "remote-engine-clean"
         | "remote-engine-recover"
         | "remote-cancel"
+        | "remote-confirm-stopped"
         | "remote-study-cancel"
         | "remote-engines"
         | "remote-clean"
@@ -751,11 +752,22 @@ fn reconcile_remote_once(
             return Ok(true);
         }
         ensure!(
-            latest.status == status,
+            latest.status == status
+                || (latest.status == "cancelled"
+                    && latest.detail["status"]["state"] == "lost"
+                    && latest.detail["operator_stop"].is_object()
+                    && outcome["status"]["state"] == "finished"),
             "remote terminal outcome conflicts with recorded completion"
         );
     }
     let mut next = latest.next(phase, status);
+    if outcome["status"]["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("operator verified station processes stopped"))
+        && latest.detail.get("operator_stop").is_none()
+    {
+        next.detail["operator_stop"] = json!({"job":record["job"],"basis":"operator verified station processes stopped; original outcome unavailable","confirmed_at_ms":colm_history::now_ms()});
+    }
     next.detail["remote_record"] = remote_record_metadata(record);
     next.detail["status"] = json!({"state":outcome["status"]["state"],"exit_code":outcome["status"]["exit_code"],"phase":outcome["status"]["phase"]});
     next.detail["remote_outcome"] = json!({"outcome":outcome["outcome"],"terminal":outcome["terminal"],"job":outcome["job"],"request_accepted":outcome["request_accepted"],"state":outcome["status"]["state"],"exit_code":outcome["status"]["exit_code"]});

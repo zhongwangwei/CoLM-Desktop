@@ -71,6 +71,8 @@ export function workspaceErrorText(error: string): [string, string] {
       text,
     ];
   }
+  if (text.includes('timed out waiting for its writer'))
+    return ['等待工作区写入锁超时，尚未保存。请等待其他写入操作结束后重试。', text];
   if (text.includes('workspace is busy') || text.includes('legacy write lock'))
     return ['工作区仍有旧版写入操作，或其状态无法确认。请结束该操作并核对锁文件后重试。', text];
   if (text.includes('non-UTF-8'))

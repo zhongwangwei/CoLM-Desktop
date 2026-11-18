@@ -74,3 +74,10 @@ it('transaction recovery errors identify preserved files and backups', () => {
     /保留原文件/,
   );
 });
+
+it('explains writer timeout without recommending legacy lock removal', () => {
+  assert.match(
+    workspaceErrorText('workspace is busy; timed out waiting for its writer')[0],
+    /写入锁超时/,
+  );
+});

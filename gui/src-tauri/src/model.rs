@@ -3298,7 +3298,7 @@ pub struct PftSelection {
 /// A read-only view of unsaved configuration; never materializes or edits a case.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub fn model_configuration(
+pub async fn model_configuration(
     source: ConfigurationSource,
     case_dir: Option<String>,
     kernel_dir: Option<String>,
@@ -3308,15 +3308,19 @@ pub fn model_configuration(
     case_edited_fields: Option<Vec<String>>,
     case_removed_fields: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    crate::config::model_configuration::query_for_engine(
-        &root()?,
-        source,
-        case_dir.as_deref(),
-        kernel_dir.as_deref(),
-        pft_selection,
-        case_values,
-        engine.as_deref(),
-        case_edited_fields,
-        case_removed_fields,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::config::model_configuration::query_for_engine(
+            &root()?,
+            source,
+            case_dir.as_deref(),
+            kernel_dir.as_deref(),
+            pft_selection,
+            case_values,
+            engine.as_deref(),
+            case_edited_fields,
+            case_removed_fields,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }

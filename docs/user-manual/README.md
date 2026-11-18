@@ -1,6 +1,6 @@
 # CoLM Desktop 用户手册
 
-**适用版本：** `0.3.0-beta.16`（测试版）\
+**适用版本：** `0.3.0-beta.17`（测试版）\
 **平台：** macOS（Apple Silicon / Intel）、Windows x86_64、Linux x86_64  
 **手册截图：** 2026-11-07/08 在 macOS 上由真实窗口采集；示例项目为 `~/Desktop/Github/CoLM-Desktop/tmp/manual-project`（CN-Cng 示例算例，缩到 2008-01-01 → 2008-01-03 便于演示）。  
 **附录：** [CLI 命令参考](appendices/appendix-cli.md) · [配置字段总表（964 项）](appendices/appendix-config-fields.md) · [参数库索引（1369 项）](appendices/appendix-tuning-parameters.md)
@@ -367,6 +367,8 @@ tmp/manual-project/CN-Cng/runs/07fddf66…/
 - 服务器（Slurm/LSF/PBS）：站点批量默认**按节点打包**——同一批站点进入服务器队列，每个节点作业一次占满节点核数，站点数多时自动多开节点；不再"一个站点占一个节点"。
 - Rust 空间算例的并行预算（节点×每节点核数）与站点打包互斥，界面只显示适用的那一种。
 
+载体退出后，如果站点一直没有返回退出码，运行记录会保留为待核实。确认对应站点在计算节点上的全部进程已经停止后，可在该站点的运行记录中输入作业号，选择「确认已停止并关闭记录」。这会保留原提交及复核依据，允许重新提交。系统会先检查是否已收到站点的实际结果。
+
 本次演示的批量结果：**2 个站点全部完成，0 失败**（与图 17 一致）。
 
 ---
@@ -723,6 +725,8 @@ colm-cli remote-cancel ./site1 --host my-cluster --root ...
 colm-cli remote-fetch ./site1 --host my-cluster --root ... --vars f_fevpa,f_fsena
 ```
 
+核实站点进程已停止后，缺少实际退出结果的已认领打包作业可用 `colm-cli remote-confirm-stopped ./site1 --job <作业号> --confirmed-stopped 1` 关闭记录。命令使用原提交保存的服务器和作业身份。
+
 > - 远程作业的 SSH 凭据可由桌面端以 stdin 注入（`COLM_SSH_AUTH_STDIN=1`）；命令行直接使用时按 `~/.ssh/config` 连接。
 > - 外部大数据目录用 `--map`；算例内部普通文件（site.nc 等）会随 staging 自动上传。
 > - 打包批量：同一批站点进同一队列，载体作业按节点槽位并发；每站 1 rank/1 线程。
@@ -996,4 +1000,4 @@ EXIT:0
 | CLI `history-catalog` | 实际执行 | 输出 48 步、变量目录 JSON |
 | 真实远程 Slurm（Rust/Fortran、pack、ranks=1） | 已在 tianhe 实测 | 见 `docs/implementation-verification.md` 2026-11-07 验收章节 |
 
-*手册生成日期：2026-11-13；软件版本 0.3.0-beta.16。*
+*手册生成日期：2026-11-13；软件版本 0.3.0-beta.17。*

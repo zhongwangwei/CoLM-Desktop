@@ -64,6 +64,7 @@ impl Path {
         }
         let mut segments = Vec::new();
         for (i, part) in s.split('%').enumerate() {
+            let part = part.trim();
             let (name, index) = match part.find('(') {
                 Some(p) => {
                     if !part.ends_with(')') {
@@ -81,6 +82,11 @@ impl Path {
             let name = name.trim();
             if name.is_empty() {
                 bail!("empty path segment in {s}");
+            }
+            if !name.starts_with(|c: char| c.is_ascii_alphabetic())
+                || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                bail!("invalid field name in {s}");
             }
             segments.push(if i == 0 {
                 Segment::Field(name.to_string())

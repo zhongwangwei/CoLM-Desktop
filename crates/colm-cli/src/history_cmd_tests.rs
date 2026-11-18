@@ -700,3 +700,41 @@ fn nonforcing_digest_never_authorizes_complete_input_comparison() {
             .contains("unsupported full-content")
     );
 }
+
+#[test]
+fn operator_stop_history_preserves_audit_and_accepts_late_real_result() {
+    let history = History::open(":memory:").unwrap();
+    let mut start = Event::start("remote-run");
+    start.operation_id = "operator-stop".into();
+    let record = json!({"host":"server","root":"/jobs","job":"station","engine":"engine","remote_case":"/cases/station","provenance":{"operation_id":"operator-stop"}});
+    start.detail = json!({"action":"remote-run","remote_record":record});
+    history.append(&start).unwrap();
+    let closed = json!({"job":"station","terminal":true,"ended":"cancelled","status":{"state":"lost","detail":"CANCELLED: operator verified station processes stopped; original outcome unavailable"}});
+    reconcile_remote_history(&history, &record, &closed, None).unwrap();
+    let first = history.detail("operator-stop").unwrap().unwrap();
+    assert_eq!(first.operation.latest.status, "cancelled");
+    assert!(!first.operation.needs_reconciliation);
+    let audit = first.operation.latest.detail["operator_stop"].clone();
+    assert_eq!(audit["job"], "station");
+    reconcile_remote_history(&history, &record, &closed, None).unwrap();
+    assert_eq!(
+        history
+            .detail("operator-stop")
+            .unwrap()
+            .unwrap()
+            .operation
+            .event_count,
+        first.operation.event_count
+    );
+    let actual =
+        json!({"job":"station","terminal":true,"status":{"state":"finished","exit_code":0}});
+    reconcile_remote_history(&history, &record, &actual, None).unwrap();
+    let latest = history
+        .detail("operator-stop")
+        .unwrap()
+        .unwrap()
+        .operation
+        .latest;
+    assert_eq!(latest.status, "succeeded");
+    assert_eq!(latest.detail["operator_stop"], audit);
+}

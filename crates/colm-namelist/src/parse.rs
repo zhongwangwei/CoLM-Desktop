@@ -90,31 +90,8 @@ pub fn parse(src: &str) -> Result<Document> {
             bail!("line {}: continuation lines are not supported", lineno + 1);
         }
 
-        let eq = line
-            .find('=')
-            .with_context(|| format!("line {}: expected an assignment: {line}", lineno + 1))?;
-        let name = &line[..eq];
-        let path = Path::parse(name.trim())
-            .with_context(|| format!("line {}: bad field name", lineno + 1))?;
-
-        // 值与行尾注释：`!` 在引号外才是注释起点
-        let rest = &line[eq + 1..];
-        let cut = comment_start(rest).unwrap_or(rest.len());
-        let head = &rest[..cut];
-        let lead = head.len() - head.trim_start().len();
-        let text = head.trim();
-
-        let (value, repaired_text) =
-            parse_value(text).with_context(|| format!("line {}: bad value: {text}", lineno + 1))?;
-
-        // 合法输入逐字节往返，只修复旧版本写出的非法实数 kind 后缀。
-        items.push(Item::Entry(Entry {
-            path,
-            text: repaired_text.unwrap_or_else(|| text.to_string()),
-            value,
-            prefix: format!("{}={}", &line[..eq], &rest[..lead]),
-            suffix: raw[eq + 1 + lead + text.len()..].to_string(),
-        }));
+        parse_assignments(raw, &mut items)
+            .with_context(|| format!("line {}: invalid assignment", lineno + 1))?;
         if let Some(ending) = ending {
             in_group = false;
             items.push(Item::GroupEnd(ending.to_string()));
@@ -125,6 +102,82 @@ pub fn parse(src: &str) -> Result<Document> {
         bail!("unterminated group: the file ends without a closing '/'");
     }
     Ok(Document { items })
+}
+
+/// Keep the separators with the preceding entry, so replacing a value cannot
+/// eat the comma/space before the next assignment.
+fn parse_assignments(mut raw: &str, items: &mut Vec<Item>) -> Result<()> {
+    while !raw.is_empty() {
+        let code = &raw[..comment_start(raw).unwrap_or(raw.len())];
+        let eq = assignment_equals(code).context("expected a field assignment")?;
+        let path = Path::parse(code[..eq].trim()).context("bad field name")?;
+        let rest = &code[eq + 1..];
+        let next = next_assignment(rest).map(|at| eq + 1 + at);
+        let end = next.unwrap_or(code.len());
+        let head = &raw[eq + 1..end];
+        let lead = head.len() - head.trim_start().len();
+        let text = head.trim().trim_end_matches(',').trim_end();
+        let (value, repaired) = parse_value(text).context("bad value")?;
+        let entry_end = next.unwrap_or(raw.len());
+        items.push(Item::Entry(Entry {
+            path,
+            text: repaired.unwrap_or_else(|| text.to_string()),
+            value,
+            prefix: raw[..eq + 1 + lead].to_string(),
+            suffix: raw[eq + 1 + lead + text.len()..entry_end].to_string(),
+        }));
+        raw = &raw[entry_end..];
+    }
+    Ok(())
+}
+
+/// Recognize the lexical shape of a field path, leaving subscript validation
+/// to Path::parse (slices and multidimensional indices still error explicitly).
+fn assignment_equals(s: &str) -> Option<usize> {
+    let mut tail = s.trim_start();
+    loop {
+        if !tail.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            return None;
+        }
+        let end = tail
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .unwrap_or(tail.len());
+        tail = tail[end..].trim_start();
+        if tail.starts_with('(') {
+            let end = tail.find(')')?;
+            tail = tail[end + 1..].trim_start();
+        }
+        if let Some(member) = tail.strip_prefix('%') {
+            tail = member.trim_start();
+        } else {
+            return tail.starts_with('=').then_some(s.len() - tail.len());
+        }
+    }
+}
+
+fn next_assignment(s: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut depth = 0usize;
+    let mut boundary = true;
+    for (at, c) in s.char_indices() {
+        if quote.is_none()
+            && depth == 0
+            && boundary
+            && c.is_ascii_alphabetic()
+            && assignment_equals(&s[at..]).is_some()
+        {
+            return Some(at);
+        }
+        match (quote, c) {
+            (None, '\'') | (None, '"') => quote = Some(c),
+            (Some(q), c) if c == q => quote = None,
+            (None, '(') => depth += 1,
+            (None, ')') => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        boundary = c.is_whitespace() || c == ',';
+    }
+    None
 }
 
 /// 引号外第一个 `!` 的位置。
@@ -236,6 +289,12 @@ fn parse_scalar(s: &str) -> Result<Value> {
         || (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
     {
         let delimiter = &s[..1];
+        if s[1..s.len() - 1]
+            .replace(&delimiter.repeat(2), "")
+            .contains(delimiter)
+        {
+            bail!("unexpected text after quoted value: {s}");
+        }
         return Ok(Value::Str(
             s[1..s.len() - 1].replace(&delimiter.repeat(2), delimiter),
         ));

@@ -823,6 +823,7 @@ const CONFIGURATION_REASONS: Record<string, string> = {
   '当前没有启用同位素，不使用水同位素参数':
     'Isotopes are disabled; water-isotope parameters are not used',
   '由内核或其他路径自动派生，只读显示': 'Derived by the kernel or another path; read-only',
+  '由作物站点文件决定，固定开启作物过程': 'The site file requires crop processes',
   '由 CH4 参数文件的淹没方案派生，case.nml 里的值不生效':
     'Derived from the CH4 parameter file inundation scheme; the case.nml value has no effect',
 };

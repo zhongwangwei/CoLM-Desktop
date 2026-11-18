@@ -1024,6 +1024,7 @@ struct VisibilityContext<'a> {
     vg: bool,
     bgc: bool,
     crop: bool,
+    site_requires_crop: bool,
     urban: bool,
     ncar_urban: bool,
     lulcc: bool,
@@ -1148,9 +1149,8 @@ impl<'a> VisibilityContext<'a> {
             pc: logical(doc, "DEF_USE_PC"),
             vg: !logical(doc, "DEF_USE_Campbell_SOIL_MODEL"),
             bgc: logical(doc, "DEF_USE_BGC"),
-            // DEF_USE_CROP 是编译期数组尺寸选择的只读反映，不接受 case.nml
-            // 里的伪开关；manifest 是唯一可信来源。
             crop: have.contains("CROP"),
+            site_requires_crop: false,
             urban: logical(doc, "DEF_URBAN_RUN"),
             ncar_urban: case_dir.is_some_and(|dir| {
                 crate::remote::server_case_owner(&dir.to_string_lossy())
@@ -1612,6 +1612,22 @@ struct KernelFacts {
     grid_river: bool,
 }
 
+const SITE_CROP_REQUIRED: &str = "由作物站点文件决定，固定开启作物过程";
+
+fn site_requires_crop(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+) -> Result<bool, String> {
+    if doc.get("SITE_fsitedata").is_none()
+        || crate::project::recorded_case(case_dir)
+            .remote_directory
+            .is_some()
+    {
+        return Ok(false);
+    }
+    crate::project::site_crop_if_present(case_dir, doc)
+}
+
 fn effective_crop(
     doc: &colm_namelist::Document,
     case_dir: &std::path::Path,
@@ -1622,18 +1638,25 @@ fn effective_crop(
     {
         return Ok(true);
     }
-    if crate::project::recorded_case(case_dir)
-        .remote_directory
-        .is_some()
+    site_requires_crop(doc, case_dir)
+}
+
+fn refuse_disabled_site_crop(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+    fields: &[FieldChange],
+) -> Result<(), String> {
+    if matches!(
+        doc.get("DEF_USE_CROP"),
+        Some(colm_namelist::Value::Bool(false))
+    ) && fields
+        .iter()
+        .any(|field| field.path.eq_ignore_ascii_case("DEF_USE_CROP"))
+        && site_requires_crop(doc, case_dir)?
     {
-        return Ok(false);
+        return Err(SITE_CROP_REQUIRED.into());
     }
-    if let Some(colm_namelist::Value::Str(site)) = doc.get("SITE_fsitedata") {
-        if !site.trim().is_empty() && case_dir.join(site).is_file() {
-            return crate::project::site_crop(case_dir, doc);
-        }
-    }
-    Ok(false)
+    Ok(())
 }
 
 fn kernel_facts(kernel_dir: Option<&str>) -> Result<Option<KernelFacts>, String> {
@@ -2205,6 +2228,14 @@ fn field_runtime_state(
 ) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
     let name = field.name;
     let one_of = |names: &[&str]| names.contains(&name);
+
+    if name == "DEF_USE_CROP" && c.site_requires_crop {
+        return (
+            FieldMode::Disabled,
+            Some(SITE_CROP_REQUIRED),
+            vec![".true."],
+        );
+    }
 
     // 流域侧向流自己算地表/地下径流（`MOD_SoilSnowHydrology.F90` 的 `#ifndef CatchLateralFlow`
     // 整段跳过产流方案），且 `MOD_Namelist` 把变饱和流强制打开。
@@ -2907,6 +2938,9 @@ fn field_states_for_engine_at(
     migrate_legacy_material(&mut doc);
     let mut context = VisibilityContext::new_at(&doc, have, case_dir);
     context.rust_engine = runtime_is_rust(engine)?;
+    if let Some(dir) = case_dir {
+        context.site_requires_crop = site_requires_crop(&doc, dir)?;
+    }
     // `DEF_wetland_finundation_scheme` 在甲烷算例里按 CH4 参数文件的淹没方案派生，namelist 值不生效。
     let finundation = case_dir
         .and_then(|dir| methane_mode(&doc, dir))
@@ -2966,7 +3000,12 @@ fn field_states_for_engine_at(
             let built_in_default = context_default
                 .clone()
                 .or_else(|| Some(default_literal(field.default)));
-            let effective_value = override_value.clone().or_else(|| built_in_default.clone());
+            let forced_crop = field.name == "DEF_USE_CROP" && context.site_requires_crop;
+            let effective_value = if forced_crop {
+                Some(".true.".into())
+            } else {
+                override_value.clone().or_else(|| built_in_default.clone())
+            };
             let is_land_cover = context.single
                 && context.lct
                 && context.valid_landtype()
@@ -2978,7 +3017,9 @@ fn field_states_for_engine_at(
                     context.site_landtype
                 )
             });
-            let provenance = if override_value.is_some() {
+            let provenance = if forced_crop {
+                "SITE_fsitedata"
+            } else if override_value.is_some() {
                 "case.nml"
             } else if is_land_cover {
                 "MOD_Const_LC.F90"
@@ -6092,6 +6133,8 @@ pub(crate) fn set_fields_with_forcing(
         };
         // Model process files belong to the preview; newly edited data paths belong to the source.
         let model_dir = contexts.and_then(|dirs| dirs.get(index)).unwrap_or(&d);
+        refuse_disabled_site_crop(validation, std::path::Path::new(&d), &fields)
+            .map_err(|e| format!("{d}: {e}"))?;
         validate_runtime_contract_at(
             validation,
             std::path::Path::new(&d),

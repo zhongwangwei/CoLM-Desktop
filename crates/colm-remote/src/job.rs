@@ -225,6 +225,8 @@ COLM_QUERY=
 if [ ! -f exit_code ]; then COLM_QUERY=$(colm_status_query); fi
 if [ -f exit_code ] && [ -f cancelled ]; then echo "state=lost"; echo "detail=CANCELLED by request (exit $(cat exit_code))"; echo "terminal=confirmed"
 elif [ -f exit_code ]; then echo "state=finished $(cat exit_code)"
+elif [ -f operator_stop ] && [ ! -L operator_stop ] && [ -O operator_stop ] && grep -Fqx -- "$(cat scheduler):$(cat sched_id):${{PWD##*/}}" operator_stop && printf '%s\n' "$COLM_QUERY" | grep -Eq '^state=(unknown|lost)$' && ! printf '%s\n' "$COLM_QUERY" | grep -Eq '^(query=failed|terminal=confirmed)'; then
+  echo "state=lost"; echo "detail=CANCELLED: operator verified station processes stopped; original outcome unavailable"; echo "terminal=confirmed"
 else printf '%s\n' "$COLM_QUERY"; fi
 if [ -f cancel_requested ]; then echo "cancel_requested=yes"; else echo "cancel_requested=no"; fi
 echo "phase=$(tail -n 1 phase 2>/dev/null)"
@@ -234,6 +236,49 @@ true
 "#,
         prelude = sched::PATH_PRELUDE,
         query = sched::QUERY,
+    )
+}
+
+/// Caller must hold the lifecycle lease and prepend the recorded job identity check.
+/// Re-probe within this same SSH call before recording the operator's explicit attestation.
+pub fn confirm_stopped_script(root: &str, id: &str) -> String {
+    let report = status_script(root, id, 0);
+    format!(
+        r#"set -e
+[ -O {dir} ] && [ ! -L {dir} ] || {{ echo 'job directory is not owned' >&2; exit 1; }}
+colm_report() {{
+{report}}}
+BEFORE=$(set +e; colm_report)
+printf '%s\n' "$BEFORE" | grep -q '^query=failed' && {{ printf '%s\n' "$BEFORE" >&2; exit 1; }}
+if printf '%s\n' "$BEFORE" | grep -Eq '^(state=finished |terminal=confirmed)'; then printf '%s\n' "$BEFORE"; exit 0; fi
+printf '%s\n' "$BEFORE" | grep -Eq '^state=(unknown|lost)$' || {{ echo 'station is still queued or running' >&2; exit 1; }}
+cd {dir}
+case "$(cat scheduler)" in *-pack) ;; *) echo 'only packed stations can be reconciled' >&2; exit 1;; esac
+P=$(cat pool)
+[ -d "$P/claimed/{id}" ] && [ -O "$P/claimed/{id}" ] && [ ! -L "$P/claimed/{id}" ] || {{ echo 'station has no owned claim' >&2; exit 1; }}
+C=$(cat "$P/claimed/{id}/carrier" 2>/dev/null)
+[ -n "$C" ] || {{ echo 'carrier receipt is missing; a carrier may still launch this station' >&2; exit 1; }}
+MATCHES=0
+for c in "$P"/carriers/c*; do
+  [ -d "$c" ] && [ ! -L "$c" ] && [ -O "$c" ] || continue
+  [ "$(cat "$c/sched_id" 2>/dev/null)" = "$C" ] || continue
+  MATCHES=$((MATCHES + 1))
+done
+[ "$MATCHES" -eq 1 ] || {{ echo 'carrier receipt has no unique owned carrier identity' >&2; exit 1; }}
+if [ -e operator_stop ] || [ -L operator_stop ]; then
+  [ -f operator_stop ] && [ ! -L operator_stop ] && [ -O operator_stop ] && grep -Fqx -- "$(cat scheduler):$(cat sched_id):{id}" operator_stop || {{ echo 'operator audit identity changed' >&2; exit 1; }}
+else
+  TMP=$(mktemp ./operator_stop.XXXXXX)
+  trap 'rm -f "$TMP"' EXIT
+  printf '%s\n' "$(cat scheduler):$(cat sched_id):{id}" "operator=$(id -un)" "confirmed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" 'basis=operator verified station processes stopped; outcome unavailable' > "$TMP"
+  ln "$TMP" operator_stop
+  rm -f "$TMP"
+  trap - EXIT
+fi
+set +e
+colm_report
+"#,
+        dir = quote(&job_dir(root, id)),
     )
 }
 

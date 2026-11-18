@@ -162,6 +162,9 @@ pub(crate) fn query_for_engine(
     )?;
     let mut context = VisibilityContext::new_at(&doc, &have, case.as_deref());
     context.rust_engine = runtime_is_rust(engine)?;
+    if let Some(dir) = case.as_deref() {
+        context.site_requires_crop = site_requires_crop(&doc, dir)?;
+    }
     // Resolve CH4 from verified model assets after process overrides, not the source case file.
     context.methane_mode = files
         .iter()
@@ -178,6 +181,17 @@ pub(crate) fn query_for_engine(
     let mut fields = Vec::new();
     for field in colm_schema::all() {
         let configured = doc.get(field.name).map(ToString::to_string);
+        if field.name == "DEF_USE_CROP" && context.site_requires_crop {
+            fields.push(json!({
+                "name":field.name,"mode":"readonly","reason":SITE_CROP_REQUIRED,
+                "allowed_values":[".true."],"mixed":false,"context_default":null,"default_mixed":false,
+                "scope_label":null,"built_in_default":default_literal(field.default),
+                "override_value":configured,"configured_value":configured,"effective_value":".true.",
+                "provenance":"SITE_fsitedata","override_mixed":false,"effective_mixed":false,
+                "status":"confirmed","pending":false,
+            }));
+            continue;
+        }
         let (mut candidate, mut candidate_reason, _) = field_runtime_state(field, &context);
         if field.name.starts_with("DEF_GridRiverLake_")
             && matches!(
@@ -378,6 +392,9 @@ fn parse_value(raw: &str) -> Result<NmlValue, String> {
 fn put(doc: &mut Document, key: &str, raw: &str) -> Result<(), String> {
     let parsed =
         colm_namelist::parse(&format!("&query\n{key} = {raw}\n/\n")).map_err(|e| e.to_string())?;
+    if parsed.paths().len() != 1 {
+        return Err(format!("{key}: expected a single configuration value"));
+    }
     let value = parsed
         .get(key)
         .cloned()
@@ -1161,6 +1178,13 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_override_cannot_supply_a_second_inline_assignment() {
+        let mut doc = colm_namelist::parse("&nl_colm\n/\n").unwrap();
+        assert!(put(&mut doc, "DEF_CASE_NAME", "'case' DEF_USE_BGC=.true.").is_err());
+        assert!(doc.paths().is_empty());
     }
 
     #[test]

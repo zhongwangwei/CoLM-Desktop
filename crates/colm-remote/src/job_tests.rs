@@ -1622,3 +1622,96 @@ fn a_packed_station_can_finish_after_its_bare_carrier_is_killed() {
         State::Finished { exit_code: 0 }
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn operator_stop_reconciles_only_claimed_unknown_pack_and_preserves_real_results() {
+    let sb = Sandbox::new("operator-stop");
+    let dir = sb.job_dir("j-pack");
+    let pool = sb.root.join("pool");
+    let claim = pool.join("claimed/j-pack");
+    let carrier = pool.join("carriers/c0");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(carrier.join("done")).unwrap();
+    std::fs::write(dir.join("scheduler"), "slurm-pack").unwrap();
+    std::fs::write(dir.join("sched_id"), "j-pack").unwrap();
+    std::fs::write(dir.join("pool"), pool.to_str().unwrap()).unwrap();
+    let script = confirm_stopped_script(&sb.work(), "j-pack");
+    assert!(!sb.run(&script).2, "an unclaimed station cannot be closed");
+    std::fs::create_dir_all(&claim).unwrap();
+    assert!(
+        !sb.run(&script).2,
+        "missing carrier receipt must not authorize a possible future launch"
+    );
+    assert!(!dir.join("operator_stop").exists());
+    std::fs::write(claim.join("carrier"), "4242").unwrap();
+    std::fs::write(carrier.join("sched_id"), "4242").unwrap();
+    sb.set("slurm_state", "RUNNING");
+    assert!(
+        !sb.run(&script).2,
+        "live carrier requires normal cancellation"
+    );
+    assert!(!dir.join("operator_stop").exists());
+    sb.unset("slurm_state");
+    sb.set("sacct_out", "COMPLETED|0:0");
+    let forged = dir.join("forged-audit");
+    std::fs::write(&forged, "slurm-pack:j-pack:j-pack\n").unwrap();
+    std::os::unix::fs::symlink(&forged, dir.join("operator_stop")).unwrap();
+    assert!(!sb.run(&script).2, "symlink audit must be rejected");
+    assert!(!sb.report("j-pack").terminal);
+    std::fs::remove_file(dir.join("operator_stop")).unwrap();
+    let (out, err, ok) = sb.run(&script);
+    assert!(ok, "{err}");
+    let report = parse_report(&out).unwrap();
+    assert!(report.terminal);
+    assert_eq!(ended(&report.status), Some("cancelled"));
+    assert!(!dir.join("exit_code").exists());
+    assert!(!dir.join("cancel_requested").exists(), "no kill request");
+    let audit = std::fs::read_to_string(dir.join("operator_stop")).unwrap();
+    assert!(audit.contains("operator=") && audit.contains("confirmed_at="));
+    assert!(sb.run(&script).2);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("operator_stop")).unwrap(),
+        audit
+    );
+    std::fs::write(carrier.join("done/j-pack"), "0").unwrap();
+    assert_eq!(
+        sb.report("j-pack").status.state,
+        State::Finished { exit_code: 0 }
+    );
+    std::fs::write(dir.join("exit_code"), "7").unwrap();
+    assert_eq!(
+        sb.report("j-pack").status.state,
+        State::Finished { exit_code: 7 }
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("operator_stop")).unwrap(),
+        audit
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn operator_stop_reprobe_never_overwrites_an_existing_wrapper_result() {
+    let sb = Sandbox::new("operator-stop-result");
+    let dir = sb.job_dir("j-pack");
+    let pool = sb.root.join("pool");
+    let claim = pool.join("claimed/j-pack");
+    let carrier = pool.join("carriers/c0");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&claim).unwrap();
+    std::fs::create_dir_all(carrier.join("done")).unwrap();
+    std::fs::write(dir.join("scheduler"), "slurm-pack").unwrap();
+    std::fs::write(dir.join("sched_id"), "j-pack").unwrap();
+    std::fs::write(dir.join("pool"), pool.to_str().unwrap()).unwrap();
+    std::fs::write(claim.join("carrier"), "4242").unwrap();
+    std::fs::write(carrier.join("sched_id"), "4242").unwrap();
+    std::fs::write(carrier.join("done/j-pack"), "0").unwrap();
+    let (out, err, ok) = sb.run(&confirm_stopped_script(&sb.work(), "j-pack"));
+    assert!(ok, "{err}");
+    assert_eq!(
+        parse_report(&out).unwrap().status.state,
+        State::Finished { exit_code: 0 }
+    );
+    assert!(!dir.join("operator_stop").exists());
+}

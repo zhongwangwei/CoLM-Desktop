@@ -6004,6 +6004,27 @@ fn case_data_save_candidate_rejects_missing_or_bad_forcing_replacements_before_c
 }
 
 #[test]
+fn crop_site_metadata_makes_the_runtime_switch_read_only() {
+    let doc = colm_namelist::parse(
+        "&nl_colm\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_USE_CROP=.false.\n SITE_landtype=12\n/\n",
+    )
+    .unwrap();
+    let have = std::collections::BTreeSet::from(["SinglePoint", "LULC_IGBP"]);
+    let mut context = VisibilityContext::new(&doc, &have);
+    let field = colm_schema::find("DEF_USE_CROP").unwrap();
+    assert_eq!(field_runtime_state(field, &context).0, FieldMode::Editable);
+    context.site_requires_crop = true;
+    assert_eq!(
+        field_runtime_state(field, &context),
+        (
+            FieldMode::Disabled,
+            Some(SITE_CROP_REQUIRED),
+            vec![".true."]
+        )
+    );
+}
+
+#[test]
 fn a_positive_planting_day_keeps_spatial_crop_editable_after_save() {
     let spatial_crop = runtime_states(
         "&nl_colm
