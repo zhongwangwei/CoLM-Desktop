@@ -515,3 +515,35 @@ test('repeated unavailable status remains cancellable without freeing the job sl
   assert.deepEqual(q.submitted, ['a']);
   assert.equal(q.changes.filter((row) => row.dir === 'a').at(-1)?.state, 'unknown');
 });
+
+test('carrier loss keeps the station slot occupied until its own result arrives', async () => {
+  let polls = 0;
+  const q = queue({
+    cases: ['a', 'b'],
+    workers: 1,
+    submit: async (dir) => {
+      q.submitted.push(dir);
+      return { ...record(dir), scheduler: 'bare-pack' };
+    },
+    status: async (dir) => {
+      if (dir === 'a' && ++polls <= 2) {
+        assert.deepEqual(q.submitted, ['a']);
+        return {
+          record: { ...record(dir), scheduler: 'bare-pack' },
+          status: { state: polls === 1 ? 'unknown' : 'lost' },
+          ended: null,
+        };
+      }
+      return finished(dir);
+    },
+  });
+  await q.run();
+  assert.equal(polls, 3);
+  assert.deepEqual(q.submitted, ['a', 'b']);
+  assert.equal(
+    q.changes.filter((entry) => entry.dir === 'a' && entry.state === 'unknown').length,
+    2,
+  );
+  assert.equal(q.changes.filter((entry) => entry.state === 'failed').length, 0);
+  assert.equal(q.changes.filter((entry) => entry.state === 'succeeded').length, 2);
+});

@@ -15,7 +15,8 @@ pub fn spelled(dir: &Path) -> std::ffi::OsString {
 
 /// 在 `dir` 里运行 git，返回 stdout（去掉结尾换行）；失败时带上 stderr。
 pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
-    Ok(String::from_utf8_lossy(&run_bytes(dir, args)?)
+    Ok(String::from_utf8(run_bytes(dir, args)?)
+        .context("Git output contains non-UTF-8 text or file paths; rename unsupported paths before editing")?
         .trim_end_matches(['\n', '\r'])
         .to_owned())
 }
@@ -33,7 +34,10 @@ fn run_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     if !output.status.success() {
         bail!(
             "git {} failed: {}",
-            args.first().copied().unwrap_or_default(),
+            args.iter()
+                .find(|arg| !arg.starts_with('-'))
+                .copied()
+                .unwrap_or_default(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -63,7 +67,10 @@ pub fn run_with_input(dir: &Path, args: &[&str], input: &[u8]) -> Result<String>
     if !output.status.success() {
         bail!(
             "git {} failed: {}",
-            args.first().copied().unwrap_or_default(),
+            args.iter()
+                .find(|arg| !arg.starts_with('-'))
+                .copied()
+                .unwrap_or_default(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -181,45 +188,51 @@ pub struct FileChange {
     pub removed: u32,
 }
 
-/// Serialize complete source edits across CLI processes, not just individual Git commands.
-pub(crate) struct WriteLock(std::path::PathBuf);
+/// The stable OS lock survives as a file; its ownership ends when the process exits.
+pub(crate) struct WriteLock {
+    _file: std::fs::File,
+}
 
 impl WriteLock {
     pub(crate) fn acquire(workspace: &crate::layout::Workspace) -> Result<Self> {
-        let path = workspace.dir.join("source-write.lock");
-        let started = std::time::Instant::now();
-        loop {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    if let Err(error) = writeln!(file, "{}", std::process::id()) {
-                        let _ = std::fs::remove_file(&path);
-                        return Err(error.into());
-                    }
-                    return Ok(Self(path));
-                }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::AlreadyExists
-                        || (cfg!(windows)
-                            && error.kind() == std::io::ErrorKind::PermissionDenied) =>
-                {
-                    anyhow::ensure!(started.elapsed().as_secs() < 15,
-                        "workspace is busy; if its writer crashed, remove {} after confirming no write is running", path.display());
-                    std::thread::sleep(std::time::Duration::from_millis(25));
-                }
-                Err(error) => return Err(error).context("cannot lock workspace source"),
+        let file = colm_case::file_lock::exclusive(&workspace.dir.join(".source-write.guard"))?;
+        let legacy = workspace.dir.join("source-write.lock");
+        match std::fs::read_to_string(&legacy) {
+            Ok(owner) => {
+                let pid = owner.trim().parse::<u32>().context(
+                    "workspace has an unreadable legacy write lock; inspect source-write.lock before removing it",
+                )?;
+                anyhow::ensure!(pid > 0, "invalid legacy workspace writer PID");
+                #[cfg(unix)]
+                let output = Command::new("ps")
+                    .args(["-p", &pid.to_string(), "-o", "pid="])
+                    .output()?;
+                #[cfg(windows)]
+                let output = Command::new("tasklist")
+                    .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+                    .output()?;
+                #[cfg(unix)]
+                let absent = output.status.code() == Some(1)
+                    && output.stdout.is_empty()
+                    && output.stderr.is_empty();
+                #[cfg(windows)]
+                let absent = output.status.success()
+                    && !String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                        line.split(',')
+                            .nth(1)
+                            .is_some_and(|field| field.trim_matches('"') == pid.to_string())
+                    });
+                anyhow::ensure!(
+                    absent,
+                    "workspace is busy or its legacy writer cannot be checked; inspect {}",
+                    legacy.display()
+                );
+                std::fs::remove_file(legacy)?;
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("cannot inspect legacy workspace writer"),
         }
-    }
-}
-
-impl Drop for WriteLock {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        Ok(Self { _file: file })
     }
 }
 
@@ -304,6 +317,7 @@ pub(crate) struct Edit {
     index: Vec<u8>,
     expected_index: Vec<u8>,
     head: String,
+    created_dirs: Vec<std::path::PathBuf>,
 }
 
 impl Edit {
@@ -313,7 +327,9 @@ impl Edit {
     ) -> Result<Self> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = workspace.src();
+        // Git resolves index and worktree arguments after -C, so pin them to this caller's CWD.
+        let root = std::path::absolute(workspace.src())?;
+        let workspace_dir = std::path::absolute(&workspace.dir)?;
         paths.extend(
             colm_remote::engine::source_links(&root)?
                 .keys()
@@ -326,25 +342,28 @@ impl Edit {
         args.extend(paths.iter().map(String::as_str));
         let index = run_bytes(&root, &args)?;
         let head = head(&root)?;
-        let backup = workspace.dir.join(format!(
+        let backup = workspace_dir.join(format!(
             ".edit-backup-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir(&backup)?;
-        let before = match capture(&root, &paths, Some(&backup.join("files"))) {
+        let prepare =
+            (|| -> Result<DiskState> {
+                let before = capture(&root, &paths, Some(&backup.join("files")))?;
+                anyhow::ensure!(capture(&root, &paths, None)? == before,
+                "files changed while preparing the edit; retry after reviewing external changes");
+                std::fs::write(backup.join("index"), &index)?;
+                std::fs::write(backup.join("entries.txt"), format!("{before:#?}"))?;
+                Ok(before)
+            })();
+        let before = match prepare {
             Ok(before) => before,
             Err(error) => {
                 let _ = std::fs::remove_dir_all(&backup);
                 return Err(error);
             }
         };
-        if capture(&root, &paths, None)? != before {
-            let _ = std::fs::remove_dir_all(&backup);
-            bail!("files changed while preparing the edit; retry after reviewing external changes");
-        }
-        std::fs::write(backup.join("index"), &index)?;
-        std::fs::write(backup.join("entries.txt"), format!("{before:#?}"))?;
         Ok(Self {
             root,
             backup,
@@ -354,6 +373,7 @@ impl Edit {
             expected_index: index.clone(),
             index,
             head,
+            created_dirs: Vec::new(),
         })
     }
 
@@ -394,21 +414,200 @@ impl Edit {
         run_bytes(&self.root, &args)
     }
 
-    pub(crate) fn record_index(&mut self) -> Result<()> {
-        self.expected_index = self.index_state()?;
+    /// Git may partly update an index before failing; publish only a successful private index.
+    pub(crate) fn stage(&mut self, args: &[&str]) -> Result<()> {
+        self.change_index(&[(args, &[])])
+    }
+
+    fn change_index(&mut self, commands: &[(&[&str], &[u8])]) -> Result<()> {
+        use std::io::Write;
+        self.checkpoint()?;
+        let index = self.root.join(".git/index");
+        let original = std::fs::read(&index)?;
+        let staged = self.backup.join("staged-index");
+        std::fs::write(&staged, &original)?;
+        for (args, input) in commands {
+            let mut child = Command::new("git")
+                .arg("-C")
+                .arg(spelled(&self.root))
+                .args(*args)
+                .env("GIT_INDEX_FILE", spelled(&staged))
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()?;
+            let written = child
+                .stdin
+                .take()
+                .context("missing Git stdin")?
+                .write_all(input);
+            let output = child.wait_with_output()?;
+            anyhow::ensure!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.iter()
+                    .find(|arg| !arg.starts_with('-'))
+                    .copied()
+                    .unwrap_or_default(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            written.context("cannot write index transaction to Git")?;
+        }
+        let mut args = vec!["--literal-pathspecs", "ls-files", "--stage", "-z", "--"];
+        args.extend(self.paths.iter().map(String::as_str));
+        let staged_entries = Command::new("git")
+            .arg("-C")
+            .arg(spelled(&self.root))
+            .args(args)
+            .env("GIT_INDEX_FILE", spelled(&staged))
+            .output()?;
+        anyhow::ensure!(
+            staged_entries.status.success(),
+            "cannot read prepared Git index"
+        );
+        self.checkpoint()?;
+        let lock_path = self.root.join(".git/index.lock");
+        let mut lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)?;
+        let result = (|| -> Result<()> {
+            use std::io::Write;
+            anyhow::ensure!(
+                std::fs::read(&index)? == original,
+                "the Git index changed outside this operation; preserve and review its staging"
+            );
+            lock.write_all(&std::fs::read(&staged)?)?;
+            lock.sync_all()?;
+            drop(lock);
+            std::fs::rename(&lock_path, &index)?;
+            self.expected_index = staged_entries.stdout;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&lock_path);
+        }
+        result
+    }
+
+    pub(crate) fn create_parents(&mut self, path: &str) -> Result<()> {
+        let mut missing = Vec::new();
+        let mut parent = self.root.join(path);
+        while let Some(dir) = parent.parent() {
+            if dir == self.root || dir.exists() {
+                break;
+            }
+            missing.push(dir.to_path_buf());
+            parent = dir.to_path_buf();
+        }
+        for dir in missing.into_iter().rev() {
+            match std::fs::create_dir(&dir) {
+                Ok(()) => self.created_dirs.push(dir),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(())
     }
 
-    pub(crate) fn stage(&mut self, args: &[&str]) -> Result<()> {
-        anyhow::ensure!(
-            self.index_state()? == self.expected_index,
-            "the Git index changed outside this operation; preserve and review its staging"
-        );
-        run(&self.root, args)?;
-        self.record_index()
+    /// Renaming a staged regular file prevents writes through hard-linked destinations.
+    pub(crate) fn replace_file(
+        &mut self,
+        path: &str,
+        source: &mut impl std::io::Read,
+        permissions: Option<std::fs::Permissions>,
+    ) -> Result<()> {
+        self.checkpoint()?;
+        self.create_parents(path)?;
+        let target = self.root.join(path);
+        let temporary = self.backup.join("replacement");
+        let result = (|| -> Result<()> {
+            let mut file = std::fs::File::create(&temporary)?;
+            if let Ok(meta) = std::fs::metadata(&target) {
+                anyhow::ensure!(!meta.permissions().readonly(), "{path} is read-only");
+                file.set_permissions(meta.permissions())?;
+            }
+            if let Some(permissions) = permissions {
+                file.set_permissions(permissions)?;
+            }
+            std::io::copy(source, &mut file)?;
+            file.sync_all()?;
+            drop(file);
+            let staged = capture(&self.backup, &["replacement".into()], None)?;
+            let expected = staged
+                .get(Path::new("replacement"))
+                .context("missing prepared replacement")?
+                .clone();
+            self.checkpoint()?;
+            std::fs::rename(&temporary, target)?;
+            self.expected.insert(path.into(), expected);
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(temporary);
+        result
     }
 
-    pub(crate) fn finish<T>(self, result: Result<T>) -> Result<T> {
+    /// Compute Git's intended contents separately so a partial failure cannot own an external edit.
+    pub(crate) fn git_change(
+        &mut self,
+        paths: &[String],
+        args: &[&str],
+        input: &[u8],
+    ) -> Result<()> {
+        self.checkpoint()?;
+        let staged = self.backup.join("worktree");
+        std::fs::create_dir_all(&staged)?;
+        let before = capture(&self.root, paths, Some(&staged))?;
+        for (path, entry) in &before {
+            let full = staged.join(path);
+            match entry {
+                DiskEntry::Directory(_) => std::fs::create_dir_all(&full)?,
+                DiskEntry::File { permissions, .. } => {
+                    std::fs::set_permissions(full, permissions.clone())?
+                }
+                DiskEntry::Link(target) => {
+                    std::fs::create_dir_all(full.parent().context("missing staged parent")?)?;
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(target, full)?;
+                    #[cfg(windows)]
+                    std::os::windows::fs::symlink_file(target, full)?;
+                }
+            }
+        }
+        let git_dir = self.root.join(".git");
+        let git_dir =
+            crate::layout::git_spelling(git_dir.to_str().context("Git directory must be UTF-8")?);
+        let staged_arg =
+            crate::layout::git_spelling(staged.to_str().context("staged directory must be UTF-8")?);
+        let mut staged_args = vec![
+            "--git-dir",
+            git_dir.as_str(),
+            "--work-tree",
+            staged_arg.as_str(),
+        ];
+        staged_args.extend_from_slice(args);
+        run_with_input(&staged, &staged_args, input)?;
+        let predicted = capture(&staged, paths, None)?;
+        self.checkpoint()?;
+        for path in paths {
+            self.create_parents(path)?;
+        }
+        let result = run_with_input(&self.root, args, input);
+        let actual = capture(&self.root, paths, None)?;
+        for path in before.keys().chain(predicted.keys()).chain(actual.keys()) {
+            anyhow::ensure!(
+                actual.get(path) == before.get(path) || actual.get(path) == predicted.get(path),
+                "files changed outside this operation; preserved them and the original backup"
+            );
+        }
+        self.expected
+            .retain(|path, _| !paths.iter().any(|scope| path.starts_with(scope)));
+        self.expected.extend(actual);
+        result.map(|_| ())
+    }
+
+    pub(crate) fn finish<T>(mut self, result: Result<T>) -> Result<T> {
         match result {
             Ok(value) => {
                 if let Err(error) = std::fs::remove_dir_all(&self.backup) {
@@ -442,7 +641,7 @@ impl Edit {
         }
     }
 
-    fn rollback(&self) -> Result<()> {
+    fn rollback(&mut self) -> Result<()> {
         let current = capture(&self.root, &self.paths, None)?;
         anyhow::ensure!(
             current == self.expected,
@@ -457,16 +656,14 @@ impl Edit {
             let mut args = vec!["--literal-pathspecs", "ls-files", "-z", "--"];
             args.extend(self.paths.iter().map(String::as_str));
             let indexed = run_bytes(&self.root, &args)?;
-            run_with_input(
-                &self.root,
-                &["update-index", "--force-remove", "-z", "--stdin"],
-                &indexed,
-            )?;
-            run_with_input(
-                &self.root,
-                &["update-index", "-z", "--index-info"],
-                &self.index,
-            )?;
+            let original = self.index.clone();
+            self.change_index(&[
+                (
+                    &["update-index", "--force-remove", "-z", "--stdin"],
+                    &indexed,
+                ),
+                (&["update-index", "-z", "--index-info"], &original),
+            ])?;
         }
         for (path, entry) in current.iter().rev() {
             if self.before.get(path) == Some(entry) {
@@ -507,6 +704,17 @@ impl Edit {
         for (path, entry) in self.before.iter().rev() {
             if let DiskEntry::Directory(permissions) = entry {
                 std::fs::set_permissions(self.root.join(path), permissions.clone())?;
+            }
+        }
+        for dir in self.created_dirs.iter().rev() {
+            match std::fs::remove_dir(dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_error)
+                    if dir
+                        .read_dir()
+                        .is_ok_and(|mut entries| entries.next().is_some()) => {}
+                Err(error) => return Err(error.into()),
             }
         }
         Ok(())

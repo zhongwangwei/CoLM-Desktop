@@ -26,6 +26,11 @@ export function plainError(text: string): string {
  * 且用户看不出该做什么。
  */
 export function knownBackendError(text: string): string {
+  if (text === '强迫场配置在校验期间已改变，请重新加载后保存')
+    return bilingual(
+      text,
+      'The forcing configuration changed during validation. Reload it before saving.',
+    );
   if (text.includes('official programs were not built from the current source'))
     return bilingual(
       '官方程序与当前源码不一致：源码改动后要重新暂存 sidecar（cargo run -p xtask -- stage-sidecar），再重启应用。',

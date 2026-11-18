@@ -95,6 +95,9 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
         Some(colm_namelist::Value::Bool(false))
     );
     let mut inputs = BTreeMap::new();
+    if let Some(crop) = colm_case::crop_intent(case_dir)? {
+        inputs.insert("desktop_crop".into(), crop.to_string());
+    }
     let mut files = BTreeMap::new();
     for p in doc.paths() {
         if ignored(stage, &p, greenwich) {
@@ -999,6 +1002,10 @@ pub(crate) fn full_inputs_with_progress(
         files: BTreeMap::new(),
         unresolved: Vec::new(),
     };
+    if let Some(crop) = colm_case::crop_intent(case)? {
+        out.data_settings
+            .insert("desktop_crop".into(), crop.to_string());
+    }
     let add = |out: &mut FullInputIdentity,
                role: String,
                path: &Path,
@@ -1241,6 +1248,7 @@ pub(crate) fn full_inputs_with_progress(
 /// Full content hashes establish identity; these guards detect transient changes during execution.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct FullInputGuard {
+    crop: Option<bool>,
     files: BTreeMap<PathBuf, String>,
     directories: BTreeMap<PathBuf, BTreeMap<PathBuf, String>>,
     forcing_prefixes: BTreeMap<PathBuf, BTreeMap<PathBuf, String>>,
@@ -1336,6 +1344,7 @@ pub(crate) fn full_input_guard(
         }
     }
     Ok(FullInputGuard {
+        crop: colm_case::crop_intent(case)?,
         files,
         directories,
         forcing_prefixes: BTreeMap::new(),
@@ -1521,6 +1530,9 @@ pub(crate) fn configuration_identity(case: &Path) -> Result<BTreeMap<String, Str
             full_file(&forcing, "configuration")?.sha256,
         ),
     ]);
+    if let Some(crop) = colm_case::crop_intent(&case)? {
+        files.insert("configuration:crop".into(), crop.to_string());
+    }
     colm_case::spinup_replay_enabled(&case)?;
     let spinup = case.join("spinup.nml");
     if spinup.try_exists()? {
@@ -2231,6 +2243,38 @@ mod full_identity_tests {
         std::fs::write(root.join("drivers-a.nc"), b"A").unwrap();
         std::fs::write(root.join("forcing.nml"), "&nl_colm_forcing\nDEF_dir_forcing='.'\nforcing%fprefix(1)='drivers-'\nforcing%timestep=1800\n/\n").unwrap();
         std::fs::write(root.join("case.nml"), format!("&nl_colm\nDEF_CASE_NAME='demo'\nDEF_forcing_namelist='forcing.nml'\nDEF_HIST_vars_namelist='{}'\nDEF_HIST_FREQ='HOUR'\n/\n", history.display())).unwrap();
+    }
+
+    #[test]
+    fn crop_metadata_changes_configuration_and_all_stage_identities() {
+        let root = std::env::temp_dir().join(format!("crop-fingerprint-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let history = root.join("history.nml");
+        std::fs::write(&history, "&nl_history\n/\n").unwrap();
+        small_case(&root, &history);
+        let nml = root.join("case.nml");
+        let original = configuration_identity(&root).unwrap();
+        let original_full = full_inputs(&root).unwrap();
+        let guard = full_input_guard(&root, &original_full).unwrap();
+        let stage = compute("mksrfdata", &nml, "test").unwrap();
+        let metadata = root.join(".colm-desktop.json");
+        std::fs::write(&metadata, r#"{"engine":"fortran"}"#).unwrap();
+        assert_eq!(configuration_identity(&root).unwrap(), original);
+        assert!(compute("mksrfdata", &nml, "test").unwrap() == stage);
+        std::fs::write(&metadata, r#"{"engine":"fortran","crop":true}"#).unwrap();
+        assert_ne!(configuration_identity(&root).unwrap(), original);
+        for phase in ["mksrfdata", "mkinidata", "colm"] {
+            assert_eq!(
+                compute(phase, &nml, "test").unwrap().inputs["desktop_crop"],
+                "true"
+            );
+        }
+        let selected = configuration_identity(&root).unwrap();
+        assert!(!same_payloads(&original_full, &full_inputs(&root).unwrap()));
+        assert_ne!(guard, full_input_guard(&root, &original_full).unwrap());
+        std::fs::write(&metadata, r#"{"remote_directory":"changed","crop":true}"#).unwrap();
+        assert_eq!(configuration_identity(&root).unwrap(), selected);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

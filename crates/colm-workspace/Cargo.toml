@@ -12,6 +12,7 @@ description = "Development workspaces for the AI assistant (docs/design-ai-assis
 anyhow.workspace = true
 colm-remote = { path = "../colm-remote" }
 colm-schema = { path = "../colm-schema" }
+colm-case = { path = "../colm-case" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 # 文件内容身份（sha256）：界面打开的文件带着它当基线，保存时在写入端比对，防止旧缓冲区覆盖外部

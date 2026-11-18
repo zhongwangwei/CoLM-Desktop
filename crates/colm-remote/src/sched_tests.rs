@@ -36,7 +36,17 @@ fn walltime_forms_are_understood() {
     assert_eq!(parse_walltime("01:30:00").unwrap(), 5400);
     assert_eq!(parse_walltime("1-02:30:00").unwrap(), 86_400 + 9000);
     assert_eq!(parse_walltime("48:00").unwrap(), 48 * 3600);
-    for bad in ["", "abc", "1:2:3:4", "0:00:00", "x-01:00:00"] {
+    for bad in [
+        "",
+        "abc",
+        "1:2:3:4",
+        "0:00:00",
+        "x-01:00:00",
+        "184467440737095516-00:00:00",
+        "18446744073709551615:00",
+        "00:18446744073709551615",
+        "00:01:18446744073709551615",
+    ] {
         assert!(parse_walltime(bad).is_err(), "{bad}");
     }
 }

@@ -1579,6 +1579,11 @@ fn carry_case_identity(
     profile.classification = source.classification;
     profile.classification_source = source.classification_source;
     profile.crop |= source.crop;
+    if source.crop || source.remote_directory.is_some() {
+        profile.crop_problem = None;
+    } else if profile.crop_problem.is_none() {
+        profile.crop_problem = source.crop_problem.clone();
+    }
     if matches!(profile.subgrid, "IGBP" | "USGS") {
         profile.subgrid = source.classification;
     }

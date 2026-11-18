@@ -104,6 +104,7 @@ pub struct RecordInterval {
 /// （例如 step=3600、从 :30 开始的 TIMESTEP，标签与 HOURLY 相同）。因此
 /// 声明值是 TIMESTEP 时信任声明；没有声明值时不命中任何周期频率才判 TIMESTEP，
 /// 并要求步长能从 hint 或标签间隔推出来。
+/// 单条记录可能是任何周期的末段，必须提供频率声明。
 pub fn classify_frequency(
     labels_minutes: &[i64],
     declared: Option<HistoryFrequency>,
@@ -124,6 +125,9 @@ pub fn classify_frequency(
     // `DEF_HIST_FREQ = 'none'` 表示“不写 history”，它解释不了这份已有标签的
     // history；按未声明处理，免得调用方为一条无意义的 mismatch 打警告。
     let declared = declared.filter(|frequency| *frequency != HistoryFrequency::None);
+    if labels_minutes.len() == 1 && declared.is_none() {
+        bail!("one history record cannot determine its output frequency; specify the run's DEF_HIST_FREQ or --history-freq");
+    }
     let candidates = [
         HistoryFrequency::Hourly,
         HistoryFrequency::Daily,
@@ -200,9 +204,6 @@ pub fn classify_frequency(
 /// 最后一条可能是末段记录（`natural_boundary = false`），不要求它在边界上；
 /// 其余每条都必须落在边界上，否则这份 history 不是这个频率的输出。
 fn labels_match(frequency: HistoryFrequency, labels_minutes: &[i64]) -> bool {
-    if labels_minutes.len() < 2 {
-        return period_ends(label_end_tick(labels_minutes[0], frequency), frequency);
-    }
     labels_minutes[..labels_minutes.len() - 1]
         .iter()
         .all(|label| period_ends(label_end_tick(*label, frequency), frequency))
@@ -273,7 +274,7 @@ fn median_month_span(ticks: &[i64]) -> Option<i64> {
     Some(spans[spans.len() / 2])
 }
 
-/// TIMESTEP 输出步长：优先 `case.nml` 的 `DEF_simulation_time%timestep`，否则从
+/// TIMESTEP 输出步长：校验 `case.nml` 的 `DEF_simulation_time%timestep`，否则从
 /// 标签间隔推。末条可能是运行结束写出的不满整周期记录，不能参与 gcd —— 否则
 /// 1800 s 的步长会被一条 1200 s 的末段拉成 600。
 fn resolve_timestep_seconds(labels_minutes: &[i64], hint: Option<i64>) -> Result<i64> {
@@ -308,8 +309,18 @@ fn resolve_timestep_seconds(labels_minutes: &[i64], hint: Option<i64>) -> Result
     if !(60..=3600).contains(&step) {
         bail!("TIMESTEP output step {step} s is outside the supported 60..=3600 s range");
     }
+    if step % 60 != 0 {
+        bail!("TIMESTEP output step {step} s is not a whole number of minutes; minute-resolution history labels cannot recover its exact intervals");
+    }
     if 3600 % step != 0 {
         bail!("TIMESTEP output step {step} s does not divide an hour; interval aggregation cannot align observation samples");
+    }
+    // Missing records may span multiple steps; only the final interval may be shorter.
+    for pair in labels_minutes[..labels_minutes.len().saturating_sub(1)].windows(2) {
+        let gap = pair[1].checked_sub(pair[0]);
+        if !gap.is_some_and(|gap| gap > 0 && gap % (step / 60) == 0) {
+            bail!("TIMESTEP output step {step} s conflicts with nonterminal history labels {} and {} minutes; check the configuration used for this run", pair[0], pair[1]);
+        }
     }
     Ok(step)
 }

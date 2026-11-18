@@ -182,6 +182,7 @@ export default function CasesPage() {
       bgc?: boolean;
       urban?: boolean;
       crop?: boolean;
+      crop_problem?: string | null;
     };
   } | null>(null);
   const effectiveProfile =
@@ -386,6 +387,7 @@ export default function CasesPage() {
           bgc?: boolean;
           urban?: boolean;
           crop?: boolean;
+          crop_problem?: string | null;
         };
       }>('model_case_context', { dir, modelRevision: versionRef }).catch(async (contextError) => {
         // A failed materialization is not a usable model context. Offer only a
@@ -1290,6 +1292,15 @@ export default function CasesPage() {
             onChange={setStep}
           />
           {error && <Notice tone="error">{error}</Notice>}
+          {effectiveProfile?.crop_problem && (
+            <Notice tone="warning">
+              {t(
+                '作物状态尚未确认，请检查站点文件。',
+                'Crop status could not be confirmed. Check the site file.',
+              )}{' '}
+              {effectiveProfile.crop_problem}
+            </Notice>
+          )}
           {forcingRepair && (
             <Card title={t('修复强迫场配置引用', 'Repair forcing configuration reference')}>
               <Notice tone="warning">{forcingRepair.error}</Notice>

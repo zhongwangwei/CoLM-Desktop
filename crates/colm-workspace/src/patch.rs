@@ -212,8 +212,7 @@ pub fn apply(workspace: &Workspace, diff: &str, message: &str) -> Result<Applied
     let result = (|| {
         let native_links = crate::source_links::valid_native_links(&src)?;
         edit.checkpoint()?;
-        git::run_with_input(&src, &["apply", "--whitespace=nowarn", "-"], &bytes)?;
-        edit.record(&files)?;
+        edit.git_change(&files, &["apply", "--whitespace=nowarn", "-"], &bytes)?;
         crate::source_links::check_native_links(&src, &native_links)?;
         files.extend(crate::source_links::synchronize(&src, &mut edit)?);
         edit.checkpoint()?;
@@ -381,21 +380,20 @@ pub fn revert_file(workspace: &Workspace, path: &str, message: &str) -> Result<A
     let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
     let result = (|| {
         edit.checkpoint()?;
-        git::run(
-            &src,
+        edit.git_change(
+            &[path.to_owned()],
             &[
                 "--literal-pathspecs",
                 "restore",
                 "--source",
                 workspace.official_base(),
-                "--staged",
                 "--worktree",
                 "--",
                 path,
             ],
+            &[],
         )?;
-        edit.record(&[path.to_owned()])?;
-        edit.record_index()?;
+        edit.stage(&["--literal-pathspecs", "add", "-A", "--", path])?;
         let mut files = vec![path.to_owned()];
         let aliases = crate::source_links::synchronize(&src, &mut edit)?;
         if !aliases.is_empty() {

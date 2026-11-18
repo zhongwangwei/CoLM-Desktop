@@ -61,7 +61,16 @@ export async function runRemoteBatch(options: {
   }
   function publish(dir: string, result: Remote) {
     const permissions = remoteRunPermissions(result);
-    options.change(dir, permissions.terminal ? remoteEndStatus(result) : 'submitted', result);
+    const state = (result.status as Remote | undefined)?.state;
+    options.change(
+      dir,
+      permissions.terminal
+        ? remoteEndStatus(result)
+        : ['unknown', 'lost'].includes(String(state))
+          ? 'unknown'
+          : 'submitted',
+      result,
+    );
     if (permissions.terminal) active.delete(dir);
     else if (!permissions.cancel)
       throw new Error(

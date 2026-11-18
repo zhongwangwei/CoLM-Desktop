@@ -1,6 +1,6 @@
 //! 保留原文的 namelist 文档模型。
 //!
-//! 文档是一个**按行的项列表**。每个项都记着它的原始文本，序列化时
+//! 文档按原文顺序保存组边界、赋值与注释，同一行可以包含多个项。序列化时
 //! 未被修改的项原样吐回，被修改的项只替换值那一段 —— 缩进、等号位置、
 //! 行尾注释都从原始文本里切出来复用。
 //!
@@ -20,14 +20,14 @@ use anyhow::{bail, Result};
 
 use crate::value::{Path, Value};
 
-/// 文档里的一行。
+/// 文档里的原文片段。
 #[derive(Debug, Clone)]
 pub enum Item {
     /// 空行或整行注释，原样保存
     Verbatim(String),
     /// `&group_name`
     GroupStart(String),
-    /// 单独成行的 `/` 或 `&end`
+    /// 结束组的 `/` 或 `&end`
     GroupEnd(String),
     /// 一个赋值
     Entry(Entry),
@@ -161,7 +161,21 @@ impl Document {
                     inside = group_matches(s, group);
                     newline = if s.ends_with("\r\n") { "\r\n" } else { "\n" };
                 }
-                Item::GroupEnd(_) if inside => {
+                Item::GroupEnd(end) if inside => {
+                    if end.ends_with("\r\n") {
+                        newline = "\r\n";
+                    }
+                    let preceding = match &self.items[i - 1] {
+                        Item::Entry(entry) => &entry.suffix,
+                        Item::GroupStart(text) | Item::GroupEnd(text) | Item::Verbatim(text) => {
+                            text
+                        }
+                    };
+                    let separator = if preceding.ends_with('\n') {
+                        ""
+                    } else {
+                        newline
+                    };
                     // 缩进跟着仓库风格（3 空格），与 `render` 写出来的一致。
                     self.items.insert(
                         i,
@@ -169,7 +183,7 @@ impl Document {
                             path: want,
                             text: value.to_string(),
                             value,
-                            prefix: format!("   {path} = "),
+                            prefix: format!("{separator}   {path} = "),
                             suffix: newline.into(),
                         }),
                     );

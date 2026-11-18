@@ -125,7 +125,8 @@ export function setupChoices(
   const methaneKnown =
     methaneModes.length > 0 &&
     methaneModes.every((m) => m !== null && [...riverModes, ...nonRiverModes].includes(m));
-  const compiledCrop = environment.kernel?.macros.includes('CROP') === true;
+  const compiledCrop =
+    !environment.autoClose && environment.kernel?.macros.includes('CROP') === true;
   const requiredCrop = compiledCrop || (isSite(environment) && environment.siteCrop === true);
   const crop =
     requiredCrop ||
@@ -409,7 +410,7 @@ export function setupChoices(
       choices: c.choices.map(([value, zh, en]) => ({ value, zh, en, reason: reason(c.id, value) })),
     }));
 }
-/** Rust 空间 CROP 的运行时标记：不能靠播种日（上游拒绝空间覆盖），单独写 DEF_USE_CROP。 */
+/** 空间 CROP 的明确选择；Fortran 保存时将标记写入算例元数据。 */
 export function cropRuntimeCasePatch(
   request: SetupRequest,
   environment: SetupEnvironment,
@@ -417,10 +418,10 @@ export function cropRuntimeCasePatch(
   if (request.id !== 'crop') return {};
   if (request.value === '.false.')
     return {
-      ...(environment.engine === 'rust' ? { DEF_USE_CROP: '.false.' } : {}),
+      DEF_USE_CROP: '.false.',
       DEF_USE_IRRIGATION: '.false.',
     };
-  if (isSite(environment) || environment.engine !== 'rust') return {};
+  if (isSite(environment)) return {};
   return { DEF_USE_CROP: '.true.' };
 }
 

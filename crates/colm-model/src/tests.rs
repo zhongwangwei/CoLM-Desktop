@@ -2659,3 +2659,36 @@ fn pending_ownership_recovers_before_delegation_and_survives_later_legacy_writes
     fs::write(&path, serde_json::to_vec(&next).unwrap()).unwrap();
     assert_eq!(reg.draft(&old.id).unwrap().code_editable, Some(true));
 }
+
+#[test]
+fn materialized_run_preserves_only_explicit_crop_metadata() {
+    for crop in [None, Some(false), Some(true)] {
+        let tmp = Temp::new();
+        let reg = tmp.registry();
+        let case = tmp.case();
+        let mut metadata =
+            serde_json::json!({"engine":"fortran", "remote_directory":"/server/original"});
+        if let Some(crop) = crop {
+            metadata["crop"] = crop.into();
+        }
+        let original = metadata.to_string();
+        fs::write(case.join(".colm-desktop.json"), &original).unwrap();
+        let binding = reg.migrate_case(&case, code()).unwrap();
+        let run = reg
+            .materialize_run(&binding.version, &case, &tmp.0.join("run"), "run")
+            .unwrap();
+        let frozen = run.run_case.join(".colm-desktop.json");
+        match crop {
+            Some(value) => {
+                let actual: serde_json::Value =
+                    serde_json::from_slice(&fs::read(frozen).unwrap()).unwrap();
+                assert_eq!(actual, serde_json::json!({"crop":value}));
+            }
+            None => assert!(!frozen.exists()),
+        }
+        assert_eq!(
+            fs::read_to_string(case.join(".colm-desktop.json")).unwrap(),
+            original
+        );
+    }
+}

@@ -6206,11 +6206,16 @@ fn supervisor_identity() -> ProcessIdentity {
     let executable = std::env::current_exe()
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let argv = std::env::args().collect::<Vec<_>>().join("\0");
+    let args = std::env::args_os().collect::<Vec<_>>();
+    let argv = args
+        .iter()
+        .map(|arg| arg.as_encoded_bytes())
+        .collect::<Vec<_>>()
+        .join(&0);
     ProcessIdentity {
         pid: std::process::id(),
         executable,
-        argv_sha256: sha256(argv.as_bytes()),
+        argv_sha256: sha256(&argv),
         started_unix: now,
         heartbeat_unix: now,
         process_birth: BIRTH

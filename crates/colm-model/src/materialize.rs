@@ -1022,6 +1022,20 @@ fn copy_case(
     destination: &Path,
     inputs: &mut BTreeMap<String, String>,
 ) -> Result<()> {
+    let metadata = source.join(".colm-desktop.json");
+    match fs::read(&metadata) {
+        Ok(bytes) => {
+            let record: serde_json::Value = serde_json::from_slice(&bytes)
+                .with_context(|| format!("invalid case metadata {}", metadata.display()))?;
+            if let Some(crop) = record.get("crop").and_then(serde_json::Value::as_bool) {
+                inputs.insert(".colm-desktop.json".into(), digest(&bytes));
+                let bytes = serde_json::to_vec(&serde_json::json!({"crop": crop}))?;
+                fs::write(destination.join(".colm-desktop.json"), bytes)?;
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     // Scientific datasets remain shared read-only, as in study member materialization.
     for entry in fs::read_dir(source)? {
         let entry = entry?;

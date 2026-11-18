@@ -1074,3 +1074,228 @@ fn partial_owned_io_failure_restores_original_bytes() {
     assert!(!git::is_dirty(&ws.src()).unwrap());
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn failed_nested_create_removes_only_its_empty_parents() {
+    let (root, ws) = fresh("failed-create-parents");
+    git::run(&ws.src(), &["config", "user.name", ""]).unwrap();
+    assert!(create_text(&ws, "new/nested/module.F90", "module x\n", "create").is_err());
+    assert!(!ws.src().join("new").exists());
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn local_ignore_rules_are_preserved_when_they_cannot_be_decoded() {
+    let (root, ws) = fresh("ignore-invalid-utf8");
+    let path = ws.src().join(".git/info/exclude");
+    let original = b"notes\n\xff\n";
+    std::fs::write(&path, original).unwrap();
+    assert!(snapshot_external(&ws).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn snapshots_refuse_non_utf8_paths_without_dropping_them() {
+    use std::os::unix::ffi::OsStringExt;
+    let (root, ws) = fresh("snapshot-nonutf8");
+    let path = ws
+        .src()
+        .join(std::ffi::OsString::from_vec(b"file-\xff".to_vec()));
+    std::fs::write(&path, "keep me").unwrap();
+    let error = snapshot_external(&ws).unwrap_err();
+    assert!(format!("{error:#}").contains("non-UTF-8"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "keep me");
+    assert!(git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn replacing_a_hardlinked_file_keeps_other_paths_unchanged() {
+    let (root, ws) = fresh("hardlink-edit");
+    let original = std::fs::read(ws.src().join(MODULE)).unwrap();
+    let alias = ws.src().join("alias.F90");
+    std::fs::hard_link(ws.src().join(MODULE), &alias).unwrap();
+    git::run(&ws.src(), &["add", "alias.F90"]).unwrap();
+    git::run(&ws.src(), &["commit", "-qm", "hardlink fixture"]).unwrap();
+    write_text(&ws, MODULE, "updated\n", "edit", None).unwrap();
+    assert_eq!(std::fs::read(&alias).unwrap(), original);
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    git::run(&ws.src(), &["config", "user.name", ""]).unwrap();
+    assert!(write_text(&ws, MODULE, "failed edit\n", "edit", None).is_err());
+    assert_eq!(std::fs::read(&alias).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join(MODULE)).unwrap(),
+        "updated\n"
+    );
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn killed_workspace_writer_does_not_leave_the_lock_held() {
+    const CHILD_ROOT: &str = "COLM_KILLED_WORKSPACE_WRITER";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let ws = Workspace::open(&root.join("ws"), "demo").unwrap();
+        let _guard = git::WriteLock::acquire(&ws).unwrap();
+        std::fs::write(root.join("ready"), "ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+    let (root, ws) = fresh("killed-writer");
+    let legacy = ws.dir.join("source-write.lock");
+    let alive = std::process::id().to_string();
+    std::fs::write(&legacy, &alive).unwrap();
+    assert!(git::WriteLock::acquire(&ws).is_err());
+    assert_eq!(std::fs::read_to_string(&legacy).unwrap(), alive);
+    std::fs::remove_file(&legacy).unwrap();
+    let recovery = ws.dir.join(".edit-backup-recovery");
+    std::fs::create_dir(&recovery).unwrap();
+    std::fs::write(recovery.join("original"), "keep for recovery").unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "files::files_tests::killed_workspace_writer_does_not_leave_the_lock_held",
+        ])
+        .env(CHILD_ROOT, &root)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let began = std::time::Instant::now();
+    while !root.join("ready").exists() && began.elapsed().as_secs() < 5 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let ready = root.join("ready").exists();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(ready);
+    // The PID-file marker is a legacy version's format; a killed owner is recoverable.
+    std::fs::write(ws.dir.join("source-write.lock"), child.id().to_string()).unwrap();
+    create_text(&ws, "recovered.txt", "ok\n", "after crash").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(recovery.join("original")).unwrap(),
+        "keep for recovery"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join("recovered.txt")).unwrap(),
+        "ok\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn private_index_handles_split_index_and_rollback() {
+    let (root, ws) = fresh("private-split-index");
+    git::run(&ws.src(), &["update-index", "--split-index"]).unwrap();
+    let changed = read(&ws, MODULE)
+        .unwrap()
+        .text
+        .unwrap()
+        .replace("2.0", "3.0");
+    write_text(&ws, MODULE, &changed, "split edit", None).unwrap();
+    git::run(&ws.src(), &["config", "user.name", ""]).unwrap();
+    assert!(write_text(&ws, MODULE, "failed\n", "split failure", None).is_err());
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join(MODULE)).unwrap(),
+        changed
+    );
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn private_index_keeps_a_sparse_worktree_sparse() {
+    let (root, ws) = fresh("private-sparse-index");
+    git::run(
+        &ws.src(),
+        &["sparse-checkout", "init", "--cone", "--sparse-index"],
+    )
+    .unwrap();
+    git::run(&ws.src(), &["sparse-checkout", "set", "vendor"]).unwrap();
+    assert!(!ws.src().join("crates").exists());
+    let changed = read(&ws, MODULE)
+        .unwrap()
+        .text
+        .unwrap()
+        .replace("2.0", "3.0");
+    write_text(&ws, MODULE, &changed, "sparse edit", None).unwrap();
+    assert!(!ws.src().join("crates").exists());
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn relative_workspace_roots_support_edit_patch_restore_and_rollback() {
+    const CHILD: &str = "COLM_RELATIVE_WORKSPACE_TEST";
+    if std::env::var_os(CHILD).is_some() {
+        let ws = Workspace::open(Path::new("ws"), "demo").unwrap();
+        assert!(ws.dir.is_relative());
+        let original = read(&ws, MODULE).unwrap().text.unwrap();
+        let changed = original.replace("2.0", "3.0");
+        write_text(&ws, MODULE, &changed, "relative edit", None).unwrap();
+        let diff = "diff --git a/nested/new.txt b/nested/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/nested/new.txt\n@@ -0,0 +1 @@\n+new\n";
+        crate::patch::apply(&ws, diff, "relative patch").unwrap();
+        crate::patch::revert_file(&ws, "nested/new.txt", "relative restore").unwrap();
+        assert!(!ws.src().join("nested/new.txt").exists());
+        git::run(&ws.src(), &["config", "user.name", ""]).unwrap();
+        assert!(write_text(&ws, MODULE, "failed\n", "relative failure", None).is_err());
+        assert_eq!(
+            std::fs::read_to_string(ws.src().join(MODULE)).unwrap(),
+            changed
+        );
+        assert!(!git::is_dirty(&ws.src()).unwrap());
+        return;
+    }
+    let (root, _ws) = fresh("relative-edit-root");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "files::files_tests::relative_workspace_roots_support_edit_patch_restore_and_rollback",
+        ])
+        .env(CHILD, "1")
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_imports_keeps_source_permissions_and_text_edits_keep_them() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, ws) = fresh("import-executable");
+    let source = root.join("tool.sh");
+    std::fs::write(&source, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for destination in ["tool.sh", MODULE] {
+        put_file(&ws, destination, &source, "import executable", false).unwrap();
+        assert_eq!(
+            std::fs::metadata(ws.src().join(destination))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+    }
+    write_text(&ws, "tool.sh", "#!/bin/sh\nexit 1\n", "edit script", None).unwrap();
+    assert_eq!(
+        std::fs::metadata(ws.src().join("tool.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}

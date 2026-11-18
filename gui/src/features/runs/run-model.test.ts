@@ -506,6 +506,8 @@ test('kernel preflight rejects known macro conflicts without restricting valid R
   assert.match(kernelRunProblem([], 'rust', 'fortran', 1, true) ?? '', /CROP/);
   assert.equal(kernelRunProblem(['CROP'], 'rust', 'fortran', 1, true), undefined);
   assert.equal(kernelRunProblem([], 'rust', 'fortran', 1, false), undefined);
+  assert.match(kernelRunProblem([], 'fortran', 'rust', 1, true) ?? '', /CROP/);
+  assert.equal(kernelRunProblem(['CROP'], 'fortran', 'rust', 1, true), undefined);
 });
 
 test('an orphaned pack queue must be cancelled before another submission', () => {
@@ -519,4 +521,18 @@ test('an orphaned pack queue must be cancelled before another submission', () =>
   assert.equal(remoteSubmissionBlocked(cancelled), false);
   assert.equal(remoteRunPermissions(cancelled).fetch, false);
   assert.equal(remoteSubmissionBlocked({ ...cancelled, ended: null }), true);
+});
+
+test('a claimed station remains owned and cancellable after its carrier ends', () => {
+  for (const state of ['unknown', 'lost']) {
+    const unresolved = {
+      record: { host: 'server', job: 'station', scheduler: 'bare-pack' },
+      status: { state, detail: 'node pack job ended; station outcome unconfirmed' },
+      ended: null,
+    };
+    assert.equal(remoteSubmissionBlocked(unresolved), true);
+    assert.equal(remoteRunPermissions(unresolved).cancel, true);
+    assert.equal(remoteRunPermissions(unresolved).fetch, false);
+    assert.equal(remoteRunPermissions(unresolved).terminal, false);
+  }
 });

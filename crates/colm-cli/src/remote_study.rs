@@ -3077,7 +3077,7 @@ pub(crate) fn cmd_cancel(opts: &Opts) -> Result<()> {
     let record = read_record(&study_dir)?;
     let identity = cancel_identity_script(&record)?;
     let ssh = Ssh::new(&record.host)?;
-    let result = cancel_job(&ssh, &record.root, &record.job, &identity)?;
+    let result = cancel_job(&ssh, &record.root, &record.job, &identity, false)?;
     crate::history_cmd::observe_remote_outcome(&result);
     crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &result)?;
     println!("{result}");
@@ -3162,7 +3162,13 @@ fn closable(status: &job::Status) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn cancel_job(ssh: &Ssh, root: &str, id: &str, identity: &str) -> Result<Value> {
+pub(super) fn cancel_job(
+    ssh: &Ssh,
+    root: &str,
+    id: &str,
+    identity: &str,
+    packed: bool,
+) -> Result<Value> {
     let mut lease = colm_remote::engine_inventory::LifecycleLock::acquire(ssh, root)?;
     let before = lease.run(|| {
         ssh.run_ok(identity)?;
@@ -3172,9 +3178,13 @@ pub(super) fn cancel_job(ssh: &Ssh, root: &str, id: &str, identity: &str) -> Res
         lease.finish()?;
         return Ok(cancellation_result(id, false, Some(&before), None, None));
     }
-    if !matches!(before.state, job::State::Queued | job::State::Running) {
+    // A claimed packed station can outlive its carrier; its cancel marker only requests a stop.
+    let awaiting_station = packed
+        && matches!(before.state, job::State::Unknown | job::State::Lost)
+        && job::ended(&before).is_none();
+    if !matches!(before.state, job::State::Queued | job::State::Running) && !awaiting_station {
         lease.finish()?;
-        bail!("remote Study job identity is not live; inspect its status before cancelling");
+        bail!("remote job identity is not live; inspect its status before cancelling");
     }
     let requested = lease.run(|| {
         ssh.run_ok(&format!(
@@ -3790,6 +3800,11 @@ mod model_revision_tests {
         assert_eq!(accepted["request_accepted"], true);
         assert_eq!(accepted["terminal"], false);
         assert_eq!(accepted["outcome"], "cancel_requested");
+        let unconfirmed = job::parse_status("state=unknown\n---log---\n");
+        let packed = cancellation_result("station-one", true, Some(&unconfirmed), None, None);
+        assert_eq!(packed["request_accepted"], true);
+        assert_eq!(packed["terminal"], false);
+        assert_eq!(packed["outcome"], "cancel_requested");
         let uncertain = cancellation_result(
             "study-one",
             false,

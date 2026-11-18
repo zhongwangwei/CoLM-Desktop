@@ -95,6 +95,7 @@ export type CaseProfile = {
   bgc: boolean;
   crop: boolean;
   material?: boolean;
+  crop_problem?: string | null;
   kernel_preset: string | null;
   engine?: string;
   run_host?: string | null;

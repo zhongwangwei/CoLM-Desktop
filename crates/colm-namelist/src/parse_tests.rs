@@ -256,3 +256,67 @@ fn repairing_real_kind_suffixes_preserves_null_slots_and_separators() {
     assert_eq!(repaired, "&g\n a = 1.0,, 3.D0, 'site_r8' ! keep\n/\n");
     assert_eq!(parse(&repaired).unwrap().to_string(), repaired);
 }
+
+#[test]
+fn inline_groups_read_edit_and_round_trip_without_losing_fields() {
+    for source in [
+        "&nl_colm DEF_TUNING_CROP_PLANTING_DAY = 120\n/\n",
+        "&nl_colm\n DEF_TUNING_CROP_PLANTING_DAY = 120 / ! end\n",
+        "  &nl_colm DEF_TUNING_CROP_PLANTING_DAY = 120 / ! end\r\n",
+        "&nl_colm DEF_TUNING_CROP_PLANTING_DAY = 120/",
+    ] {
+        let mut parsed = doc(source);
+        assert_eq!(parsed.to_string(), source);
+        assert_eq!(
+            parsed.get("DEF_TUNING_CROP_PLANTING_DAY"),
+            Some(&Value::Int(120))
+        );
+        parsed
+            .set("DEF_TUNING_CROP_PLANTING_DAY", Value::Int(150))
+            .unwrap();
+        assert_eq!(parsed.to_string(), source.replace("120", "150"));
+        parsed
+            .insert("DEF_USE_CROP", Value::Bool(true), "nl_colm")
+            .unwrap();
+        let mut edited = doc(&parsed.to_string());
+        assert_eq!(
+            edited.get("DEF_TUNING_CROP_PLANTING_DAY"),
+            Some(&Value::Int(150))
+        );
+        assert_eq!(edited.get("DEF_USE_CROP"), Some(&Value::Bool(true)));
+        edited.remove("DEF_TUNING_CROP_PLANTING_DAY").unwrap();
+        assert_eq!(
+            doc(&edited.to_string()).get("DEF_USE_CROP"),
+            Some(&Value::Bool(true))
+        );
+    }
+}
+
+#[test]
+fn inline_empty_groups_allow_insertion_and_quoted_slashes_are_values() {
+    for source in ["&nl_colm /", "&nl_colm/\n", "&nl_colm / ! empty\r\n"] {
+        let mut parsed = doc(source);
+        assert_eq!(parsed.to_string(), source);
+        parsed
+            .insert("path", Value::Str("/tmp/O'Brien!data.nc".into()), "nl_colm")
+            .unwrap();
+        let edited = doc(&parsed.to_string());
+        assert_eq!(
+            edited.get("path"),
+            Some(&Value::Str("/tmp/O'Brien!data.nc".into()))
+        );
+    }
+    let source = "&nl_colm path = 'O''Brien/!data.nc' / ! keep / comment\n";
+    let parsed = doc(source);
+    assert_eq!(parsed.to_string(), source);
+    assert_eq!(
+        parsed.get("path"),
+        Some(&Value::Str("O'Brien/!data.nc".into()))
+    );
+    for source in ["& /\n", "&g a=1 / b=2\n", "&g a=1, b=2 /\n"] {
+        assert!(
+            parse(source).is_err(),
+            "unsupported syntax must not silently lose fields: {source}"
+        );
+    }
+}

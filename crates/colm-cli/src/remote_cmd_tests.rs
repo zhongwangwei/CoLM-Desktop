@@ -1561,6 +1561,11 @@ fn server_inputs_ignore_local_existence_and_user_maps() {
     )
     .unwrap();
     std::fs::write(case.join("runs/old/huge.nc"), b"do not stage old results").unwrap();
+    std::fs::write(
+        case.join(".colm-desktop.json"),
+        r#"{"crop":true,"remote_directory":"/server/base","engine":"fortran"}"#,
+    )
+    .unwrap();
     let staging = root.join("stage");
     let maps = vec![Mapping {
         local: root.to_string_lossy().into_owned(),
@@ -1594,6 +1599,10 @@ fn server_inputs_ignore_local_existence_and_user_maps() {
         .remote_inputs
         .contains(&external.to_string_lossy().into_owned()));
     assert!(!staging.join("runs").exists());
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(staging.join(".colm-desktop.json")).unwrap())
+            .unwrap();
+    assert_eq!(metadata, serde_json::json!({"crop":true}));
     std::fs::remove_dir_all(root).unwrap();
 }
 

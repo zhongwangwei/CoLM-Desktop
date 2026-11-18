@@ -236,7 +236,14 @@ const EDITOR_LEFTOVERS: [&str; 9] = [
 
 fn exclude_editor_leftovers(src: &Path) -> Result<()> {
     let path = src.join(".git/info/exclude");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(error)
+                .context("cannot read local Git ignore rules; original file preserved")
+        }
+    };
     let missing = EDITOR_LEFTOVERS
         .iter()
         .filter(|pattern| !existing.lines().any(|line| line.trim() == **pattern))
@@ -450,10 +457,8 @@ pub fn write_text(
     let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
     let result = (|| {
         check_expected(&file, path, expected_hash)?;
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        edit.change(&[path.to_owned()], || Ok(std::fs::write(&file, text)?))?;
+        edit.create_parents(path)?;
+        edit.replace_file(path, &mut text.as_bytes(), None)?;
         let applied = commit(workspace, path, &message, &mut edit)?;
         Ok(Written {
             applied,
@@ -481,9 +486,7 @@ pub fn create_text(
     clean(workspace)?;
     let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
     let result = (|| {
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        edit.create_parents(path)?;
         let mut handle = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -559,9 +562,7 @@ pub fn put_file(
     clean(workspace)?;
     let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
     let result = (|| {
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        edit.create_parents(path)?;
         if create_only {
             let mut source = std::fs::File::open(from)
                 .with_context(|| format!("cannot read {}", from.display()))?;
@@ -586,9 +587,11 @@ pub fn put_file(
             drop(source_guard);
             return commit(workspace, path, &message, &mut edit);
         }
-        edit.change(&[path.to_owned()], || {
-            std::fs::copy(from, &file).with_context(|| format!("cannot copy {}", from.display()))
-        })?;
+        edit.replace_file(
+            path,
+            &mut std::fs::File::open(from)?,
+            Some(meta.permissions()),
+        )?;
         #[cfg(windows)]
         drop(source_guard);
         commit(workspace, path, &message, &mut edit)
@@ -662,6 +665,7 @@ pub fn put_dir(workspace: &Workspace, path: &str, from: &Path, message: &str) ->
     let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
     let result = (|| {
         let directories = crate::source_links::check_removal(&workspace.src(), path, Some(from))?;
+        edit.create_parents(path)?;
         edit.change(&[path.to_owned()], || {
             if dir.exists() {
                 std::fs::remove_dir_all(&dir)?;

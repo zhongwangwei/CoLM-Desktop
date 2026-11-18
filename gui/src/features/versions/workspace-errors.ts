@@ -64,6 +64,24 @@ export function workspaceErrorText(error: string): [string, string] {
       ],
     ],
   ];
+  if (text.includes('rollback incomplete:')) {
+    const backup = /originals retained at ([^\n]+)/.exec(text)?.[1];
+    return [
+      `写入失败，检测到额外修改或恢复失败，已保留当前文件${backup ? `及原件备份 ${backup}` : ''}。请核对文件后重试。`,
+      text,
+    ];
+  }
+  if (text.includes('workspace is busy') || text.includes('legacy write lock'))
+    return ['工作区仍有旧版写入操作，或其状态无法确认。请结束该操作并核对锁文件后重试。', text];
+  if (text.includes('non-UTF-8'))
+    return ['Git 返回了无法识别的文本或文件名。请将文件名改为 UTF-8 后重试。', text];
+  if (text.includes('cannot read local Git ignore rules'))
+    return ['无法读取工作区的 Git 忽略规则，已保留原文件。请修复该文件的编码或读取权限。', text];
+  if (
+    text.includes('changed outside this operation') ||
+    text.includes('changed again during the operation')
+  )
+    return ['工作区文件或暂存区在操作期间发生了额外修改。请核对这些修改后重试。', text];
   if (text.startsWith('workspace_in_use:'))
     return [
       '这个工作区仍被草稿引用，请先删除或迁移草稿，再删除工作区。',

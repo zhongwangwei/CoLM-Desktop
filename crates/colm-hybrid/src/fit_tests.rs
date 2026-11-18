@@ -44,6 +44,13 @@ fn inverse_outputs_undo_the_transforms() {
     let sigmoid = output(Transform::Sigmoid, Some([10.0, 80.0]));
     assert!(inverse_output(&sigmoid, 80.0).unwrap().is_finite());
     assert!(inverse_output(&sigmoid, 5.0).unwrap().is_finite());
+
+    let softplus = output(Transform::Softplus, Some([10.0, 1000.0]));
+    for value in [720.0, 810.0] {
+        let raw = inverse_output(&softplus, value).unwrap();
+        assert_eq!(apply_output(&softplus, raw).unwrap(), value);
+    }
+    assert!(apply_output(&softplus, 1000.0).is_err());
 }
 
 #[test]

@@ -318,6 +318,16 @@ pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
             }
         }
     }
+    if let Some(first) = cases.first() {
+        if let Some(crop) =
+            colm_case::crop_intent(Path::new(&first.dir)).map_err(|e| e.to_string())?
+        {
+            case_values.insert(
+                "DEF_USE_CROP".into(),
+                if crop { ".true." } else { ".false." }.into(),
+            );
+        }
+    }
     let mut drafts = Vec::new();
     let mut sites = Vec::new();
     for case in cases.iter().filter(|case| !case.spatial) {
@@ -329,7 +339,7 @@ pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
         let Some(site) = record.site.clone() else {
             continue;
         };
-        let Ok(profile) = case_profile(&text, false, None, record.mode.as_deref()) else {
+        let Ok(profile) = case_profile_of(dir, false) else {
             continue;
         };
         let Ok(doc) = colm_namelist::parse(&text) else {
@@ -368,7 +378,7 @@ pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
             lat: crate::config::real(&doc, "SITE_lat_location"),
             start: profile.inputs.start.clone(),
             end: profile.inputs.end.clone(),
-            problem: None,
+            problem: profile.crop_problem.clone(),
         });
         drafts.push(WizardSiteDraft {
             site,
@@ -474,6 +484,7 @@ pub struct CaseProfile {
     pub lulcc: bool,
     pub bgc: bool,
     pub crop: bool,
+    pub crop_problem: Option<String>,
     pub methane: bool,
     /// 水同位素（H₂¹⁸O/HDO）与是否分馏、含水层混合水量。
     pub isotope: bool,
@@ -551,6 +562,8 @@ pub struct CaseRecord {
     pub shapefile: Option<String>,
     #[serde(default)]
     pub engine: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<bool>,
     #[serde(default)]
     pub site: Option<String>,
     #[serde(default)]
@@ -784,11 +797,85 @@ pub fn case_default_observation(case_dir: &Path, record: &CaseRecord) -> Option<
     None
 }
 
-fn recorded_case(dir: &Path) -> CaseRecord {
+pub(crate) fn recorded_case(dir: &Path) -> CaseRecord {
     std::fs::read_to_string(dir.join(PROFILE_FILE))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
+}
+
+type SiteCropEntries =
+    std::collections::HashMap<(PathBuf, String), (u64, std::time::SystemTime, bool)>;
+
+#[derive(Default)]
+struct SiteCropCache {
+    entries: std::sync::Mutex<SiteCropEntries>,
+}
+
+impl SiteCropCache {
+    fn read(
+        &self,
+        site: &Path,
+        landtype: String,
+        probe: impl FnOnce() -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        let site = site
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", site.display()))?;
+        let metadata = std::fs::metadata(&site).map_err(|e| e.to_string())?;
+        let modified = metadata.modified().map_err(|e| e.to_string())?;
+        let key = (site.clone(), landtype);
+        if let Some((size, stamp, crop)) = self.entries.lock().map_err(|e| e.to_string())?.get(&key)
+        {
+            if *size == metadata.len() && *stamp == modified {
+                return Ok(*crop);
+            }
+        }
+        let crop = probe()?;
+        let after = std::fs::metadata(&site).map_err(|e| e.to_string())?;
+        if after.len() != metadata.len() || after.modified().map_err(|e| e.to_string())? != modified
+        {
+            return Err(format!(
+                "站点文件在读取期间已改变 / Site file changed while reading: {}",
+                site.display()
+            ));
+        }
+        let mut entries = self.entries.lock().map_err(|e| e.to_string())?;
+        if entries.len() >= 256 {
+            entries.clear();
+        }
+        entries.insert(key, (metadata.len(), modified, crop));
+        Ok(crop)
+    }
+}
+
+pub(crate) fn site_crop(dir: &Path, doc: &colm_namelist::Document) -> Result<bool, String> {
+    let Some(colm_namelist::Value::Str(site)) = doc.get("SITE_fsitedata") else {
+        return Ok(false);
+    };
+    if site.trim().is_empty() || site.trim().eq_ignore_ascii_case("null") {
+        return Ok(false);
+    }
+    let site = dir.join(site);
+    let landtype = match doc.get("SITE_landtype") {
+        Some(colm_namelist::Value::Int(value)) if *value >= 0 => value.to_string(),
+        _ => String::new(),
+    };
+    let mut args = vec!["site-classes".into(), site.display().to_string()];
+    if !landtype.is_empty() {
+        args.extend(["--landtype".into(), landtype.clone()]);
+    }
+    static CACHE: std::sync::OnceLock<SiteCropCache> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(Default::default)
+        .read(&site, landtype, || {
+            let json = crate::sidecar::capture(&args)?;
+            serde_json::from_str::<serde_json::Value>(&json)
+                .map_err(|e| e.to_string())?
+                .get("crop")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or_else(|| "作物元数据响应无效 / Invalid crop metadata response".into())
+        })
 }
 
 /// 「打开已有算例」：`dir` 必须是含 `case.nml` 的算例目录。
@@ -833,31 +920,19 @@ pub(crate) fn case_profile_of(dir: &Path, spatial: bool) -> Result<CaseProfile, 
     let stages = std::fs::read_to_string(dir.join("stages.json")).ok();
     let record = recorded_case(dir);
     let mut profile = case_profile(&text, spatial, stages.as_deref(), record.mode.as_deref())?;
-    // Keep missing/offline site files repairable; actual local metadata uses the same CLI
-    // predicate as execution, without linking NetCDF into the window process.
-    if !profile.crop && !spatial {
-        if let Some(colm_namelist::Value::Str(site)) = effective.get("SITE_fsitedata") {
-            let site = Path::new(site);
-            let site = if site.is_absolute() {
-                site.to_path_buf()
-            } else {
-                dir.join(site)
-            };
-            if site.is_file() {
-                // Metadata is advisory here; the run preflight still reports unreadable sites.
-                match crate::sidecar::capture(&["case-crop".into(), dir.display().to_string()]) {
-                    Ok(json) => {
-                        profile.crop = serde_json::from_str::<serde_json::Value>(&json)
-                            .ok()
-                            .and_then(|value| value["crop"].as_bool())
-                            .unwrap_or(false);
-                    }
-                    Err(error) => eprintln!(
-                        "cannot inspect crop metadata for {}: {error}",
-                        dir.display()
-                    ),
-                }
-            }
+    match colm_case::crop_required(&effective, dir) {
+        Ok(crop) => profile.crop |= crop,
+        Err(error) => profile.crop_problem = Some(error.to_string()),
+    }
+    // Keep broken inputs repairable and expose uncertainty to callers.
+    let remote_source = std::fs::read(dir.join(colm_model::RUN_MANIFEST))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<colm_model::MaterializedRun>(&bytes).ok())
+        .is_some_and(|run| recorded_case(&run.source_case).remote_directory.is_some());
+    if !profile.crop && !spatial && record.remote_directory.is_none() && !remote_source {
+        match site_crop(dir, &effective) {
+            Ok(crop) => profile.crop = crop,
+            Err(error) => profile.crop_problem = Some(error),
         }
     }
     profile.obs_file = case_default_observation(dir, &record);
@@ -1019,6 +1094,7 @@ pub(crate) fn case_profile(
         lulcc: logical(&doc, "DEF_USE_LULCC"),
         bgc: logical(&doc, "DEF_USE_BGC"),
         crop,
+        crop_problem: None,
         methane,
         isotope: logical(&doc, "DEF_USE_ISOTOPE"),
         fractionation: logical(&doc, "DEF_ISO_USE_FRACTIONATION"),

@@ -307,7 +307,7 @@ test('Rust spatial crop writes the runtime marker instead of a planting-day over
       { id: 'crop', value: '.false.' },
       { ...environment, engine: 'fortran' },
     ),
-    { DEF_USE_IRRIGATION: '.false.' },
+    { DEF_USE_CROP: '.false.', DEF_USE_IRRIGATION: '.false.' },
   );
 });
 

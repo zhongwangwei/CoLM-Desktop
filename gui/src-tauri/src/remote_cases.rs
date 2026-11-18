@@ -262,6 +262,19 @@ fn publish_files(dir: &Path, remote: &str) -> Result<BTreeMap<String, String>, S
     if dir.join("hybrid.toml").exists() {
         return Err("服务器配置同步尚不支持混合模型资产；请使用远程运行生成的完整模型快照".into());
     }
+    let metadata = dir.join(".colm-desktop.json");
+    if metadata.is_file() {
+        let record: Value = serde_json::from_str(
+            &std::fs::read_to_string(metadata).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(crop) = record["crop"].as_bool() {
+            files.insert(
+                ".colm-desktop.json".into(),
+                json!({"crop": crop}).to_string(),
+            );
+        }
+    }
     Ok(files)
 }
 
@@ -302,6 +315,7 @@ async fn prepare_creation(
         serde_json::from_value(request.get("fields").cloned().unwrap_or(json!([])))
             .map_err(|e| e.to_string())?;
     let mut fields = crate::model::creation_fields(fields, model_revision)?;
+    request["crop"] = Value::Bool(crate::sidecar::is_crop_case(&fields));
     crate::sidecar::preserve_generated_forcing(
         text(&request, "forcing_dataset").as_deref(),
         &mut fields,
@@ -961,7 +975,16 @@ mod tests {
             "&methane\n custom = 17\n/\n",
         )
         .unwrap();
+        std::fs::write(
+            dir.join(".colm-desktop.json"),
+            r#"{"engine":"fortran","remote_directory":"/original","crop":true}"#,
+        )
+        .unwrap();
         let files = publish_files(&dir, "/server/case").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&files[".colm-desktop.json"]).unwrap(),
+            json!({"crop":true})
+        );
         let case = colm_namelist::parse(&files["case.nml"]).unwrap();
         assert_eq!(
             case.get("DEF_SOLUTE_PARAM_FILES"),

@@ -13,9 +13,9 @@ pub fn parse(src: &str) -> Result<Document> {
     let mut items = Vec::new();
     let mut in_group = false;
 
-    for (lineno, raw) in src.split_inclusive('\n').enumerate() {
-        let line = raw.trim_end_matches(['\r', '\n']);
-        let t = line[..comment_start(line).unwrap_or(line.len())].trim();
+    for (lineno, mut raw) in src.split_inclusive('\n').enumerate() {
+        let mut line = raw.trim_end_matches(['\r', '\n']);
+        let mut t = line[..comment_start(line).unwrap_or(line.len())].trim();
 
         if t.is_empty() {
             items.push(Item::Verbatim(raw.to_string()));
@@ -33,9 +33,24 @@ pub fn parse(src: &str) -> Result<Document> {
             if in_group {
                 bail!("line {}: group opened inside a group", lineno + 1);
             }
+            let name_end = t[1..]
+                .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .map_or(t.len(), |i| i + 1);
+            if name_end == 1 || t.as_bytes()[1].is_ascii_digit() {
+                bail!("line {}: invalid namelist group name", lineno + 1);
+            }
             in_group = true;
-            items.push(Item::GroupStart(raw.to_string()));
-            continue;
+            if t[name_end..].trim().is_empty() {
+                items.push(Item::GroupStart(raw.to_string()));
+                continue;
+            }
+            let start = line.len() - line.trim_start().len();
+            let split = start + name_end;
+            let split = split + raw[split..].len() - raw[split..].trim_start().len();
+            items.push(Item::GroupStart(raw[..split].to_string()));
+            raw = &raw[split..];
+            line = raw.trim_end_matches(['\r', '\n']);
+            t = line[..comment_start(line).unwrap_or(line.len())].trim();
         }
         if !in_group {
             bail!(
@@ -43,9 +58,32 @@ pub fn parse(src: &str) -> Result<Document> {
                 lineno + 1
             );
         }
-        if t == "/" {
+        let terminator = unquoted(line, '/');
+        let ending = if let Some(at) = terminator {
+            let tail = &line[at + 1..];
+            if !tail[..comment_start(tail).unwrap_or(tail.len())]
+                .trim()
+                .is_empty()
+            {
+                bail!(
+                    "line {}: unexpected text after group terminator",
+                    lineno + 1
+                );
+            }
+            let ending = &raw[at..];
+            raw = &raw[..at];
+            line = raw;
+            t = line.trim();
+            Some(ending)
+        } else {
+            None
+        };
+        if t.is_empty() {
             in_group = false;
-            items.push(Item::GroupEnd(raw.to_string()));
+            items.push(Item::GroupEnd(format!(
+                "{raw}{}",
+                ending.expect("inline group end")
+            )));
             continue;
         }
         if t.ends_with('&') {
@@ -77,6 +115,10 @@ pub fn parse(src: &str) -> Result<Document> {
             prefix: format!("{}={}", &line[..eq], &rest[..lead]),
             suffix: raw[eq + 1 + lead + text.len()..].to_string(),
         }));
+        if let Some(ending) = ending {
+            in_group = false;
+            items.push(Item::GroupEnd(ending.to_string()));
+        }
     }
 
     if in_group {
@@ -87,12 +129,17 @@ pub fn parse(src: &str) -> Result<Document> {
 
 /// 引号外第一个 `!` 的位置。
 fn comment_start(s: &str) -> Option<usize> {
+    unquoted(s, '!')
+}
+
+fn unquoted(s: &str, needle: char) -> Option<usize> {
     let mut quote: Option<char> = None;
     for (i, c) in s.char_indices() {
         match (quote, c) {
             (None, '\'') | (None, '"') => quote = Some(c),
             (Some(q), c) if c == q => quote = None,
-            (None, '!') => return Some(i),
+            (None, c) if c == needle => return Some(i),
+            (None, '!') => return None,
             _ => {}
         }
     }

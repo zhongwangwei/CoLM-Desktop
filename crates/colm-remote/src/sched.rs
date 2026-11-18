@@ -103,12 +103,17 @@ pub fn parse_walltime(text: &str) -> Result<u64> {
     let parts: Vec<Option<u64>> = rest.split(':').map(|p| p.parse().ok()).collect();
     let numbers: Option<Vec<u64>> = parts.into_iter().collect();
     let numbers = numbers.ok_or_else(|| anyhow::anyhow!("bad walltime {text:?}"))?;
-    let seconds = match numbers.as_slice() {
-        [h, m] => h * 3600 + m * 60,
-        [h, m, s] => h * 3600 + m * 60 + s,
+    let (hours, minutes, seconds) = match numbers.as_slice() {
+        [h, m] => (*h, *m, 0),
+        [h, m, s] => (*h, *m, *s),
         _ => bail!("walltime must look like HH:MM:SS, D-HH:MM:SS or HH:MM, got {text:?}"),
     };
-    let total = days * 86_400 + seconds;
+    let total = days
+        .checked_mul(86_400)
+        .and_then(|value| value.checked_add(hours.checked_mul(3600)?))
+        .and_then(|value| value.checked_add(minutes.checked_mul(60)?))
+        .and_then(|value| value.checked_add(seconds))
+        .ok_or_else(|| anyhow::anyhow!("walltime {text:?} exceeds the supported duration"))?;
     ensure!(total > 0, "walltime must be longer than zero");
     Ok(total)
 }
@@ -613,17 +618,33 @@ lsf)
     C=$(cat "$P/claimed/$J/carrier")
     if [ -z "$C" ]; then echo "state=unknown"
     else
+      # wrapper 在 wait 返回后写 done；载体可能来不及收割它。只读唯一匹配载体的完整退出码，
+      # 不写站点结果，也不根据 cancel/term 标记猜测已取消。
+      MATCH=; MATCHES=0
+      for c in "$P"/carriers/c*; do
+        [ -d "$c" ] || continue
+        [ "$(cat "$c/sched_id" 2>/dev/null)" = "$C" ] || continue
+        MATCH="$c"; MATCHES=$((MATCHES + 1))
+      done
+      if [ "$MATCHES" -eq 1 ]; then
+        CODE=$(cat "$MATCH/done/$J" 2>/dev/null)
+        case "$CODE" in
+        ''|*[!0-9]*) ;;
+        *) if [ "${#CODE}" -le 3 ] && [ "$CODE" -le 255 ]; then echo "state=finished $CODE"; return; fi ;;
+        esac
+      fi
       Q=$(colm_query "$COLM_BASE" "$C")
-      if printf '%s\n' "$Q" | grep -qx 'terminal=confirmed'; then
-        # 载体成功不等于站点成功；站点自己的退出码在查询后再次读取。
-        lost_confirmed "FAILED: node pack job $C ended before this station recorded its result: $(printf '%s\n' "$Q" | sed -n 's/^detail=//p')"
+      if printf '%s\n' "$Q" | grep -qx 'state=lost'; then
+        # setsid 站点可能在载体结束后继续运行；只有站点自己的结果能解除占位。
+        echo "state=unknown"
+        echo "detail=载体 $C 已结束或无法查到，站点仍待核对。程序会继续检查站点退出码，并保留原提交。长期无结果时，请核对计算节点上的站点进程。载体缺失时，取消请求可能一直处于待处理状态。 / node pack job $C is unavailable; station outcome unconfirmed. The original submission remains active while we check for its exit code. If none arrives, verify the station processes on the compute node. A cancellation request may remain pending without the carrier."
       else
         printf '%s\n' "$Q"
         D=$(printf '%s\n' "$Q" | sed -n 's/^detail=//p')
         [ -z "$D" ] || echo "detail=node pack job $C $D"
       fi
     fi
-  elif [ -d "$P/claimed/$J" ]; then echo "state=queued"; echo "detail=starting in node pack"
+  elif [ -d "$P/claimed/$J" ]; then echo "state=unknown"; echo "detail=station claimed, awaiting carrier receipt; verify station processes if no result arrives"
   elif [ -f "$P/queue/$J" ]; then
     L=; ERR=; STARTING=
     for c in "$P"/carriers/c*; do
@@ -662,7 +683,8 @@ slurm) scancel "$ID" || exit $?; : > cancel_requested ;;
 *-pack)
   # 不能取消整个载体：它上面还跑着别的站点。没领走的抢先占住，领走了的请载体只杀这一个。
   P=$(cat pool) || exit 1; J=${PWD##*/}
-  if mkdir "$P/claimed/$J" 2>/dev/null; then : > "$P/claimed/$J/cancelled"; else : > "$P/claimed/$J/cancel"; fi ;;
+  if mkdir "$P/claimed/$J" 2>/dev/null; then : > "$P/claimed/$J/cancelled"; else : > "$P/claimed/$J/cancel"; fi
+  : > cancel_requested ;;
 pbs) qdel "$ID" || exit $?; : > cancel_requested ;;
 lsf) bkill "$ID" || exit $?; : > cancel_requested ;;
 bare)

@@ -1102,7 +1102,7 @@ export default function NewCasePage() {
         k === 'kind' && v !== 'site' && cropEnabled(physics)
           ? {
               DEF_TUNING_CROP_PLANTING_DAY: '0',
-              ...(form.engine === 'rust' ? { DEF_USE_CROP: '.true.' } : {}),
+              DEF_USE_CROP: '.true.',
             }
           : {},
         k === 'kind' ? { domain: v } : { grid: v },

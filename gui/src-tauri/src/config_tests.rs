@@ -609,6 +609,17 @@ fn crop_management_runtime_files_are_checked_before_write() {
     )
     .unwrap_err();
     assert!(err.contains("CROP 播种日期"), "{err}");
+    let runtime_crop = doc("DEF_USE_CROP=.true.\n DEF_TUNING_CROP_PLANTING_DAY=0\n DEF_USE_FERT=.false.\n DEF_USE_IRRIGATION=.false.");
+    let err = super::validate_runtime_contract(&runtime_crop, &root, None).unwrap_err();
+    assert!(err.contains("CROP 播种日期"), "{err}");
+    std::fs::write(
+        root.join(".colm-desktop.json"),
+        r#"{"engine":"fortran","crop":true}"#,
+    )
+    .unwrap();
+    let err = super::validate_runtime_contract(&doc("DEF_TUNING_CROP_PLANTING_DAY=0"), &root, None)
+        .unwrap_err();
+    assert!(err.contains("CROP 播种日期"), "{err}");
     std::fs::write(root.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc"), []).unwrap();
 
     let source_one = doc("DEF_USE_FERT=.true.\n DEF_USE_IRRIGATION=.false.\n DEF_FERT_SOURCE=1");
@@ -4650,6 +4661,39 @@ fn creating_optional_configuration_is_staged_before_replacing_existing_files() {
 }
 
 #[test]
+fn a_failed_configuration_restore_keeps_its_backup() {
+    use std::io::Error;
+
+    let dirs = batch("config-restore-failure", &[NML_A]);
+    let root = std::path::Path::new(&dirs[0]);
+    let case = root.join("case.nml");
+    let forcing = root.join("forcing.nml");
+    std::fs::write(&forcing, "previous").unwrap();
+    let error = super::write_files_atomic_using(
+        &[
+            (forcing.clone(), "staged".into()),
+            (case.clone(), "enable CBL".into()),
+        ],
+        |source, target| {
+            if target == case || source.to_string_lossy().contains(".bak-") {
+                return Err(Error::other("injected replacement failure"));
+            }
+            replace_file_atomic(source, target)
+        },
+    )
+    .unwrap_err();
+    assert_eq!(std::fs::read_to_string(&case).unwrap(), NML_A);
+    assert_eq!(std::fs::read_to_string(&forcing).unwrap(), "staged");
+    let backup = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().contains(".forcing.nml.bak-"))
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&backup).unwrap(), "previous");
+    assert!(error.contains(&*backup.to_string_lossy()));
+}
+
+#[test]
 fn server_case_runtime_checks_keep_server_paths_and_numerical_guards() {
     let root = std::env::temp_dir().join(format!("colm-server-runtime-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
@@ -6182,4 +6226,29 @@ fn case_save_snapshot_tracks_metadata_creation_changes_and_removal() {
     assert_ne!(case_save_input_snapshot(&dirs, &[]).unwrap(), present);
     std::fs::remove_file(path).unwrap();
     assert_eq!(case_save_input_snapshot(&dirs, &[]).unwrap(), absent);
+}
+
+#[test]
+fn crop_fortran_marker_is_staged_without_polluting_namelist() {
+    let dirs = batch(
+        "crop-marker",
+        &["&nl_colm\n DEF_USE_CROP=.true.\n DEF_TUNING_CROP_PLANTING_DAY=0\n/\n"],
+    );
+    let dir = std::path::Path::new(&dirs[0]);
+    let metadata = dir.join(".colm-desktop.json");
+    std::fs::write(&metadata, r#"{"engine":"fortran","run_host":"server"}"#).unwrap();
+    let mut doc =
+        colm_namelist::parse(&std::fs::read_to_string(dir.join("case.nml")).unwrap()).unwrap();
+    let mut writes = Vec::new();
+    stage_fortran_crop(&mut doc, dir, &mut writes).unwrap();
+    assert!(doc.get("DEF_USE_CROP").is_none());
+    let record: serde_json::Value = serde_json::from_str(&writes[0].1).unwrap();
+    assert_eq!(record["crop"], true);
+    assert_eq!(record["run_host"], "server");
+    assert!(!std::fs::read_to_string(metadata).unwrap().contains("crop"));
+    doc = colm_namelist::parse("&nl_colm\n DEF_USE_CROP=.false.\n/\n").unwrap();
+    stage_fortran_crop(&mut doc, dir, &mut writes).unwrap();
+    assert_eq!(writes.len(), 1);
+    let record: serde_json::Value = serde_json::from_str(&writes[0].1).unwrap();
+    assert_eq!(record["crop"], false);
 }

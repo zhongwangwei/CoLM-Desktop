@@ -1370,8 +1370,7 @@ pub(crate) fn server_runtime_paths(
     case_dir: &std::path::Path,
     kernel_dir: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    let crop =
-        kernel_facts(kernel_dir)?.is_some_and(|facts| facts.crop) || colm_case::crop_enabled(doc);
+    let crop = effective_crop(doc, case_dir, kernel_facts(kernel_dir)?)?;
     Ok(serde_json::Value::Array(
         runtime_paths(doc, case_dir, Some(crop))?
             .into_iter()
@@ -1613,6 +1612,30 @@ struct KernelFacts {
     grid_river: bool,
 }
 
+fn effective_crop(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+    kernel: Option<KernelFacts>,
+) -> Result<bool, String> {
+    if kernel.is_some_and(|facts| facts.crop)
+        || colm_case::crop_required(doc, case_dir).map_err(|error| error.to_string())?
+    {
+        return Ok(true);
+    }
+    if crate::project::recorded_case(case_dir)
+        .remote_directory
+        .is_some()
+    {
+        return Ok(false);
+    }
+    if let Some(colm_namelist::Value::Str(site)) = doc.get("SITE_fsitedata") {
+        if !site.trim().is_empty() && case_dir.join(site).is_file() {
+            return crate::project::site_crop(case_dir, doc);
+        }
+    }
+    Ok(false)
+}
+
 fn kernel_facts(kernel_dir: Option<&str>) -> Result<Option<KernelFacts>, String> {
     let Some(dir) = kernel_dir.filter(|dir| !dir.trim().is_empty()) else {
         return Ok(None);
@@ -1704,9 +1727,7 @@ fn validate_runtime_contract_at(
     let usgs = kernel
         .map(|facts| facts.usgs)
         .unwrap_or_else(|| logical(doc, "DEF_USE_USGS"));
-    let crop = kernel
-        .map(|facts| facts.crop)
-        .unwrap_or_else(|| logical(doc, "DEF_USE_CROP"));
+    let crop = effective_crop(doc, case_dir, kernel)?;
 
     if bgc && !(pft || pc) {
         return Err("DEF_USE_BGC 需要 DEF_USE_PFT 或 DEF_USE_PC".into());
@@ -2503,7 +2524,7 @@ fn field_runtime_state(
     if name == "USE_SITE_pctpfts" && (!(c.pft || c.pc) || !c.natural_pft_land()) {
         return hidden("仅自然地表的 PFT/PC 次网格使用");
     }
-    if name == "USE_SITE_pctcrop" && !c.crop_capable() {
+    if name == "USE_SITE_pctcrop" && (!c.single || !c.crop_capable()) {
         return hidden("仅 CROP 内核的作物地表使用");
     }
     if name == "USE_SITE_lakedepth" && !c.waterbody() {
@@ -4626,6 +4647,13 @@ pub(crate) fn write_export_text_atomic(
 }
 
 fn write_files_atomic_untracked(done: &[(std::path::PathBuf, String)]) -> Result<usize, String> {
+    write_files_atomic_using(done, replace_file_atomic)
+}
+
+fn write_files_atomic_using(
+    done: &[(std::path::PathBuf, String)],
+    replace: impl Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> Result<usize, String> {
     use std::io::Write as _;
 
     // ponytail: edits are user-driven and rare; split this global lock only if measured contention appears.
@@ -4701,18 +4729,31 @@ fn write_files_atomic_untracked(done: &[(std::path::PathBuf, String)]) -> Result
         staged.push(temporary);
     }
     for (index, ((path, _), temporary)) in changed.iter().zip(staged.iter()).enumerate() {
-        if let Err(error) = replace_file_atomic(temporary, path) {
-            for ((prior, _), backup) in changed.iter().zip(backups.iter()).take(index + 1) {
+        if let Err(error) = replace(temporary, path) {
+            let mut message = format!("{}: {error}", path.display());
+            for (offset, ((prior, _), backup)) in changed.iter().zip(backups).enumerate().rev() {
+                if offset < index {
+                    let restored = match &backup {
+                        Some(backup) => replace(backup, prior),
+                        None => std::fs::remove_file(prior),
+                    };
+                    if let Err(restore) = restored {
+                        use std::fmt::Write as _;
+                        let _ = write!(message, "\n{}：恢复失败（{restore}）", prior.display());
+                        if let Some(backup) = backup {
+                            let _ = write!(message, "，原文件备份保留在 {}", backup.display());
+                        }
+                        continue;
+                    }
+                }
                 if let Some(backup) = backup {
-                    let _ = replace_file_atomic(backup, prior);
-                } else {
-                    let _ = std::fs::remove_file(prior);
+                    let _ = std::fs::remove_file(backup);
                 }
             }
-            for path in staged.iter().chain(backups.iter().flatten()) {
+            for path in &staged {
                 let _ = std::fs::remove_file(path);
             }
-            return Err(format!("{}: {error}", path.display()));
+            return Err(message);
         }
     }
     for path in staged.iter().chain(backups.iter().flatten()) {
@@ -5165,10 +5206,45 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
         param(METHANE_MODE),
         (param(SOLUTE_INIT_CONC), param(SOLUTE_PRECIP_CONC)),
     )?;
+    stage_fortran_crop(&mut doc, std::path::Path::new(dir), &mut writes)?;
     // case.nml is the only copy of the configuration: replace it (and its history file)
     // through staged files with backups instead of truncating in place.
     writes.push((path, doc.to_string()));
     write_files_atomic_untracked(&writes).map(|_| ())
+}
+
+fn stage_fortran_crop(
+    doc: &mut colm_namelist::Document,
+    dir: &std::path::Path,
+    writes: &mut Vec<(std::path::PathBuf, String)>,
+) -> Result<(), String> {
+    let Some(colm_namelist::Value::Bool(crop)) = doc.get("DEF_USE_CROP") else {
+        return Ok(());
+    };
+    let crop = *crop;
+    let path = dir.join(".colm-desktop.json");
+    let staged = writes.iter().position(|(target, _)| target == &path);
+    let text = match staged {
+        Some(index) => writes[index].1.clone(),
+        None => match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        },
+    };
+    let mut record: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if record["engine"].as_str() != Some("fortran") {
+        return Ok(());
+    }
+    record["crop"] = serde_json::Value::Bool(crop);
+    doc.remove("DEF_USE_CROP").map_err(|e| e.to_string())?;
+    let text = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+    if let Some(index) = staged {
+        writes[index].1 = text;
+    } else {
+        writes.push((path, text));
+    }
+    Ok(())
 }
 
 /// 向导写的材质输运内置参数文件。上游把旧的单张 `@@DEF_MATERIAL_@@PARAM_FILES` 拆成按 family 的
@@ -6048,20 +6124,22 @@ pub(crate) fn set_fields_with_forcing(
                 serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?,
             ));
         }
+        stage_fortran_crop(&mut doc, std::path::Path::new(&d), &mut extra)?;
         done.push((d, doc.to_string()));
     }
     if extra.is_empty() {
         return write_all(&done);
     }
-    // case.nml（指向输出变量文件）与输出变量文件同批原子写入。
-    let mut files = done
+    let case_files = done
         .iter()
-        .map(|(dir, text)| (std::path::Path::new(dir).join("case.nml"), text.clone()))
-        .collect::<Vec<_>>();
-    files.extend(extra);
-    if let Some(forcing) = forcing {
+        .map(|(dir, text)| (std::path::Path::new(dir).join("case.nml"), text.clone()));
+    let files: Vec<_> = if let Some(forcing) = forcing {
         forcing.unchanged()?;
-    }
+        // Publish the forcing header before case.nml can reference it or enable CBL.
+        extra.into_iter().chain(case_files).collect()
+    } else {
+        case_files.chain(extra).collect()
+    };
     let changed = write_files_atomic(&files)?;
     Ok(BatchWrite {
         written: done.len(),

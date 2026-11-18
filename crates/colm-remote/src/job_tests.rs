@@ -1302,7 +1302,7 @@ fn a_machine_without_a_scheduler_runs_its_batch_in_one_background_carrier() {
 
 #[cfg(unix)]
 #[test]
-fn a_station_whose_lsf_node_job_ended_is_failed_but_a_silent_scheduler_is_not_proof() {
+fn a_station_outcome_stays_unconfirmed_after_its_lsf_carrier_ends() {
     let sb = pack_sandbox("pack-lsf-gone", "unused");
     sb.stub(
         "bsub",
@@ -1333,13 +1333,12 @@ fn a_station_whose_lsf_node_job_ended_is_failed_but_a_silent_scheduler_is_not_pr
         .unwrap();
     }
     let ended = sb.status("j-x");
-    assert_eq!(ended.state, State::Lost);
-    assert_eq!(
-        crate::job::ended(&ended),
-        Some("failed"),
-        "{:?}",
-        ended.detail
-    );
+    assert_eq!(ended.state, State::Unknown);
+    assert_eq!(crate::job::ended(&ended), None, "{:?}", ended.detail);
+    assert!(ended
+        .detail
+        .unwrap()
+        .contains("station outcome unconfirmed"));
     let silent = sb.report_text("j-y");
     assert!(parse_report(&silent)
         .unwrap_err()
@@ -1406,11 +1405,12 @@ fn packed_status_preserves_scheduler_evidence_and_station_results() {
             sb.set(&state_file, terminal);
         }
         let report = sb.report("j-pack");
-        assert!(report.terminal, "{scheduler}");
+        assert!(!report.terminal, "{scheduler}");
+        assert_eq!(report.status.state, State::Unknown);
         assert_eq!(
             ended(&report.status),
-            Some("failed"),
-            "carrier success is not station success"
+            None,
+            "carrier success cannot confirm the station has stopped"
         );
         std::fs::write(dir.join("exit_code"), "0").unwrap();
         assert_eq!(
@@ -1434,8 +1434,15 @@ fn packed_status_preserves_scheduler_evidence_and_station_results() {
     std::fs::write(dir.join("scheduler"), "slurm-pack").unwrap();
     sb.stub("squeue", "echo 'CANCELLED|by request'");
     let cancelled = sb.report("j-pack");
-    assert!(cancelled.terminal);
-    assert_eq!(ended(&cancelled.status), Some("cancelled"));
+    assert!(!cancelled.terminal);
+    assert_eq!(ended(&cancelled.status), None);
+    let (_, error, ok) = sb.run(&cancel_script(&sb.work(), "j-pack"));
+    assert!(ok, "{error}");
+    let requested = sb.report("j-pack");
+    assert!(requested.cancel_requested);
+    assert!(!requested.terminal);
+    assert_eq!(ended(&requested.status), None);
+    assert!(claim.join("cancel").is_file());
     sb.stub("squeue", "echo scheduler_unavailable >&2; exit 1");
     assert!(parse_report(&sb.report_text("j-pack")).is_err());
     sb.stub(
@@ -1446,6 +1453,66 @@ fn packed_status_preserves_scheduler_evidence_and_station_results() {
         sb.report("j-pack").status.state,
         State::Finished { exit_code: 7 },
         "station result published during the query takes precedence"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pack_wrapper_result_survives_carrier_loss_without_forging_cancellation() {
+    let sb = Sandbox::new("pack-unharvested-result");
+    let dir = sb.job_dir("j-pack");
+    let pool = sb.root.join("pool");
+    let claim = pool.join("claimed/j-pack");
+    let carrier = pool.join("carriers/c0");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&claim).unwrap();
+    std::fs::create_dir_all(carrier.join("done")).unwrap();
+    std::fs::write(dir.join("scheduler"), "slurm-pack").unwrap();
+    std::fs::write(dir.join("pool"), pool.to_str().unwrap()).unwrap();
+    let no_receipt = sb.report("j-pack");
+    assert_eq!(no_receipt.status.state, State::Unknown);
+    assert!(!no_receipt.terminal);
+    std::fs::write(claim.join("carrier"), "4242").unwrap();
+    std::fs::write(carrier.join("sched_id"), "4242").unwrap();
+    sb.set("sacct_out", "COMPLETED|0:0");
+    for invalid in ["", "unfinished", "-1", "256", "18446744073709551615"] {
+        std::fs::write(carrier.join("done/j-pack"), invalid).unwrap();
+        assert!(!sb.report("j-pack").terminal, "{invalid:?}");
+    }
+    std::fs::write(carrier.join("done/j-pack"), "143\n").unwrap();
+    std::fs::write(claim.join("cancel"), "").unwrap();
+    std::fs::write(dir.join("cancel_requested"), "").unwrap();
+    let report = sb.report("j-pack");
+    assert_eq!(report.status.state, State::Finished { exit_code: 143 });
+    assert_eq!(
+        ended(&report.status),
+        None,
+        "no invented cancellation label"
+    );
+    assert!(report.terminal);
+    assert!(
+        !dir.join("exit_code").exists(),
+        "query must remain read-only"
+    );
+    assert!(!dir.join("cancelled").exists());
+    std::fs::write(carrier.join("done/j-pack"), "0\n").unwrap();
+    assert_eq!(
+        sb.report("j-pack").status.state,
+        State::Finished { exit_code: 0 }
+    );
+    // A reused scheduler id cannot identify the carrier uniquely.
+    let other = pool.join("carriers/c1");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("sched_id"), "4242").unwrap();
+    assert!(!sb.report("j-pack").terminal);
+    std::fs::write(other.join("sched_id"), "9999").unwrap();
+    std::fs::write(carrier.join("sched_id"), "9999").unwrap();
+    assert!(!sb.report("j-pack").terminal, "no matching carrier");
+    std::fs::write(carrier.join("sched_id"), "4242").unwrap();
+    std::fs::write(dir.join("exit_code"), "7").unwrap();
+    assert_eq!(
+        sb.report("j-pack").status.state,
+        State::Finished { exit_code: 7 }
     );
 }
 
@@ -1492,5 +1559,66 @@ fn an_unclaimed_pack_station_can_be_cancelled_without_inventing_a_carrier_end() 
     assert!(
         pool.join("claimed/j-pack/cancelled").exists(),
         "the claim prevents any later carrier running the cancelled station"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_packed_station_can_finish_after_its_bare_carrier_is_killed() {
+    let sb = pack_sandbox("pack-carrier-killed", "unused");
+    let spec = Spec {
+        scheduler: Scheduler::Slurm,
+        ..Spec::bare()
+    };
+    let pack = crate::pack::Pack {
+        pool: "batch-survivor".into(),
+        slots: 1,
+    };
+    let body = "echo ready > started\nfor ((i=0; i<300; i++)); do [ -f release ] && break; sleep 0.05; done\n[ -f release ]";
+    let (_, error, ok) =
+        sb.run(&packed_submit_script(&sb.work(), "j-survivor", body, &spec, &pack).unwrap());
+    assert!(ok, "{error}");
+    // The scheduler stub reserves the carrier; this test owns its actual process.
+    let dir = sb.job_dir("j-survivor");
+    std::fs::write(dir.join("scheduler"), "bare-pack").unwrap();
+    let pool = std::path::PathBuf::from(crate::pack::pool_dir(&sb.work(), &pack.pool));
+    let mut carrier = Command::new("bash")
+        .arg(pool.join("carriers/c0/script.sh"))
+        .current_dir(pool.join("carriers/c0"))
+        .env("STUBS", &sb.bin)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", sb.bin.display()),
+        )
+        .env("COLM_PACK_LINGER", "2")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !dir.join("started").is_file() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "station did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    carrier.kill().unwrap();
+    carrier.wait().unwrap();
+    let still_owned = sb.report("j-survivor");
+    assert_eq!(still_owned.status.state, State::Unknown);
+    assert!(!still_owned.terminal);
+    assert_eq!(ended(&still_owned.status), None);
+    std::fs::write(dir.join("release"), "").unwrap();
+    while !dir.join("exit_code").is_file() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "station did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        sb.report("j-survivor").status.state,
+        State::Finished { exit_code: 0 }
     );
 }

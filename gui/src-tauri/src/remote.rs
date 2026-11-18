@@ -315,12 +315,16 @@ fn walltime_seconds(text: &str) -> Option<u64> {
         None => (0, text),
     };
     let numbers: Option<Vec<u64>> = rest.split(':').map(|part| part.parse().ok()).collect();
-    let seconds = match numbers?.as_slice() {
-        [hours, minutes] => hours * 3600 + minutes * 60,
-        [hours, minutes, seconds] => hours * 3600 + minutes * 60 + seconds,
+    let (hours, minutes, seconds) = match numbers?.as_slice() {
+        [hours, minutes] => (*hours, *minutes, 0),
+        [hours, minutes, seconds] => (*hours, *minutes, *seconds),
         _ => return None,
     };
-    let total = days * 86_400 + seconds;
+    let total = days
+        .checked_mul(86_400)?
+        .checked_add(hours.checked_mul(3600)?)?
+        .checked_add(minutes.checked_mul(60)?)?
+        .checked_add(seconds)?;
     (total > 0).then_some(total)
 }
 

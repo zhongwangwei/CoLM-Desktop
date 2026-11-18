@@ -757,3 +757,53 @@ fn crop_profile_uses_runtime_values_not_presence() {
         );
     }
 }
+
+#[test]
+fn crop_site_cache_reuses_identity_and_retries_failed_reads() {
+    let dir = tmp("crop-cache");
+    let site = dir.join("site.nc");
+    std::fs::write(&site, b"fixture").unwrap();
+    let cache = SiteCropCache::default();
+    assert!(cache.read(&site, "12".into(), || Ok(true)).unwrap());
+    assert!(cache.read(&site, "12".into(), || panic!("cached")).unwrap());
+    assert!(!cache.read(&site, "7".into(), || Ok(false)).unwrap());
+    std::fs::write(&site, b"changed fixture").unwrap();
+    assert!(cache
+        .read(&site, "12".into(), || Err("broken".into()))
+        .is_err());
+    assert!(!cache.read(&site, "12".into(), || Ok(false)).unwrap());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn crop_profile_preserves_fortran_spatial_intent_and_reports_unknown_site() {
+    let dir = tmp("crop-intent");
+    std::fs::write(
+        dir.join("case.nml"),
+        "&nl_colm\n DEF_TUNING_CROP_PLANTING_DAY=0\n/\n",
+    )
+    .unwrap();
+    assert!(!case_profile_of(&dir, true).unwrap().crop);
+    std::fs::write(
+        dir.join(".colm-desktop.json"),
+        r#"{"engine":"fortran","crop":true}"#,
+    )
+    .unwrap();
+    assert!(case_profile_of(&dir, true).unwrap().crop);
+    std::fs::remove_file(dir.join(".colm-desktop.json")).unwrap();
+    std::fs::write(
+        dir.join("case.nml"),
+        "&nl_colm\n SITE_fsitedata='missing.nc'\n/\n",
+    )
+    .unwrap();
+    let profile = case_profile_of(&dir, false).unwrap();
+    assert!(!profile.crop);
+    assert!(profile.crop_problem.unwrap().contains("missing.nc"));
+    std::fs::write(
+        dir.join(".colm-desktop.json"),
+        r#"{"remote_directory":"/server/case","run_host":"server"}"#,
+    )
+    .unwrap();
+    assert!(case_profile_of(&dir, false).unwrap().crop_problem.is_none());
+    std::fs::remove_dir_all(dir).unwrap();
+}

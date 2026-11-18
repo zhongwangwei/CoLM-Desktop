@@ -75,3 +75,27 @@ printf 'hostname=stub\nos=Linux\narch=x86_64\ncargo=cargo\ncmake=cmake\ncc=cc\nr
     assert!(String::from_utf8_lossy(&failed.stderr).contains("[redacted]"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn invalid_utf8_arguments_and_askpass_prompts_fail_without_panicking() {
+    use std::os::unix::ffi::OsStringExt;
+    for askpass in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_colm-cli"));
+        command.env_remove("COLM_SSH_ASKPASS_BROKER");
+        if askpass {
+            command.env("COLM_SSH_ASKPASS_BROKER", "127.0.0.1:1");
+        } else {
+            command.arg("case-crop");
+        }
+        let output = command
+            .arg(std::ffi::OsString::from_vec(vec![0xff]))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
+        assert!(output.stdout.is_empty());
+        if !askpass {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("not valid UTF-8"));
+        }
+    }
+}

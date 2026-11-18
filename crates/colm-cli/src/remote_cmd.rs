@@ -470,6 +470,14 @@ fn stage_case_inputs(
     {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
+        if server_inputs && name == ".colm-desktop.json" {
+            if let Some(crop) = colm_case::crop_intent(case)? {
+                let bytes = serde_json::to_vec(&serde_json::json!({"crop": crop}))?;
+                std::fs::write(staging.join(&name), &bytes)?;
+                staged.bytes += bytes.len() as u64;
+            }
+            continue;
+        }
         if skipped(&name)
             || (server_inputs
                 && matches!(
@@ -2887,7 +2895,13 @@ pub(super) fn cmd_cancel(opts: &Opts) -> Result<()> {
             .context("recorded scheduler job ID is missing")?;
         identity.push_str(&format!("[ \"$(cat sched_id)\" = {} ] || {{ echo 'scheduler job identity changed' >&2; exit 1; }}\n", quote(id)));
     }
-    let result = remote_study::cancel_job(&ssh, &record.root, &record.job, &identity)?;
+    let result = remote_study::cancel_job(
+        &ssh,
+        &record.root,
+        &record.job,
+        &identity,
+        record.scheduler.ends_with("-pack"),
+    )?;
     crate::history_cmd::observe_remote_outcome(&result);
     crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &result)?;
     println!("{result}");

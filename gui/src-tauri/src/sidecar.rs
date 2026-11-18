@@ -2895,7 +2895,6 @@ pub async fn new_case(
         }
         let output = creation.capture(args).await?;
         creation.check()?;
-        crate::config::apply_fields(&case_dir, &fields)?;
         // 记下所选计算核心与站点；同目录约定下的观测文件作为结果页的默认对照。
         let mut record = crate::project::CaseRecord {
             mode: recorded_mode,
@@ -2911,6 +2910,7 @@ pub async fn new_case(
                         .map(|p| p.display().to_string())
                 });
         crate::project::record_case(&case_dir, &record)?;
+        crate::config::apply_fields(&case_dir, &fields)?;
         creation.check()?;
         crate::model::bind_new_case(&case_dir, model_revision, &creation, &fields).await?;
         Ok(output)
@@ -3269,8 +3269,8 @@ pub async fn new_spatial_case(
             ]);
         }
         let output = creation.capture(args).await.map_err(cleanup)?;
-        crate::config::apply_fields(&request.out, &request.fields).map_err(cleanup)?;
         crate::project::record_case(&request.out, &recorded)?;
+        crate::config::apply_fields(&request.out, &request.fields).map_err(cleanup)?;
         creation.check()?;
         crate::model::bind_new_case(&request.out, model_revision, &creation, &request.fields)
             .await?;
@@ -3293,7 +3293,7 @@ fn existing_unstructured_mesh(
     }
 }
 
-fn is_crop_case(fields: &[crate::config::FieldChange]) -> bool {
+pub(crate) fn is_crop_case(fields: &[crate::config::FieldChange]) -> bool {
     let assignments = fields
         .iter()
         .filter(|field| {
@@ -3340,6 +3340,9 @@ fn validate_bgc_runtime(
             .unwrap_or(default)
     };
     let bgc = logical("DEF_USE_BGC", false);
+    if is_crop_case(fields) && !bgc {
+        return Err("作物过程需要开启 DEF_USE_BGC / Crop processes require DEF_USE_BGC".into());
+    }
     if !bgc {
         return Ok(());
     }

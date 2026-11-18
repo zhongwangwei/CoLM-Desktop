@@ -1001,3 +1001,18 @@ fn successful_preprocessing_is_not_failed_by_an_unwritable_launch_record() {
     );
     std::fs::remove_dir_all(case.parent().unwrap()).unwrap();
 }
+
+#[test]
+fn fortran_crop_check_keeps_prepared_cases_without_original_site_runnable() {
+    let dir = test_directory("fortran-crop-missing-site");
+    std::fs::create_dir_all(&dir).unwrap();
+    let case = dir.join("case.nml");
+    std::fs::write(&case, "&nl_colm\n SITE_fsitedata='missing.nc'\n/\n").unwrap();
+    assert!(!case_is_crop(&case, false).unwrap());
+    assert!(rust_case_is_crop(&case).is_err());
+    std::fs::write(dir.join(".colm-desktop.json"), r#"{"crop":true}"#).unwrap();
+    assert!(case_is_crop(&case, false).unwrap());
+    std::fs::remove_file(dir.join(".colm-desktop.json")).unwrap();
+    std::fs::write(&case, "&nl_colm\n SITE_fsitedata='null'\n/\n").unwrap();
+    assert!(!case_is_crop(&case, false).unwrap());
+}

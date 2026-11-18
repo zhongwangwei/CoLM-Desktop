@@ -56,3 +56,21 @@ it('write conflicts and name clashes are recognisable by stable markers', () => 
   assert.equal(CONTENT_CONFLICT, 'content-conflict:');
   assert.equal(ALREADY_EXISTS, 'already-exists:');
 });
+
+it('transaction recovery errors identify preserved files and backups', () => {
+  const failure =
+    'rollback incomplete: files changed again during the operation; originals retained at /tmp/workspace/.edit-backup-1';
+  const [zh, en] = workspaceErrorText(failure);
+  assert.match(zh, /已保留当前文件/);
+  assert.match(zh, /\/tmp\/workspace\/\.edit-backup-1/);
+  assert.equal(en, failure);
+  assert.match(
+    workspaceErrorText('workspace is busy or its legacy writer cannot be checked')[0],
+    /旧版写入/,
+  );
+  assert.match(workspaceErrorText('Git output contains non-UTF-8 text or file paths')[0], /UTF-8/);
+  assert.match(
+    workspaceErrorText('cannot read local Git ignore rules; original file preserved')[0],
+    /保留原文件/,
+  );
+});

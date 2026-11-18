@@ -161,8 +161,12 @@ if action in ('publish', 'abort', 'sync'):
             if not (value.is_dir() if check['directory'] else value.is_file()):
                 raise ValueError('required server input does not exist: ' + str(value))
         for name, text in files.items():
-            if pathlib.PurePosixPath(name).name != name or not name.endswith('.nml') or not isinstance(text, str):
-                raise ValueError('only flat namelist text can be published')
+            if pathlib.PurePosixPath(name).name != name or not (name.endswith('.nml') or name == '.colm-desktop.json') or not isinstance(text, str):
+                raise ValueError('only flat namelist text and crop metadata can be published')
+            if name == '.colm-desktop.json':
+                metadata = json.loads(text)
+                if set(metadata) != {'crop'} or not isinstance(metadata['crop'], bool):
+                    raise ValueError('invalid crop metadata')
             if (out / name).is_symlink():
                 raise ValueError('refusing to overwrite a symlink')
         staged = []
@@ -317,7 +321,15 @@ try:
     kind = r['kind']
     if kind == 'site':
         args = flags(['new', '--out', str(out)], ['site', 'name', 'start', 'end', 'rawdata', 'runtime', 'met', 'mode'])
-        if any(f['path'].upper() == 'DEF_TUNING_CROP_PLANTING_DAY' for f in r.get('fields', [])):
+        fields = {f['path'].upper(): str(f['value']).strip().lower() for f in r.get('fields', [])}
+        crop = r.get('crop') is True or any(fields.get(name) in ('.true.', 'true', 't')
+                                          for name in ('DEF_USE_CROP', 'DEF_USE_IRRIGATION'))
+        try:
+            day = float(fields.get('DEF_TUNING_CROP_PLANTING_DAY', '0').split('_')[0].replace('d', 'e'))
+            crop = crop or (0 < day < float('inf'))
+        except ValueError:
+            pass
+        if crop:
             args.extend(['--crop', '1'])
         call(args)
     else:

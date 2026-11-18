@@ -933,6 +933,69 @@ fn hourly_case(tag: &str, labels_minutes: &[f64], values: &[f64]) -> PathBuf {
 }
 
 #[test]
+fn metric_reports_insufficient_pairs_for_short_or_undersampled_history() {
+    let _guard = super::netcdf_test_guard();
+    let base = colm_hist::time::minutes_from_1900(2008) as f64;
+    for (tag, frequency, labels, values, step, expected) in [
+        (
+            "single-partial",
+            "DAILY",
+            vec![base],
+            vec![1.0],
+            1800,
+            "only 1 valid interval pairs",
+        ),
+        (
+            "undersampled",
+            "TIMESTEP",
+            vec![base + 30.0, base + 60.0, base + 90.0],
+            vec![1.0; 3],
+            900,
+            "only 0 valid interval pairs",
+        ),
+    ] {
+        let case = metric_case(tag, "Sample", &format!(" DEF_HIST_FREQ = '{frequency}'\n DEF_simulation_time%greenwich = .false.\n DEF_simulation_time%start_year = 2008\n DEF_simulation_time%start_month = 1\n DEF_simulation_time%start_day = 1\n DEF_simulation_time%start_sec = 0\n DEF_simulation_time%timestep = {step}."));
+        write_axis_history(
+            &case.join("out/Sample/history/Sample_hist_2008-01.nc"),
+            &labels,
+            &[("f_rnet", values)],
+        );
+        let obs = case.join("obs.nc");
+        let seconds = (0..25).map(|i| f64::from(i) * 1800.0).collect::<Vec<_>>();
+        write_obs_time_units(
+            &obs,
+            "seconds since 2008-01-01 00:00:00",
+            "W/m2",
+            &seconds,
+            &[("Rnet", vec![1.0; 25]), ("Rnet_qc", vec![0.0; 25])],
+        );
+        let result = super::compute_metric_rows(super::MetricsRequest {
+            case: &case,
+            obs_path: &obs,
+            spinup: 0,
+            json: true,
+            corrected: false,
+            summary_only: false,
+            pair_vars: Vec::new(),
+            pair_max_points: None,
+            from: None,
+            to: None,
+            point: None,
+            obs_label_position: None,
+            history_frequency: None,
+            min_coverage: super::DEFAULT_MIN_COVERAGE,
+        });
+        let error = match result {
+            Ok(_) => panic!("missing insufficient-pair error for {tag}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains(expected), "{error}");
+        assert!(error.contains("observation step 1800 s"), "{error}");
+        std::fs::remove_dir_all(case.parent().unwrap()).unwrap();
+    }
+}
+
+#[test]
 fn metric_pairs_daily_output_with_whole_day_observation_means() {
     let _guard = super::netcdf_test_guard();
     let case = metric_case(

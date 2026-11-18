@@ -407,3 +407,49 @@ fn patch_staging_failure_restores_worktree_without_touching_another_index_lock()
     assert!(!git::is_dirty(&ws.src()).unwrap());
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn ignored_patch_path_cannot_leave_a_partly_staged_edit() {
+    let (root, ws) = fresh("patch-ignored-rollback");
+    std::fs::write(ws.src().join(".git/info/exclude"), "data.nc\n").unwrap();
+    let module = "vendor/CoLM202X/main/MOD_Demo.F90";
+    let original = std::fs::read(ws.src().join(module)).unwrap();
+    let index = std::fs::read(ws.src().join(".git/index")).unwrap();
+    let diff = format!("{FORTRAN_DIFF}diff --git a/data.nc b/data.nc\nnew file mode 100644\n--- /dev/null\n+++ b/data.nc\n@@ -0,0 +1 @@\n+data\n");
+    let error = apply(&ws, &diff, "ignored file").unwrap_err();
+    assert!(
+        !format!("{error:#}").contains("rollback incomplete"),
+        "{error:#}"
+    );
+    assert_eq!(std::fs::read(ws.src().join(module)).unwrap(), original);
+    assert!(!ws.src().join("data.nc").exists());
+    // Status may refresh stat data; selected staged contents remain untouched.
+    assert!(git::run(&ws.src(), &["diff", "--cached"])
+        .unwrap()
+        .is_empty());
+    assert!(!index.is_empty());
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn partial_patch_io_failure_restores_the_files_git_already_changed() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, ws) = fresh("patch-partial-io");
+    std::fs::create_dir(ws.src().join("ro")).unwrap();
+    std::fs::set_permissions(ws.src().join("ro"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let module = "vendor/CoLM202X/main/MOD_Demo.F90";
+    let original = std::fs::read(ws.src().join(module)).unwrap();
+    let diff = format!("{FORTRAN_DIFF}diff --git a/ro/new.txt b/ro/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/ro/new.txt\n@@ -0,0 +1 @@\n+new\n");
+    let error = apply(&ws, &diff, "readonly parent").unwrap_err();
+    std::fs::set_permissions(ws.src().join("ro"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        !format!("{error:#}").contains("rollback incomplete"),
+        "{error:#}"
+    );
+    assert_eq!(std::fs::read(ws.src().join(module)).unwrap(), original);
+    assert!(!ws.src().join("ro/new.txt").exists());
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}

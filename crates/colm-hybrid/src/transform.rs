@@ -81,7 +81,7 @@ pub fn apply_output(spec: &OutputSpec, raw: f64) -> Result<f64> {
         (Transform::Identity, _) => raw,
         (Transform::Clamp, Some([lo, hi])) => raw.clamp(lo, hi),
         (Transform::Sigmoid, Some([lo, hi])) => lo + (hi - lo) / (1.0 + (-raw).exp()),
-        (Transform::Softplus, Some([lo, _])) => lo + raw.exp().ln_1p(),
+        (Transform::Softplus, Some([lo, _])) => lo + (raw.max(0.0) + (-raw.abs()).exp().ln_1p()),
         (transform, None) => bail!("output {} needs a range for {transform:?}", spec.name),
     };
     if let Some([lo, hi]) = spec.range {

@@ -242,6 +242,64 @@ fn classify_trusts_a_declared_matching_frequency() {
 }
 
 #[test]
+fn one_partial_record_keeps_its_declared_period_and_exact_write_time() {
+    for frequency in [
+        HistoryFrequency::Hourly,
+        HistoryFrequency::Daily,
+        HistoryFrequency::Monthly,
+        HistoryFrequency::Yearly,
+    ] {
+        let window = SimulationWindow {
+            end_julian_day: 1,
+            end_seconds: 1200,
+            timestep_seconds: 600,
+            ..cn_cng_window()
+        };
+        let labels = labels_of(window, frequency);
+        assert_eq!(labels.len(), 1);
+        let resolution = classify_frequency(&labels, Some(frequency), Some(600)).unwrap();
+        assert_eq!(resolution.frequency, frequency);
+        let intervals = record_intervals(
+            &labels,
+            resolution.frequency,
+            Some(600),
+            Some(start_tick_2008()),
+        )
+        .unwrap();
+        assert_eq!(intervals[0].begin_tick_seconds, start_tick_2008());
+        assert_eq!(intervals[0].end_tick_seconds, start_tick_2008() + 1200);
+        assert!(!intervals[0].natural_boundary);
+        assert!(classify_frequency(&labels, None, Some(600)).is_err());
+    }
+}
+
+#[test]
+fn timestep_hint_must_fit_nonterminal_gaps_but_allows_missing_and_final_records() {
+    for step in [90, 75, 100] {
+        assert!(
+            classify_frequency(&[1, 3, 4, 6], Some(HistoryFrequency::Timestep), Some(step))
+                .unwrap_err()
+                .to_string()
+                .contains("whole number of minutes")
+        );
+    }
+    assert!(
+        classify_frequency(&[0, 30, 60], Some(HistoryFrequency::Timestep), Some(3600))
+            .unwrap_err()
+            .to_string()
+            .contains("conflicts")
+    );
+    for (labels, step) in [(vec![0, 30, 60], 900), (vec![30, 90, 120, 135], 1800)] {
+        let resolution =
+            classify_frequency(&labels, Some(HistoryFrequency::Timestep), Some(step)).unwrap();
+        let intervals = record_intervals(&labels, resolution.frequency, Some(step), None).unwrap();
+        assert!(intervals
+            .iter()
+            .all(|interval| interval.end_tick_seconds - interval.begin_tick_seconds <= step));
+    }
+}
+
+#[test]
 fn classify_infers_timestep_with_and_without_the_namelist_step() {
     let window = SimulationWindow {
         end_julian_day: 1,

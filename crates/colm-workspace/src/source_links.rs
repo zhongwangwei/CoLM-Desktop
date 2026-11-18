@@ -312,12 +312,10 @@ pub(crate) fn synchronize(root: &Path, edit: &mut git::Edit) -> Result<Vec<Strin
     };
     for (path, bytes) in copies {
         let relative = spelling(path.strip_prefix(root)?)?;
-        edit.change(&[relative], || Ok(std::fs::write(path, bytes)?))?;
+        edit.replace_file(&relative, &mut bytes.as_slice(), None)?;
     }
     if let Some(bytes) = metadata {
-        edit.change(&[SOURCE_LINKS_FILE.to_owned()], || {
-            Ok(std::fs::write(root.join(SOURCE_LINKS_FILE), bytes)?)
-        })?;
+        edit.replace_file(SOURCE_LINKS_FILE, &mut bytes.as_slice(), None)?;
     }
     Ok(changed)
 }

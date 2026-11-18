@@ -72,6 +72,7 @@ export default function RunPanel({
     classification?: 'IGBP' | 'USGS';
     subgrid?: string;
     crop?: boolean;
+    crop_problem?: string | null;
     engine?: string;
   } | null;
   disabled?: boolean;
@@ -698,6 +699,10 @@ export default function RunPanel({
           t('申请 CPU 数须为 1–1024 的整数', 'Requested CPUs must be an integer from 1 to 1024'),
         );
       const selectedKernel = state.kernels.find((entry) => entry.dir === kernel);
+      const cropProblem = [effectiveProfile, ...Object.values(batchProfiles ?? {})].find(
+        (profile) => profile?.crop_problem,
+      )?.crop_problem;
+      if (cropProblem) throw new Error(cropProblem);
       if (selectedKernel) {
         const crop = [effectiveProfile, ...Object.values(batchProfiles ?? {})].some(
           (profile) => profile?.crop ?? cropEnabled(effectiveModelFields(state.version?.overlay)),

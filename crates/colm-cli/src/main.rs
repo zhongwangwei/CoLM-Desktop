@@ -321,7 +321,7 @@ fn main() -> Result<()> {
     if let Some(code) = colm_remote::auth::run_askpass_if_requested() {
         std::process::exit(code);
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args = command_arguments(std::env::args_os().skip(1))?;
     let Some(cmd) = args.first() else {
         print!("{USAGE}");
         std::process::exit(2);
@@ -532,6 +532,11 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         // 到运行的地表数据阶段才报缺变量，界面却写着"点选即生效"（GUI 审查 2026-10-22）。
         "site-classes" => {
             let site = opts.positional_at(0, "a site.nc file")?;
+            let landtype = opts
+                .get("--landtype")
+                .map(|value| value.parse::<i32>())
+                .transpose()
+                .context("--landtype must be an integer")?;
             let file =
                 netcdf::open(&site).with_context(|| format!("cannot open {}", site.display()))?;
             println!(
@@ -539,8 +544,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                 serde_json::json!({
                     "igbp": file.variable("IGBP_classification").is_some(),
                     "usgs": file.variable("USGS_classification").is_some(),
-                    "crop": colm_srfdata::site::crop_site(&site,
-                        colm_srfdata::site::landtype_for_mode(&site, colm_srfdata::site::SiteMode::Igbp)?)?,
+                    "crop": site_crop_with_landtype(&site, landtype)?,
                 })
             );
         }
@@ -1210,6 +1214,17 @@ fn observation_convert_options(opts: &Opts) -> Result<observation_table::Convert
     })
 }
 
+fn command_arguments(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<String>> {
+    args.into_iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            argument
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("command argument {} is not valid UTF-8", index + 1))
+        })
+        .collect()
+}
+
 struct Opts {
     flags: Vec<(String, String)>,
     positional: Vec<String>,
@@ -1220,6 +1235,10 @@ impl Opts {
         let (mut flags, mut positional) = (Vec::new(), Vec::new());
         let mut i = 0;
         while i < args.len() {
+            if args[i] == "--" {
+                positional.extend_from_slice(&args[i + 1..]);
+                break;
+            }
             // 自由文本还支持 `--note=--example`：文本以 `--` 开头且后面还有参数时，这是无歧义写法。
             if let Some((name, value)) = args[i]
                 .strip_prefix("--")
@@ -2685,17 +2704,24 @@ fn rust_model_land_cover(kernel: &Kernel) -> Result<&'static str> {
 /// 现在单点算例可以直接从站点文件判定（`croptyp`/`pctcrop`），所以默认内核也能跑。
 /// 空间算例从 DEF_USE_CROP / 作物设置判断；预处理仍按 rawdata 的作物份额建 patch。
 fn rust_case_is_crop(case_nml: &Path) -> Result<bool> {
+    case_is_crop(case_nml, true)
+}
+
+fn case_is_crop(case_nml: &Path, require_site: bool) -> Result<bool> {
     let text = std::fs::read_to_string(case_nml)
         .with_context(|| format!("cannot read {}", case_nml.display()))?;
     let document = colm_namelist::parse(&text)
         .with_context(|| format!("cannot parse {}", case_nml.display()))?;
-    if colm_case::crop_enabled(&document) {
+    if colm_case::crop_required(
+        &document,
+        case_nml.parent().unwrap_or_else(|| Path::new(".")),
+    )? {
         return Ok(true);
     }
     let Some(colm_namelist::Value::Str(site)) = document.get("SITE_fsitedata") else {
         return Ok(false);
     };
-    if site.trim().is_empty() {
+    if site.trim().is_empty() || site.trim().eq_ignore_ascii_case("null") {
         return Ok(false);
     }
     let case_dir = case_nml
@@ -2708,6 +2734,9 @@ fn rust_case_is_crop(case_nml: &Path) -> Result<bool> {
     } else {
         case_dir.join(site)
     };
+    if !require_site && !site.is_file() {
+        return Ok(false);
+    }
     // SITE_landtype 不是唯一来源：站点文件自带 IGBP_classification，旧算例可以不写
     // SITE_landtype。先读 namelist，再回落到站点文件的有效地类，否则农田站点会被判成非作物。
     let landtype = match document.get("SITE_landtype") {
@@ -2715,11 +2744,15 @@ fn rust_case_is_crop(case_nml: &Path) -> Result<bool> {
         Some(colm_namelist::Value::Int(value)) if *value >= 0 => Some(i32::try_from(*value)?),
         _ => None,
     };
-    let landtype = match landtype {
+    site_crop_with_landtype(&site, landtype)
+}
+
+fn site_crop_with_landtype(site: &Path, landtype: Option<i32>) -> Result<bool> {
+    let landtype = match landtype.filter(|value| *value >= 0) {
         Some(value) => Some(value),
-        None => colm_srfdata::site::landtype_for_mode(&site, colm_srfdata::site::SiteMode::Igbp)?,
+        None => colm_srfdata::site::landtype_for_mode(site, colm_srfdata::site::SiteMode::Igbp)?,
     };
-    colm_srfdata::site::crop_site(&site, landtype)
+    colm_srfdata::site::crop_site(site, landtype)
 }
 
 fn rust_model_crop_arguments(kernel: &Kernel, crop_case: bool) -> Vec<String> {
@@ -3975,11 +4008,14 @@ fn run_case(
             path.display()
         );
     }
-    let rust_crop_case = if engine == ModelEngine::Rust {
-        rust_case_is_crop(&layout.case_nml())?
-    } else {
-        false
-    };
+    let crop_case = case_is_crop(&layout.case_nml(), engine == ModelEngine::Rust)?;
+    let rust_crop_case = engine == ModelEngine::Rust && crop_case;
+    ensure!(
+        engine != ModelEngine::Fortran
+            || !crop_case
+            || kernel.manifest.macros.iter().any(|name| name == "CROP"),
+        "Fortran crop cases require a CROP kernel"
+    );
     // Rust CROP 已经把 CROP 从编译期改成运行时；Fortran 前处理器仍按 CROP 宏决定
     // 是否生成作物 patch。两者混用时，没有 CROP 宏会让 Fortran 生成非作物地表再交给
     // Rust 作物主循环，属于静默错配，必须拒绝。
@@ -5713,6 +5749,11 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
         declared_frequency.or(schedule.declared_frequency),
         schedule.timestep_seconds,
     )?;
+    if labels.len() == 1 && declared_frequency.is_none() {
+        metric_warnings.push(
+            "history 只有一条记录，输出频率采用算例声明；请核对生成此文件时的配置".to_string(),
+        );
+    }
     if let Some(declared) = resolution.declared {
         if declared != resolution.frequency {
             metric_warnings.push(format!(
@@ -5786,6 +5827,8 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
         );
     }
     let mut rows: Vec<VarMetrics> = Vec::new();
+    let mut insufficient_pairs = Vec::new();
+    let mut computed = 0usize;
     for (variable, source) in selected {
         let o_name = variable.observation;
         // 值/单位/QC/订正走同一个解码入口：packing 在原始域解、单位不支持就拒绝、
@@ -5869,8 +5912,13 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
         let with_time = pairing.pairs;
         let pairs: Vec<(f64, f64)> = with_time.iter().map(|(_, a, b)| (*a, *b)).collect();
         let Some(m) = colm_hist::metric::compute(&pairs) else {
+            insufficient_pairs.push(format!(
+                "{o_name}: only {} valid interval pairs (at least 2 required); output frequency {}, timestep hint {:?} s, observation step {obs_step} s; check the run's frequency/timestep, missing records, observation coverage and selected window",
+                pairs.len(), history_frequency_name(resolution.frequency), schedule.timestep_seconds
+            ));
             continue;
         };
+        computed += 1;
         if json {
             let pair_source_n = with_time.len();
             let pair_gaps = by_sec
@@ -6018,6 +6066,15 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
             }
             None => println!(),
         }
+    }
+    if computed == 0 && !insufficient_pairs.is_empty() {
+        bail!("cannot compute metrics: {}", insufficient_pairs.join("; "));
+    }
+    for warning in &insufficient_pairs {
+        eprintln!("warning: {warning}");
+    }
+    for row in &mut rows {
+        row.warnings.extend(insufficient_pairs.iter().cloned());
     }
     Ok(rows)
 }
@@ -8932,6 +8989,36 @@ mod option_boundary_tests {
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
     }
+    #[test]
+    fn option_terminator_preserves_all_remaining_positional_arguments() {
+        let opts =
+            Opts::parse(&args(&["--root", "root", "--", "--case", "--offline", "x"])).unwrap();
+        assert_eq!(opts.get("--root").as_deref(), Some("root"));
+        assert_eq!(opts.positional, ["--case", "--offline", "x"]);
+        assert_eq!(opts.get("--offline"), None);
+        assert!(Opts::parse(&args(&["--"])).unwrap().positional.is_empty());
+    }
+
+    #[test]
+    fn command_arguments_preserve_valid_unicode_and_reject_invalid_encoding() {
+        assert_eq!(
+            command_arguments([std::ffi::OsString::from("站点")]).unwrap(),
+            ["站点"]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let error = command_arguments([std::ffi::OsString::from_vec(vec![0xff])]).unwrap_err();
+            assert!(error.to_string().contains("argument 1 is not valid UTF-8"));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let error = command_arguments([std::ffi::OsString::from_wide(&[0xd800])]).unwrap_err();
+            assert!(error.to_string().contains("argument 1 is not valid UTF-8"));
+        }
+    }
+
     #[test]
     fn missing_values_do_not_consume_flags_and_repeated_values_are_predictable() {
         assert!(Opts::parse(&args(&["--root", "--offline"])).is_err());

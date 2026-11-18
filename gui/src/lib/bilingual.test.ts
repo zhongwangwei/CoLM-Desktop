@@ -48,3 +48,14 @@ test('known build-stamp errors get the current language and an actionable hint',
   assert.equal(knownBackendError('some other backend failure'), 'some other backend failure');
   assert.equal(plainError('Error: plain failure'), 'plain failure');
 });
+
+test('a stale forcing edit is explained in the current language', () => {
+  const raw = '强迫场配置在校验期间已改变，请重新加载后保存';
+  withLanguage('zh', () => assert.equal(plainError(raw), raw));
+  withLanguage('en', () =>
+    assert.equal(
+      plainError(`Error: ${raw}`),
+      'The forcing configuration changed during validation. Reload it before saving.',
+    ),
+  );
+});

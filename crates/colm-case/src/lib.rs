@@ -47,6 +47,37 @@ pub fn crop_enabled(doc: &colm_namelist::Document) -> bool {
             .is_some_and(|value| value.is_finite() && value > 0.0)
 }
 
+/// Fortran keeps its CROP selection outside the namelist because the flag is a compile-time macro.
+pub fn crop_required(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+) -> anyhow::Result<bool> {
+    if crop_enabled(doc) {
+        return Ok(true);
+    }
+    if matches!(
+        doc.get("DEF_USE_CROP"),
+        Some(colm_namelist::Value::Bool(false))
+    ) {
+        return Ok(false);
+    }
+    Ok(crop_intent(case_dir)? == Some(true))
+}
+
+/// Explicit Desktop crop intent; unrelated metadata is not scientific identity.
+pub fn crop_intent(case_dir: &std::path::Path) -> anyhow::Result<Option<bool>> {
+    let path = case_dir.join(".colm-desktop.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let record: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|error| anyhow::anyhow!("{}: {error}", path.display()))?;
+            Ok(record.get("crop").and_then(serde_json::Value::as_bool))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(anyhow::anyhow!("{}: {error}", path.display())),
+    }
+}
+
 #[cfg(test)]
 #[test]
 fn crop_activation_requires_explicit_true_or_positive_finite_day() {

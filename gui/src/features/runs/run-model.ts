@@ -143,6 +143,8 @@ export function kernelRunProblem(
   ranks: number,
   crop: boolean,
 ): string | undefined {
+  if (engine === 'fortran' && crop && !macros.includes('CROP'))
+    return 'Fortran 作物算例需要 CROP 内核 / Fortran crop cases require a CROP kernel';
   if (engine === 'fortran' && ranks > 1 && !macros.includes('USEMPI'))
     return '多进程 Fortran 运行需要 USEMPI 内核 / Fortran runs with multiple ranks require a USEMPI kernel';
   if (engine === 'rust' && crop && preprocessors === 'fortran' && !macros.includes('CROP'))
@@ -173,10 +175,17 @@ export function remoteRunPermissions(value: unknown) {
   // while queued never writes one (land02, 2026-10-19). Over, but there is nothing to fetch.
   const ended =
     confirmed && status.state === 'lost' && (data.ended === 'cancelled' || data.ended === 'failed');
+  // A packed station can outlive its carrier. Cancellation only queues its station request.
+  const unresolvedStation =
+    typeof record.scheduler === 'string' &&
+    record.scheduler.endsWith('-pack') &&
+    ['unknown', 'lost'].includes(String(status.state)) &&
+    !ended;
   return {
     pending,
     terminal: finished || ended,
-    cancel: confirmed && ['queued', 'running'].includes(String(status.state)),
+    cancel:
+      confirmed && (['queued', 'running'].includes(String(status.state)) || unresolvedStation),
     fetch: finished,
   };
 }

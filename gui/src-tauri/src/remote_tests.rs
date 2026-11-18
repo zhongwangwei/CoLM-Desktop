@@ -143,6 +143,17 @@ fn scheduler_settings_are_validated() {
     // 与 CLI 的 parse_walltime 同口径：`8`、`0:00` 保存时就拒绝，不等远程提交（F-C-03）。
     assert!(check(&|s| s.walltime = "8".into()).is_err());
     assert!(check(&|s| s.walltime = "0:00".into()).is_err());
+    for overflow in [
+        "184467440737095516-00:00:00",
+        "18446744073709551615:00",
+        "00:18446744073709551615",
+        "00:01:18446744073709551615",
+    ] {
+        assert!(
+            check(&|s| s.walltime = overflow.into()).is_err(),
+            "{overflow}"
+        );
+    }
     assert!(check(&|s| s.walltime = "08:00".into()).is_ok());
     assert!(check(&|s| s.walltime = "1-02:00".into()).is_ok());
     assert!(check(&|s| s.walltime = "1-02:00:30".into()).is_ok());

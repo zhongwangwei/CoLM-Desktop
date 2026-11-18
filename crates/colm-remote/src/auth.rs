@@ -517,7 +517,11 @@ fn start_gui_relay(gui_address: String, gui_token: String) -> Result<(String, St
 }
 
 fn askpass() -> Result<()> {
-    let prompt = std::env::args().nth(1).unwrap_or_default();
+    let prompt = std::env::args_os()
+        .nth(1)
+        .unwrap_or_default()
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("SSH prompt is not valid UTF-8"))?;
     let secret = request_secret(&std::env::var(BROKER)?, &std::env::var(TOKEN)?, &prompt)?;
     std::io::stdout().write_all(&secret)?;
     Ok(())
