@@ -318,6 +318,10 @@ impl Drop for Session {
     }
 }
 fn serve(mut stream: TcpStream, token: &str, operation: &Arc<Operation>, deadline: Instant) {
+    // Accepted sockets can inherit the listener's nonblocking mode on macOS.
+    if stream.set_nonblocking(false).is_err() {
+        return;
+    }
     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
     let handshake_deadline = Instant::now() + Duration::from_secs(3);

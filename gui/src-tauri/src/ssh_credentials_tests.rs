@@ -29,6 +29,41 @@ fn pending() -> AuthSnapshot {
     }
 }
 #[test]
+fn an_accepted_nonblocking_socket_waits_for_the_full_prompt() {
+    let _lock = TEST_LOCK.lock().unwrap();
+    let session = Session::new("delayed-prompt".into()).unwrap();
+    session.operation.pid.store(u32::MAX, Ordering::SeqCst);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let (stream, _) = listener.accept().unwrap();
+    stream.set_nonblocking(true).unwrap();
+    let operation = session.operation.clone();
+    let token = session.token.clone();
+    let (finished, observed) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        serve(stream, &token, &operation, Instant::now() + DEADLINE);
+        let _ = finished.send(());
+    });
+    let (first, rest) = session.token.as_bytes().split_at(16);
+    client.write_all(first).unwrap();
+    assert_eq!(
+        observed.recv_timeout(Duration::from_millis(100)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    );
+    client.write_all(rest).unwrap();
+    client.write_all(b"Password: \n").unwrap();
+    let request = pending().requests.remove(0);
+    respond(request.request_id, Some("delayed-secret".into())).unwrap();
+    let mut reply = Vec::new();
+    client.read_to_end(&mut reply).unwrap();
+    assert_eq!(reply, b"delayed-secret");
+    worker.join().unwrap();
+}
+
+#[test]
 fn socket_framing_repeated_prompts_redaction_and_stale_response() {
     let _lock = TEST_LOCK.lock().unwrap();
     let session = Session::new("server-one".into()).unwrap();
