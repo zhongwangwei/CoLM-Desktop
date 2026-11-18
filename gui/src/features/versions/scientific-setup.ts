@@ -9,12 +9,12 @@ import {
   unquote,
   type ConfigurationField,
   type ConfigurationResult,
-  type CaseOptionPatch,
 } from './configuration-options';
 export type SetupContext = Pick<ConfigurationResult, 'fields' | 'process_files' | 'crop_defaults'>;
 export type SetupRequest = { id: string; value: string };
 export type SetupEnvironment = {
   engine?: string;
+  siteCrop?: boolean;
   subgrid?: string;
   caseValues?: Record<string, string>;
   domain?: string | null;
@@ -125,8 +125,19 @@ export function setupChoices(
   const methaneKnown =
     methaneModes.length > 0 &&
     methaneModes.every((m) => m !== null && [...riverModes, ...nonRiverModes].includes(m));
-  const crop = cropEnabled(effectiveModelFields(overlay)),
-    compiledCrop = environment.kernel?.macros.includes('CROP') === true;
+  const compiledCrop = environment.kernel?.macros.includes('CROP') === true;
+  const requiredCrop = compiledCrop || (isSite(environment) && environment.siteCrop === true);
+  const crop =
+    requiredCrop ||
+    cropEnabled({
+      ...Object.fromEntries(
+        queryFields
+          .filter((field) => field.configured_value != null)
+          .map((field) => [field.name, field.configured_value!]),
+      ),
+      ...environment.caseValues,
+      ...effectiveModelFields(overlay),
+    });
   function reason(id: string, v: string): string {
     if (
       !controls
@@ -179,7 +190,7 @@ export function setupChoices(
     if (
       v === '.false.' &&
       id === 'DEF_USE_BGC' &&
-      (compiledCrop || (crop && !environment.autoClose))
+      (requiredCrop || (crop && !environment.autoClose))
     )
       return compiledCrop
         ? bilingual(
@@ -194,6 +205,16 @@ export function setupChoices(
       !environment.autoClose
     )
       return bilingual('请先关闭材料过程', 'Disable materials first');
+    if (id === 'crop' && v === '.false.' && requiredCrop)
+      return compiledCrop
+        ? bilingual(
+            '当前 CROP 内核固定启用作物过程',
+            'The selected CROP kernel requires crop processes',
+          )
+        : bilingual(
+            '当前作物站点需要作物过程；请先选择非作物站点',
+            'This crop site requires crop processes; select a non-crop site first',
+          );
     if (v === '.false.') return '';
     if (id !== 'crop') {
       const blocked = (
@@ -392,9 +413,15 @@ export function setupChoices(
 export function cropRuntimeCasePatch(
   request: SetupRequest,
   environment: SetupEnvironment,
-): CaseOptionPatch {
-  if (request.id !== 'crop' || isSite(environment) || environment.engine !== 'rust') return {};
-  return { DEF_USE_CROP: request.value === '.true.' ? '.true.' : '.false.' };
+): Record<string, string> {
+  if (request.id !== 'crop') return {};
+  if (request.value === '.false.')
+    return {
+      ...(environment.engine === 'rust' ? { DEF_USE_CROP: '.false.' } : {}),
+      DEF_USE_IRRIGATION: '.false.',
+    };
+  if (isSite(environment) || environment.engine !== 'rust') return {};
+  return { DEF_USE_CROP: '.true.' };
 }
 
 export function applySetupRequest(

@@ -507,3 +507,16 @@ test('kernel preflight rejects known macro conflicts without restricting valid R
   assert.equal(kernelRunProblem(['CROP'], 'rust', 'fortran', 1, true), undefined);
   assert.equal(kernelRunProblem([], 'rust', 'fortran', 1, false), undefined);
 });
+
+test('an orphaned pack queue must be cancelled before another submission', () => {
+  const queued = {
+    record: { host: 'land02', job: 'run-1', scheduler: 'slurm-pack' },
+    status: { state: 'queued', detail: 'node pack has no confirmed active carrier' },
+  };
+  assert.equal(remoteRunPermissions(queued).cancel, true);
+  assert.equal(remoteSubmissionBlocked(queued), true);
+  const cancelled = { ...queued, status: { state: 'lost' }, ended: 'cancelled' };
+  assert.equal(remoteSubmissionBlocked(cancelled), false);
+  assert.equal(remoteRunPermissions(cancelled).fetch, false);
+  assert.equal(remoteSubmissionBlocked({ ...cancelled, ended: null }), true);
+});

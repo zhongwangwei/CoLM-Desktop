@@ -254,7 +254,7 @@ pub(crate) fn check_native_links(root: &Path, aliases: &[PathBuf]) -> Result<()>
 }
 
 /// Validate every copy before writing any, so divergent external edits are never overwritten.
-pub(crate) fn synchronize(root: &Path) -> Result<Vec<String>> {
+pub(crate) fn synchronize(root: &Path, edit: &mut git::Edit) -> Result<Vec<String>> {
     let original = source_links(root)?;
     if original.is_empty() {
         return Ok(Vec::new());
@@ -311,10 +311,13 @@ pub(crate) fn synchronize(root: &Path) -> Result<Vec<String>> {
         None
     };
     for (path, bytes) in copies {
-        std::fs::write(path, bytes)?;
+        let relative = spelling(path.strip_prefix(root)?)?;
+        edit.change(&[relative], || Ok(std::fs::write(path, bytes)?))?;
     }
     if let Some(bytes) = metadata {
-        std::fs::write(root.join(SOURCE_LINKS_FILE), bytes)?;
+        edit.change(&[SOURCE_LINKS_FILE.to_owned()], || {
+            Ok(std::fs::write(root.join(SOURCE_LINKS_FILE), bytes)?)
+        })?;
     }
     Ok(changed)
 }

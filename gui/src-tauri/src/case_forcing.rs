@@ -9,7 +9,8 @@ pub struct ForcingInput {
     pub dataset: Option<String>,
 }
 
-pub(super) struct Prepared {
+pub(crate) struct Prepared {
+    pub(super) reference: Option<String>,
     pub path: PathBuf,
     pub text: String,
     source: Option<(PathBuf, String)>,
@@ -164,6 +165,7 @@ pub(super) fn prepare(dirs: &[String], input: &ForcingInput) -> Result<Prepared,
         Err(e) => return Err(e.to_string()),
     };
     Ok(Prepared {
+        reference: Some("forcing.nml".into()),
         path,
         text,
         source,
@@ -172,6 +174,21 @@ pub(super) fn prepare(dirs: &[String], input: &ForcingInput) -> Result<Prepared,
 }
 
 impl Prepared {
+    pub(crate) fn replacement(
+        path: PathBuf,
+        previous: String,
+        text: String,
+        case: (PathBuf, String),
+    ) -> Self {
+        Self {
+            path,
+            text,
+            previous: Some(previous),
+            source: Some(case),
+            reference: None,
+        }
+    }
+
     pub(super) fn unchanged(&self) -> Result<(), String> {
         let current = match std::fs::read_to_string(&self.path) {
             Ok(text) => Some(text),

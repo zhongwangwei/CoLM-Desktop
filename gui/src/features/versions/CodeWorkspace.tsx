@@ -197,8 +197,8 @@ export default function CodeWorkspace({
   useEffect(() => {
     if (!name || disabled) return;
     let live = true;
-    const check = () => {
-      if (!live || lock.current) return;
+    const checkExternalEdits = () => {
+      if (!live || lock.current || sourceRef.current?.busy) return;
       void invokeJson<Snapshot>('workspace_snapshot', { name })
         .then(async (result) => {
           if (!live || !result.applied) return;
@@ -219,11 +219,11 @@ export default function CodeWorkspace({
           if (live) setError(t(...workspaceErrorText(String(e))));
         });
     };
-    check();
-    globalThis.addEventListener?.('focus', check);
+    checkExternalEdits();
+    globalThis.addEventListener?.('focus', checkExternalEdits);
     return () => {
       live = false;
-      globalThis.removeEventListener?.('focus', check);
+      globalThis.removeEventListener?.('focus', checkExternalEdits);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name, disabled]);

@@ -372,3 +372,24 @@ test('readonly draft browsing selects its saved generation even without a matchi
   const selected = evaluate('./VersionsPage.tsx', 'draftCodeSource', 'const', { draft });
   assert.deepEqual(selected, { id: 'legacy', generation: 3 });
 });
+
+test('focus snapshot waits while the source file picker or mutation is busy', async () => {
+  const calls: string[] = [];
+  const sourceRef = { current: { busy: true } };
+  const check = evaluate<() => void>('./CodeWorkspace.tsx', 'checkExternalEdits', 'const', {
+    live: true,
+    lock: { current: false },
+    sourceRef,
+    name: 'ver-1',
+    invokeJson: async (command: string) => {
+      calls.push(command);
+      return { applied: null };
+    },
+  });
+  check();
+  assert.deepEqual(calls, []);
+  sourceRef.current.busy = false;
+  check();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls, ['workspace_snapshot']);
+});

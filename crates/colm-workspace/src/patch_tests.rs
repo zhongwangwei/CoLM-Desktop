@@ -355,3 +355,55 @@ fn diff_failure_retains_bounded_stderr_without_blocking() {
     assert!(error.contains("17"));
     assert!(error.len() < 17 * 1024);
 }
+
+#[test]
+fn hunk_payload_markers_are_contents_not_paths() {
+    let diff = "--- a/notes.txt\n+++ b/notes.txt\n@@ -1 +1 @@\n--- old heading\n+++ new heading\n--- a/second.txt\n+++ b/second.txt\n@@ -1 +1 @@\n-before\n+after\n";
+    assert_eq!(touched_paths(diff).unwrap(), ["notes.txt", "second.txt"]);
+    let (root, ws) = fresh("patch-payload-markers");
+    crate::files::create_text(&ws, "notes.txt", "-- old heading\n", "notes").unwrap();
+    crate::files::create_text(&ws, "second.txt", "before\n", "second").unwrap();
+    let applied = apply(&ws, diff, "update headings").unwrap();
+    assert_eq!(applied.files, ["notes.txt", "second.txt"]);
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join("notes.txt")).unwrap(),
+        "++ new heading\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn failed_patch_commit_restores_disk_and_index() {
+    let (root, ws) = fresh("patch-commit-failure");
+    let before = std::fs::read(ws.src().join("vendor/CoLM202X/main/MOD_Demo.F90")).unwrap();
+    let head = ws.head().unwrap();
+    git::run(&ws.src(), &["config", "user.name", ""]).unwrap();
+    assert!(apply(&ws, FORTRAN_DIFF, "edit").is_err());
+    assert_eq!(ws.head().unwrap(), head);
+    assert_eq!(
+        std::fs::read(ws.src().join("vendor/CoLM202X/main/MOD_Demo.F90")).unwrap(),
+        before
+    );
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn patch_staging_failure_restores_worktree_without_touching_another_index_lock() {
+    let (root, ws) = fresh("patch-staging-failure");
+    let before = std::fs::read(ws.src().join("vendor/CoLM202X/main/MOD_Demo.F90")).unwrap();
+    let index_lock = ws.src().join(".git/index.lock");
+    std::fs::write(&index_lock, "another Git operation").unwrap();
+    assert!(apply(&ws, FORTRAN_DIFF, "edit").is_err());
+    assert_eq!(
+        std::fs::read(ws.src().join("vendor/CoLM202X/main/MOD_Demo.F90")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read_to_string(&index_lock).unwrap(),
+        "another Git operation"
+    );
+    std::fs::remove_file(index_lock).unwrap();
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}

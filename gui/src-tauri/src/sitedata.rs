@@ -86,6 +86,7 @@ fn case_site_file(
 pub struct SiteClassifications {
     pub igbp: bool,
     pub usgs: bool,
+    pub crop: bool,
 }
 
 #[tauri::command]

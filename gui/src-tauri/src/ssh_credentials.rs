@@ -12,6 +12,7 @@ use tauri::Emitter;
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 static QUEUE: OnceLock<Mutex<Queue>> = OnceLock::new();
 const DEADLINE: Duration = Duration::from_secs(600);
+const MAX_CONNECTIONS: usize = 16;
 #[derive(Default)]
 struct Queue {
     revision: u64,
@@ -240,14 +241,24 @@ impl Session {
         let worker = operation.clone();
         let credential = token.clone();
         std::thread::spawn(move || {
+            let mut connections: Vec<std::thread::JoinHandle<()>> = Vec::new();
             while !worker.closed.load(Ordering::SeqCst) {
-                if worker.pid.load(Ordering::SeqCst) == 0 {
+                connections.retain(|connection| !connection.is_finished());
+                if worker.pid.load(Ordering::SeqCst) == 0 || connections.len() >= MAX_CONNECTIONS {
                     std::thread::sleep(Duration::from_millis(20));
                     continue;
                 }
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        serve(stream, &credential, &worker, Instant::now() + DEADLINE)
+                        let operation = worker.clone();
+                        let token = credential.clone();
+                        let deadline = Instant::now() + DEADLINE;
+                        match std::thread::Builder::new().spawn(move || {
+                            serve(stream, &token, &operation, deadline);
+                        }) {
+                            Ok(connection) => connections.push(connection),
+                            Err(_) => break,
+                        }
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(20))
@@ -258,6 +269,9 @@ impl Session {
             if !worker.closed.load(Ordering::SeqCst) {
                 close(&worker);
                 let _ = worker.stop();
+            }
+            for connection in connections {
+                let _ = connection.join();
             }
         });
         Ok(Self {

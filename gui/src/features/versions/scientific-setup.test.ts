@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   applySetupRequest,
+  cropRuntimeCasePatch,
   setupChoices,
   setupHandledKeys,
   type SetupEnvironment,
@@ -96,7 +97,7 @@ test('ordered setup displays defaults without creating overrides', () => {
 });
 test('upstream edits reject active incompatible children without changing the original', () => {
   let o = apply(overlay(), 'DEF_USE_BGC', '.true.');
-  o = apply(o, 'crop', '0');
+  o = apply(o, 'crop', '120', { ...environment, domain: 'site' });
   const before = structuredClone(o);
   assert.throws(() => apply(o, 'DEF_USE_BGC', '.false.'), /crop/);
   assert.throws(() => apply(o, 'subgrid', 'LCT'), /Unknown/);
@@ -327,7 +328,8 @@ test('current compiled CROP remains a BGC prerequisite after removing the planti
     /crop build configuration requires BGC/,
   );
   o.physics.DEF_TUNING_CROP_PLANTING_DAY = '0';
-  const withoutDay = apply(o, 'crop', '.false.', env);
+  assert.throws(() => apply(o, 'crop', '.false.', env), /CROP kernel/);
+  const withoutDay = apply(o, 'crop', '.false.', environment);
   assert.throws(
     () => apply(withoutDay, 'DEF_USE_BGC', '.false.', env),
     /crop build configuration requires BGC/,
@@ -406,7 +408,14 @@ test('enabling spatial crop resets a retained site planting day while site crop 
     );
     assert.equal(next.physics.DEF_TUNING_CROP_PLANTING_DAY, domain === 'site' ? '145' : '0');
     assert.equal(
-      setupChoices(next, fields, { ...environment, domain }).find((c) => c.id === 'crop')!.value,
+      setupChoices(next, fields, {
+        ...environment,
+        domain,
+        caseValues: cropRuntimeCasePatch(
+          { id: 'crop', value: '.true.' },
+          { ...environment, domain, engine: 'rust' },
+        ),
+      }).find((c) => c.id === 'crop')!.value,
       '.true.',
     );
   }
@@ -491,5 +500,18 @@ test('setup cards block exactly the combinations the backend rejects', () => {
       .find((choice) => choice.id === c.control)!
       .choices.find((choice) => choice.value === c.choice)!.reason;
     assert.equal(!!reason, c.kernel_rejects, `${c.name}: ${reason || 'allowed'}`);
+  }
+});
+
+test('crop site metadata and CROP kernels cannot be presented as crop-off', () => {
+  for (const env of [
+    { ...environment, engine: 'rust', domain: 'site', siteCrop: true, autoClose: true },
+    { ...environment, kernel: { ...kernel, macros: [...kernel.macros, 'CROP'] } },
+  ]) {
+    const option = setupChoices(overlay(), fields, env).find((item) => item.id === 'crop')!;
+    assert.equal(option.value, '.true.');
+    assert.match(option.choices.find((item) => item.value === '.false.')!.reason, /crop/i);
+    assert.throws(() => apply(overlay(), 'crop', '.false.', env), /crop/i);
+    assert.throws(() => apply(overlay(), 'DEF_USE_BGC', '.false.', env), /crop/i);
   }
 });

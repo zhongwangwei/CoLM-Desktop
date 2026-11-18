@@ -863,7 +863,7 @@ export default function NewCasePage() {
     ...Object.fromEntries(
       Object.entries(caseValues).filter(
         ([key, value]) =>
-          schema.some((f) => f.name === key) &&
+          (key === 'DEF_USE_CROP' || schema.some((f) => f.name === key)) &&
           // 单点算例不消费空间专属的地表裁取选项，残留值不再送给后端。
           (form.kind !== 'site' ||
             !(spatialSurfaceOnlyFields as readonly string[]).includes(key)) &&
@@ -1100,7 +1100,10 @@ export default function NewCasePage() {
     if (k === 'kind' || k === 'grid')
       reconcile(
         k === 'kind' && v !== 'site' && cropEnabled(physics)
-          ? { DEF_TUNING_CROP_PLANTING_DAY: '0' }
+          ? {
+              DEF_TUNING_CROP_PLANTING_DAY: '0',
+              ...(form.engine === 'rust' ? { DEF_USE_CROP: '.true.' } : {}),
+            }
           : {},
         k === 'kind' ? { domain: v } : { grid: v },
       );
@@ -1491,6 +1494,8 @@ export default function NewCasePage() {
         });
       } else {
         delete next.DEF_TUNING_CROP_PLANTING_DAY;
+        if ('DEF_USE_CROP' in next) next.DEF_USE_CROP = '.false.';
+        next.DEF_USE_IRRIGATION = '.false.';
         if (site.urban)
           Object.assign(next, {
             DEF_USE_BGC: '.false.',
@@ -1702,7 +1707,9 @@ export default function NewCasePage() {
     ([name, value]) =>
       name !== 'DEF_dir_output' &&
       value !== '' &&
-      (schema.some((f) => f.name === name) || name.startsWith('DEF_hist_vars%')),
+      (name === 'DEF_USE_CROP' ||
+        schema.some((f) => f.name === name) ||
+        name.startsWith('DEF_hist_vars%')),
   );
 
   function multiPlans(at: 3 | 5) {
@@ -3466,6 +3473,7 @@ export default function NewCasePage() {
           kernel={configurationKernel}
           setupEnvironment={{
             engine: form.engine,
+            siteCrop: form.kind === 'site' ? selected?.crop : undefined,
             subgrid: mode,
             caseValues: dataPatch,
             domain: form.kind,

@@ -293,6 +293,7 @@ test('Rust spatial crop writes the runtime marker instead of a planting-day over
   });
   assert.deepEqual(setup.cropRuntimeCasePatch({ id: 'crop', value: '.false.' }, environment), {
     DEF_USE_CROP: '.false.',
+    DEF_USE_IRRIGATION: '.false.',
   });
   assert.deepEqual(
     setup.cropRuntimeCasePatch(
@@ -300,6 +301,13 @@ test('Rust spatial crop writes the runtime marker instead of a planting-day over
       { ...environment, domain: 'single' },
     ),
     {},
+  );
+  assert.deepEqual(
+    setup.cropRuntimeCasePatch(
+      { id: 'crop', value: '.false.' },
+      { ...environment, engine: 'fortran' },
+    ),
+    { DEF_USE_IRRIGATION: '.false.' },
   );
 });
 

@@ -85,7 +85,7 @@ export default function CasesPage() {
   // 单点算例的站点文件带了哪几套分类（第 4 步的 IGBP/USGS 卡片用）；读不到就不限制。
   const [siteClasses, setSiteClasses] = useState<{
     dir: string;
-    value: { igbp: boolean; usgs: boolean };
+    value: { igbp: boolean; usgs: boolean; crop?: boolean };
   } | null>(null);
   const forcingSequence = useRef(0);
   useEffect(() => {
@@ -1083,7 +1083,7 @@ export default function CasesPage() {
   useEffect(() => {
     if (!dir || step !== 4 || !singlePointCase) return;
     let live = true;
-    invoke<{ igbp: boolean; usgs: boolean }>('site_classifications', { dir })
+    invoke<{ igbp: boolean; usgs: boolean; crop?: boolean }>('site_classifications', { dir })
       .then((value) => {
         if (live) setSiteClasses({ dir, value });
       })
@@ -1682,6 +1682,7 @@ export default function CasesPage() {
                 }}
                 setupEnvironment={{
                   engine,
+                  siteCrop: siteClasses?.dir === dir ? siteClasses.value.crop : undefined,
                   subgrid: effectiveProfile?.subgrid,
                   caseValues: configurationCaseValues(explicitValues, schema),
                   domain: caseSimulationDomain(effectiveProfile),

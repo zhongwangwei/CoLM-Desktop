@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 #[path = "case_forcing.rs"]
 mod case_forcing;
+pub(crate) use case_forcing::Prepared;
 pub use case_forcing::{case_forcing_input, case_namelist_preview, ForcingInput};
 
 #[path = "model_configuration.rs"]
@@ -1198,6 +1199,14 @@ impl<'a> VisibilityContext<'a> {
         self.site_landtype == if self.usgs { 17 } else { 11 }
     }
 
+    // Capability is broader than activation: a valid Rust PFT/PC+BGC case must be
+    // able to configure crop options before a crop flag or planting date exists.
+    fn crop_capable(&self) -> bool {
+        (self.crop || self.rust_engine && (self.pft || self.pc) && self.bgc)
+            && !self.urban
+            && (!self.single || self.cropland() || self.rust_engine && self.site_landtype < 0)
+    }
+
     fn cropland(&self) -> bool {
         self.site_landtype == if self.usgs { 7 } else { 12 }
     }
@@ -1361,11 +1370,8 @@ pub(crate) fn server_runtime_paths(
     case_dir: &std::path::Path,
     kernel_dir: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    let crop = kernel_facts(kernel_dir)?
-        .map(|facts| facts.crop)
-        .unwrap_or_else(|| {
-            doc.get("DEF_TUNING_CROP_PLANTING_DAY").is_some() || logical(doc, "DEF_USE_CROP")
-        });
+    let crop =
+        kernel_facts(kernel_dir)?.is_some_and(|facts| facts.crop) || colm_case::crop_enabled(doc);
     Ok(serde_json::Value::Array(
         runtime_paths(doc, case_dir, Some(crop))?
             .into_iter()
@@ -2101,20 +2107,11 @@ fn expert_tuning_runtime_state(
         return Some(hidden("仅 TOPMODEL 产流方案使用"));
     }
     if name.starts_with("DEF_TUNING_IRRIGATION_")
-        && !(c.crop && (!c.single || c.cropland()) && logical(c.doc, "DEF_USE_IRRIGATION"))
+        && !(c.crop_capable() && logical(c.doc, "DEF_USE_IRRIGATION"))
     {
         return Some(hidden("需要 CROP 农田并启用灌溉"));
     }
-    // Rust 把 CROP 运行时化后，空间 PFT/PC + BGC 算例也可以有正的播种日；
-    // 一旦写入了正播种日，这个字段就不能再藏起来，否则用户保存后无法查看或关闭作物过程。
-    let rust_spatial_crop = c.rust_engine
-        && !c.single
-        && (c.pft || c.pc)
-        && c.bgc
-        && real(c.doc, "DEF_TUNING_CROP_PLANTING_DAY") > 0.0;
-    if name == "DEF_TUNING_CROP_PLANTING_DAY"
-        && !(c.single && c.crop && c.cropland())
-        && !rust_spatial_crop
+    if name == "DEF_TUNING_CROP_PLANTING_DAY" && !(c.crop_capable() && (c.single || c.rust_engine))
     {
         return Some(hidden("仅单点 CROP 农田使用"));
     }
@@ -2206,15 +2203,11 @@ fn field_runtime_state(
         return state;
     }
 
-    // Rust 把 CROP 运行时化：空间 PFT/PC + BGC 算例一旦写入正播种日，字段就应可见；
-    // 但它 schema 里带 requires=["CROP"]，默认内核会被编译期过滤掉，这里放行。
-    let rust_spatial_planting = c.rust_engine
-        && name == "DEF_TUNING_CROP_PLANTING_DAY"
-        && !c.single
-        && (c.pft || c.pc)
-        && c.bgc
-        && real(c.doc, "DEF_TUNING_CROP_PLANTING_DAY") > 0.0;
-    if !field_is_relevant(field, c.have) && !rust_spatial_planting {
+    let mut runtime_capabilities = c.have.clone();
+    if c.rust_engine && c.crop_capable() {
+        runtime_capabilities.insert("CROP");
+    }
+    if !field_is_relevant(field, &runtime_capabilities) {
         return hidden("当前内核未编入这个功能");
     }
 
@@ -2510,7 +2503,7 @@ fn field_runtime_state(
     if name == "USE_SITE_pctpfts" && (!(c.pft || c.pc) || !c.natural_pft_land()) {
         return hidden("仅自然地表的 PFT/PC 次网格使用");
     }
-    if name == "USE_SITE_pctcrop" && !(c.crop && c.cropland()) {
+    if name == "USE_SITE_pctcrop" && !c.crop_capable() {
         return hidden("仅 CROP 内核的作物地表使用");
     }
     if name == "USE_SITE_lakedepth" && !c.waterbody() {
@@ -2725,16 +2718,17 @@ fn field_runtime_state(
         "DEF_USE_CNSOYFIXN",
         "DEF_USE_IRRIGATION",
         "DEF_IRRIGATION_ALLOCATION",
-    ]) && (!c.crop || (c.single && !c.cropland()))
+    ]) && !c.crop_capable()
     {
         return hidden("当前内核未启用 CROP");
     }
-    if name == "DEF_USE_CROP" && !c.crop {
-        // Rust 空间 CROP 的运行时标记：没有 CROP 宏时也要让保存后的算例看到它。
-        if !c.single && (c.pft || c.pc) && c.bgc && logical(c.doc, "DEF_USE_CROP") {
+    if name == "DEF_USE_CROP" {
+        if !c.crop_capable() {
+            return hidden("当前内核未启用 CROP");
+        }
+        if c.rust_engine {
             return (FieldMode::Editable, None, vec![".true.", ".false."]);
         }
-        return hidden("当前内核未启用 CROP");
     }
     if c.single
         && !c.biological_land()
@@ -5901,7 +5895,7 @@ fn set_fields_with_changes(
     set_fields_with_forcing(dirs, fields, remove_fields, kernel_dir, contexts, None)
 }
 
-fn set_fields_with_forcing(
+pub(crate) fn set_fields_with_forcing(
     dirs: Vec<String>,
     fields: Vec<FieldChange>,
     remove_fields: &[String],
@@ -5937,6 +5931,19 @@ fn set_fields_with_forcing(
             put(&mut doc, &field.path, typed(&field.path, &field.value)?)?;
         }
         load_forcing_fields(&mut doc, std::path::Path::new(&d))?;
+        if let Some(forcing) = forcing {
+            let staged = colm_namelist::parse(&forcing.text).map_err(|e| e.to_string())?;
+            for key in doc.paths() {
+                if is_forcing_field(&key) {
+                    doc.remove(&key).map_err(|e| e.to_string())?;
+                }
+            }
+            for key in staged.paths() {
+                if is_forcing_field(&key) {
+                    put(&mut doc, &key, staged.get(&key).unwrap().clone())?;
+                }
+            }
+        }
         for field in &fields {
             let value = typed(&field.path, &field.value)?;
             put(&mut doc, &field.path, value).map_err(|e| format!("{d}: {e}"))?;
@@ -5969,11 +5976,11 @@ fn set_fields_with_forcing(
                 &history,
             )?);
         }
-        if forcing.is_some() {
+        if let Some(reference) = forcing.and_then(|forcing| forcing.reference.as_ref()) {
             put(
                 &mut doc,
                 "DEF_forcing_namelist",
-                colm_namelist::Value::Str("forcing.nml".into()),
+                colm_namelist::Value::Str(reference.clone()),
             )?;
         }
         let effective;
@@ -6052,6 +6059,9 @@ fn set_fields_with_forcing(
         .map(|(dir, text)| (std::path::Path::new(dir).join("case.nml"), text.clone()))
         .collect::<Vec<_>>();
     files.extend(extra);
+    if let Some(forcing) = forcing {
+        forcing.unchanged()?;
+    }
     let changed = write_files_atomic(&files)?;
     Ok(BatchWrite {
         written: done.len(),

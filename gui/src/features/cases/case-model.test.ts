@@ -82,7 +82,16 @@ describe('case data boundary', () => {
     });
     assert.equal(cropEnabled(fields), true);
     assert.equal(fields.DEF_USE_BGC, '.true.');
-    assert.equal(cropEnabled({ DEF_USE_CROP: '.true.' }), false);
+    assert.equal(cropEnabled({ DEF_USE_CROP: '.true.' }), true);
+    assert.equal(cropEnabled({ def_use_irrigation: 'T' }), true);
+    for (const value of ['120', '120.', '1.2D2', '120._r8'])
+      assert.equal(cropEnabled({ def_tuning_crop_planting_day: value }), true, value);
+    for (const value of ['0.', '-1', 'NaN', 'Infinity', '1e999', '0x78', "'120'", 'bad'])
+      assert.equal(cropEnabled({ DEF_TUNING_CROP_PLANTING_DAY: value }), false, value);
+    assert.equal(
+      cropEnabled({ DEF_USE_CROP: '.false.', DEF_TUNING_CROP_PLANTING_DAY: '0' }),
+      false,
+    );
   });
   it('names prepared outputs with the same two layouts the scanner recognizes', () => {
     // 无约定后缀：按 PLUMBER2 追加；末尾斜杠归一。

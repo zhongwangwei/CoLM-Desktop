@@ -11,6 +11,7 @@
 //!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
 //! colm-cli site-pfts <site.nc> [--crop 1] [--landtype N]
 //! colm-cli site-classes <site.nc>                 # 站点文件带了哪几套地类分类（JSON）
+//! colm-cli case-crop <算例目录>                     # 与运行预检相同的作物判定（JSON）
 //! colm-cli case-land-classes <算例目录>             # 格点算例 landdata 里有哪些地类（JSON）
 //! colm-cli new       --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //!                    [--spinup-years N] [--spinup-repeat N]
@@ -520,6 +521,13 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
             let classes = study::engine::spatial_land_classes(&case, &doc)?;
             println!("{}", serde_json::json!({ "classes": classes }));
         }
+        "case-crop" => {
+            let case = opts.positional_at(0, "a case directory")?;
+            println!(
+                "{}",
+                serde_json::json!({"crop": rust_case_is_crop(&case.join("case.nml"))?})
+            );
+        }
         // 站点文件带了哪几套地类分类。已有算例切换 IGBP↔USGS 前要知道：站点文件只带一套时，换成另一套
         // 到运行的地表数据阶段才报缺变量，界面却写着"点选即生效"（GUI 审查 2026-10-22）。
         "site-classes" => {
@@ -531,6 +539,8 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                 serde_json::json!({
                     "igbp": file.variable("IGBP_classification").is_some(),
                     "usgs": file.variable("USGS_classification").is_some(),
+                    "crop": colm_srfdata::site::crop_site(&site,
+                        colm_srfdata::site::landtype_for_mode(&site, colm_srfdata::site::SiteMode::Igbp)?)?,
                 })
             );
         }
@@ -2679,17 +2689,7 @@ fn rust_case_is_crop(case_nml: &Path) -> Result<bool> {
         .with_context(|| format!("cannot read {}", case_nml.display()))?;
     let document = colm_namelist::parse(&text)
         .with_context(|| format!("cannot parse {}", case_nml.display()))?;
-    let crop_field =
-        |name: &str| matches!(document.get(name), Some(colm_namelist::Value::Bool(true)));
-    // 播种日只有显式大于 0 才代表作物；普通算例里 0.0 的默认值不能触发 CROP。
-    // 用 as_f64 而不是自己解析 Real text：120（Int）、120.0、1.2D2 都是合法 Fortran 实数。
-    let positive_planting_day = document
-        .get("DEF_TUNING_CROP_PLANTING_DAY")
-        .and_then(colm_namelist::Value::as_f64)
-        .is_some_and(|value| value > 0.0);
-    // DEF_USE_FERT / DEF_USE_CNSOYFIXN 的 schema 默认值就是 true，不能证明算例启用了作物。
-    // 只认 CROP 的显式开关和灌溉；空间作物通常还会带正的播种日。
-    if crop_field("DEF_USE_CROP") || crop_field("DEF_USE_IRRIGATION") || positive_planting_day {
+    if colm_case::crop_enabled(&document) {
         return Ok(true);
     }
     let Some(colm_namelist::Value::Str(site)) = document.get("SITE_fsitedata") else {

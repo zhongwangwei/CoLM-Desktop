@@ -1048,6 +1048,52 @@ fn clearing_legacy_process_references_survives_reload_and_materialization() {
 }
 
 #[test]
+fn clearing_one_material_family_keeps_other_frozen_references() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let case = tmp.case();
+    let text = fs::read_to_string(case.join("case.nml")).unwrap()
+        + "&nl_colm_material\n DEF_SOLUTE_PARAM_FILES = 'solute.nml'\n DEF_METHANE_PARAM_FILE = 'methane.nml'\n/\n";
+    fs::write(case.join("case.nml"), text).unwrap();
+    fs::write(case.join("solute.nml"), "&nl_colm_solute_parameter\n/\n").unwrap();
+    let methane = "&nl_colm_methane_parameter\n/\n";
+    fs::write(case.join("methane.nml"), methane).unwrap();
+    let binding = reg.migrate_case(&case, code()).unwrap();
+    let frozen = reg.get(&binding.version).unwrap();
+    let asset = frozen
+        .overlay
+        .process_files
+        .iter()
+        .find(|asset| asset.sha256 == digest(methane.as_bytes()))
+        .unwrap();
+    assert_ne!(asset.relative_path, "methane.nml");
+    let run = reg
+        .materialize_run_with_case_changes(
+            &binding.version,
+            &case,
+            &tmp.0.join("clear-one-family"),
+            "clear-one-family",
+            &[],
+            &["DEF_SOLUTE_PARAM_FILES".into()],
+        )
+        .unwrap();
+    let doc =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
+    assert_eq!(
+        doc.get("DEF_SOLUTE_PARAM_FILES"),
+        Some(&colm_namelist::Value::Str(String::new()))
+    );
+    assert_eq!(
+        doc.get("DEF_METHANE_PARAM_FILE"),
+        Some(&colm_namelist::Value::Str(asset.relative_path.clone()))
+    );
+    assert_eq!(
+        fs::read_to_string(run.run_case.join(&asset.relative_path)).unwrap(),
+        methane
+    );
+}
+
+#[test]
 fn materialization_adds_a_missing_material_group_for_new_material_fields() {
     // 上游把材料拆进 `&nl_colm_material`，而建例（尤其空间算例）只写 `&nl_colm`；
     // 用户第一次在已有算例上开材料时，物化路径必须补组再插，否则保存与运行前预览

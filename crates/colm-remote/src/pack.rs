@@ -136,22 +136,13 @@ done
 }
 
 /// 判断载体还在不在（排队或运行中）的 shell 函数 `colm_alive 作业号`：还在就输出它的状态词。按
-/// `$COLM_BASE`（slurm、lsf、pbs、bare）选问法；打包提交与状态查询共用这一份。
+/// `$COLM_BASE`（slurm、lsf、pbs、bare）选问法；仅供打包提交估算载体数量。
 pub(crate) const ALIVE: &str = r#"colm_alive() {
   case "$COLM_BASE" in
   slurm) squeue -h -j "$1" -o %T 2>/dev/null | head -n 1 ;;
   lsf) bjobs -noheader -o stat "$1" 2>/dev/null | awk 'NR == 1 && $1 != "DONE" && $1 != "EXIT" { print $1 }' ;;
   pbs) qstat -f "$1" 2>/dev/null | sed -n 's/^ *job_state = *//p' | head -n 1 | awk '$1 != "F" && $1 != "X" { print $1 }' ;;
   bare) kill -0 "$1" 2>/dev/null && echo RUNNING ;;
-  esac
-}
-# 载体确实已经结束（调度系统明确这么说）时输出 yes。查不到、调度系统没回答都不算：那只是"不知道"，
-# 不能据此把站点判成失败。
-colm_gone() {
-  case "$COLM_BASE" in
-  lsf) colm_s=$(bjobs -noheader -o stat "$1" 2>&1); case "$colm_s" in DONE*|EXIT*|*"is not found"*) echo yes ;; esac ;;
-  pbs) colm_s=$(qstat -f "$1" 2>&1); case "$colm_s" in *"job_state = F"*|*"job_state = X"*|*"Unknown Job Id"*|*"Job has finished"*) echo yes ;; esac ;;
-  bare) kill -0 "$1" 2>/dev/null || echo yes ;;
   esac
 }
 "#;

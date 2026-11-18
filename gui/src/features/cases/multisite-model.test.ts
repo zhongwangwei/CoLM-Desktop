@@ -154,7 +154,7 @@ test('per-site spinup checks its own interval and repetition bounds', () => {
   );
 });
 
-test('shared irrigation remains enabled only for PFT station structures', () => {
+test('shared irrigation remains enabled only for crop PFT stations', () => {
   const physics = { ...base.physics, DEF_USE_IRRIGATION: '.true.' };
   for (const subgrid of ['IGBP', 'PC', 'PFT']) {
     const [forest, farm, city] = planMultiSites({
@@ -163,7 +163,7 @@ test('shared irrigation remains enabled only for PFT station structures', () => 
       form: { ...base.form, subgrid },
     });
     assert.equal(city.fields.DEF_USE_IRRIGATION, '.false.');
-    assert.equal(forest.fields.DEF_USE_IRRIGATION, subgrid === 'PFT' ? '.true.' : '.false.');
+    assert.equal(forest.fields.DEF_USE_IRRIGATION, '.false.');
     assert.equal(farm.fields.DEF_USE_IRRIGATION, subgrid === 'PC' ? '.false.' : '.true.');
   }
   assert.equal(physics.DEF_USE_IRRIGATION, '.true.');

@@ -1340,15 +1340,14 @@ fn a_station_whose_lsf_node_job_ended_is_failed_but_a_silent_scheduler_is_not_pr
         "{:?}",
         ended.detail
     );
-    let silent = sb.status("j-y");
-    assert_eq!(silent.state, State::Lost);
-    assert_eq!(crate::job::ended(&silent), None, "no answer is not an end");
-    assert!(silent.detail.unwrap().contains("not answering"));
-    assert_eq!(
-        crate::job::ended(&sb.status("j-z")),
-        Some("failed"),
-        "LSF no longer knows it"
-    );
+    let silent = sb.report_text("j-y");
+    assert!(parse_report(&silent)
+        .unwrap_err()
+        .to_string()
+        .contains("LSF is down"));
+    let missing = sb.report("j-z");
+    assert!(!missing.terminal, "missing history is not a confirmed end");
+    assert_eq!(crate::job::ended(&missing.status), None);
 }
 
 // 入队一侧拿着 `$P/.lock` 的 flock 起载体；没有调度系统时载体是直接起的后台进程，继承了 8 号描述符就
@@ -1376,4 +1375,122 @@ fn a_bare_carrier_does_not_carry_the_enqueue_lock_away() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert_eq!(sb.read("fd8").trim(), "closed");
+}
+
+#[cfg(unix)]
+#[test]
+fn packed_status_preserves_scheduler_evidence_and_station_results() {
+    let sb = Sandbox::new("pack-report");
+    let dir = sb.job_dir("j-pack");
+    let pool = sb.root.join("pool");
+    let claim = pool.join("claimed/j-pack");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&claim).unwrap();
+    std::fs::write(dir.join("pool"), pool.to_str().unwrap()).unwrap();
+    std::fs::write(claim.join("carrier"), "4242").unwrap();
+    for (scheduler, live, queued, terminal) in [
+        ("slurm", "RUNNING", "PENDING", "COMPLETED|0:0"),
+        ("pbs", "R", "Q", "F"),
+        ("lsf", "RUN", "PEND", "DONE"),
+    ] {
+        std::fs::write(dir.join("scheduler"), format!("{scheduler}-pack")).unwrap();
+        let state_file = format!("{scheduler}_state");
+        sb.set(&state_file, live);
+        assert_eq!(sb.report("j-pack").status.state, State::Running);
+        sb.set(&state_file, queued);
+        assert_eq!(sb.report("j-pack").status.state, State::Queued);
+        if scheduler == "slurm" {
+            sb.unset(&state_file);
+            sb.set("sacct_out", terminal);
+        } else {
+            sb.set(&state_file, terminal);
+        }
+        let report = sb.report("j-pack");
+        assert!(report.terminal, "{scheduler}");
+        assert_eq!(
+            ended(&report.status),
+            Some("failed"),
+            "carrier success is not station success"
+        );
+        std::fs::write(dir.join("exit_code"), "0").unwrap();
+        assert_eq!(
+            sb.report("j-pack").status.state,
+            State::Finished { exit_code: 0 }
+        );
+        std::fs::remove_file(dir.join("exit_code")).unwrap();
+        sb.unset(&state_file);
+        sb.unset("sacct_out");
+        let missing = sb.report("j-pack");
+        assert!(!missing.terminal);
+        assert_eq!(ended(&missing.status), None);
+        let command = match scheduler {
+            "slurm" => "squeue",
+            "pbs" => "qstat",
+            _ => "bjobs",
+        };
+        sb.stub(command, "echo scheduler_unavailable >&2; exit 1");
+        assert!(parse_report(&sb.report_text("j-pack")).is_err());
+    }
+    std::fs::write(dir.join("scheduler"), "slurm-pack").unwrap();
+    sb.stub("squeue", "echo 'CANCELLED|by request'");
+    let cancelled = sb.report("j-pack");
+    assert!(cancelled.terminal);
+    assert_eq!(ended(&cancelled.status), Some("cancelled"));
+    sb.stub("squeue", "echo scheduler_unavailable >&2; exit 1");
+    assert!(parse_report(&sb.report_text("j-pack")).is_err());
+    sb.stub(
+        "squeue",
+        "echo 7 > exit_code; echo scheduler_unavailable >&2; exit 1",
+    );
+    assert_eq!(
+        sb.report("j-pack").status.state,
+        State::Finished { exit_code: 7 },
+        "station result published during the query takes precedence"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unclaimed_pack_station_can_be_cancelled_without_inventing_a_carrier_end() {
+    let sb = Sandbox::new("pack-unclaimed-report");
+    let dir = sb.job_dir("j-pack");
+    let pool = sb.root.join("pool");
+    let carrier = pool.join("carriers/c0");
+    std::fs::create_dir_all(&dir).unwrap();
+    for child in ["queue", "claimed", "carriers/c0"] {
+        std::fs::create_dir_all(pool.join(child)).unwrap();
+    }
+    std::fs::write(dir.join("scheduler"), "slurm-pack").unwrap();
+    std::fs::write(dir.join("pool"), pool.to_str().unwrap()).unwrap();
+    std::fs::write(pool.join("queue/j-pack"), "").unwrap();
+    assert_eq!(
+        sb.report("j-pack").status.state,
+        State::Queued,
+        "carrier publication still pending"
+    );
+    std::fs::write(carrier.join("sched_id"), "4242").unwrap();
+    sb.set("sacct_out", "COMPLETED|0:0");
+    let report = sb.report("j-pack");
+    assert!(
+        !report.terminal,
+        "a future carrier may still claim this station"
+    );
+    assert_eq!(ended(&report.status), None);
+    assert_eq!(
+        report.status.state,
+        State::Queued,
+        "the station remains safely cancellable through the normal UI and CLI"
+    );
+    sb.stub("squeue", "echo scheduler_unavailable >&2; exit 1");
+    sb.unset("sacct_out");
+    assert!(parse_report(&sb.report_text("j-pack")).is_err());
+    let (_, err, ok) = sb.run(&cancel_script(&sb.work(), "j-pack"));
+    assert!(ok, "{err}");
+    let report = sb.report("j-pack");
+    assert!(report.terminal);
+    assert_eq!(ended(&report.status), Some("cancelled"));
+    assert!(
+        pool.join("claimed/j-pack/cancelled").exists(),
+        "the claim prevents any later carrier running the cancelled station"
+    );
 }

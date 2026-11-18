@@ -35,3 +35,35 @@ mod parameters_tests;
 mod pft_tests;
 #[cfg(test)]
 mod tuning_tests;
+
+/// Explicit runtime crop activation; site-file metadata is resolved by the caller.
+pub fn crop_enabled(doc: &colm_namelist::Document) -> bool {
+    ["DEF_USE_CROP", "DEF_USE_IRRIGATION"]
+        .iter()
+        .any(|name| matches!(doc.get(name), Some(colm_namelist::Value::Bool(true))))
+        || doc
+            .get("DEF_TUNING_CROP_PLANTING_DAY")
+            .and_then(colm_namelist::Value::as_f64)
+            .is_some_and(|value| value.is_finite() && value > 0.0)
+}
+
+#[cfg(test)]
+#[test]
+fn crop_activation_requires_explicit_true_or_positive_finite_day() {
+    for (field, value, expected) in [
+        ("DEF_TUNING_CROP_PLANTING_DAY", "0.", false),
+        ("DEF_TUNING_CROP_PLANTING_DAY", "-1", false),
+        ("DEF_TUNING_CROP_PLANTING_DAY", "120", true),
+        ("DEF_TUNING_CROP_PLANTING_DAY", "1.2D2", true),
+        ("DEF_TUNING_CROP_PLANTING_DAY", "120._r8", true),
+        ("DEF_TUNING_CROP_PLANTING_DAY", "'120'", false),
+        ("DEF_TUNING_CROP_PLANTING_DAY", "1e999", false),
+        ("DEF_USE_CROP", ".true.", true),
+        ("DEF_USE_CROP", ".false.", false),
+        ("DEF_USE_IRRIGATION", ".true.", true),
+        ("DEF_USE_FERT", ".true.", false),
+    ] {
+        let doc = colm_namelist::parse(&format!("&nl_colm\n{field}={value}\n/\n")).unwrap();
+        assert_eq!(crop_enabled(&doc), expected, "{field}={value}");
+    }
+}

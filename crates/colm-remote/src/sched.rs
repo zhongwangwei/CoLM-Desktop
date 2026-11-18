@@ -476,6 +476,8 @@ job_not_found() {
   esac
   return 1
 }
+colm_query() (
+S=$1; ID=$2
 # 调度系统的作业号还没写下来（提交正写到一半、并发查询撞上这个窗口）：身份不完整，不是“没有这个
 # 作业”。bare/pack 不用 $ID，不适用。
 case "$S" in
@@ -485,7 +487,7 @@ esac
 case "$S" in
 bare)
   # pid 文件还没出现时作业可能正在提交（占位已建、launch 还没落盘）：这时既不是 running 也不是 lost。
-  P=$(cat pid 2>/dev/null)
+  P=${ID:-$(cat pid 2>/dev/null)}
   case "$P" in
   ''|*[!0-9]*) echo "state=unknown" ;;
   *) if kill -0 "$P" 2>/dev/null; then echo "state=running"; else lost_confirmed "the job process is gone"; fi ;;
@@ -603,31 +605,47 @@ lsf)
     esac
   fi ;;
 *-pack)
-  # 打包运行（`crate::pack`）：看站点被哪个载体领走、那个载体还在不在。
   COLM_BASE=${S%-pack}
   P=$(cat pool 2>/dev/null); J=${PWD##*/}
   if [ -z "$P" ]; then echo "state=unknown"
+  elif [ -f "$P/claimed/$J/cancelled" ]; then lost_confirmed "cancelled before it started"
   elif [ -f "$P/claimed/$J/carrier" ]; then
-    C=$(cat "$P/claimed/$J/carrier"); Q=$(colm_alive "$C")
-    if [ -n "$Q" ]; then echo "state=running"; echo "detail=node pack job $C $Q"
-    elif [ "$COLM_BASE" = slurm ]; then echo "state=lost"; echo "detail=node pack job $C $(sacct -n -X -P -j "$C" -o State,ExitCode 2>/dev/null | head -n 1)"
-    # 载体确实结束了，站点却没写下退出码：它被连带停掉了（超时、节点故障），这个站点不会再跑完。
-    elif [ -n "$(colm_gone "$C")" ]; then echo "state=lost"; echo "detail=node pack job $C ended before this station finished: FAILED"
-    else echo "state=lost"; echo "detail=node pack job $C is not answering"; fi
-  elif [ -f "$P/claimed/$J/cancelled" ]; then echo "state=lost"; echo "detail=cancelled before it started"
+    C=$(cat "$P/claimed/$J/carrier")
+    if [ -z "$C" ]; then echo "state=unknown"
+    else
+      Q=$(colm_query "$COLM_BASE" "$C")
+      if printf '%s\n' "$Q" | grep -qx 'terminal=confirmed'; then
+        # 载体成功不等于站点成功；站点自己的退出码在查询后再次读取。
+        lost_confirmed "FAILED: node pack job $C ended before this station recorded its result: $(printf '%s\n' "$Q" | sed -n 's/^detail=//p')"
+      else
+        printf '%s\n' "$Q"
+        D=$(printf '%s\n' "$Q" | sed -n 's/^detail=//p')
+        [ -z "$D" ] || echo "detail=node pack job $C $D"
+      fi
+    fi
   elif [ -d "$P/claimed/$J" ]; then echo "state=queued"; echo "detail=starting in node pack"
   elif [ -f "$P/queue/$J" ]; then
-    L=
+    L=; ERR=; STARTING=
     for c in "$P"/carriers/c*; do
-      [ -f "$c/sched_id" ] && [ ! -f "$c/closing" ] || continue
-      Q=$(colm_alive "$(cat "$c/sched_id")")
-      if [ -n "$Q" ]; then L="$L $(cat "$c/sched_id") $Q"; fi
+      [ -d "$c" ] || continue
+      [ ! -f "$c/closing" ] || continue
+      C=$(cat "$c/sched_id" 2>/dev/null)
+      if [ -z "$C" ]; then STARTING=yes; continue; fi
+      Q=$(colm_query "$COLM_BASE" "$C")
+      if printf '%s\n' "$Q" | grep -Eq '^state=(queued|running)$'; then L="$L $C $(printf '%s\n' "$Q" | sed -n 's/^detail=//p')"; fi
+      E=$(printf '%s\n' "$Q" | sed -n 's/^query=failed //p')
+      [ -z "$E" ] || ERR="$ERR $C: $E"
     done
     if [ -n "$L" ]; then echo "state=queued"; echo "detail=waiting in node pack:$L"
-    else echo "state=lost"; echo "detail=node pack has no job left to run it"; fi
-  else echo "state=lost"; echo "detail=not in the node pack queue"; fi ;;
+    elif [ -n "$ERR" ]; then query_failed "$ERR"
+    elif [ -n "$STARTING" ]; then echo "state=queued"; echo "detail=node pack submission in progress"
+    # 尚未领取的站点仍可能被后续载体领取，不能确认终态、放开重复提交。
+    else echo "state=queued"; echo "detail=node pack has no confirmed active carrier; cancel this station before retrying"; fi
+  else lost_unconfirmed "not in the node pack queue"; fi ;;
 *) echo "state=unknown" ;;
 esac
+)
+colm_query "$S" "$ID"
 "#;
 
 /// 取消：调度系统的作业交给它结束；后台进程则结束整个进程组。

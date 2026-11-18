@@ -816,3 +816,14 @@ test('explicit removals remain distinct from absent settings without claiming an
   assert.equal(urban.patch.DEF_USE_ISOTOPE, '.false.');
   assert.equal(urban.patch.DEF_SOLUTE_NAMES, null);
 });
+
+test('disabling BGC clears runtime crop markers even without a planting day', async () => {
+  const { exclusionPatch } = await import('./model-settings');
+  const result = exclusionPatch(
+    { DEF_USE_BGC: '.true.', DEF_USE_CROP: '.true.', DEF_USE_IRRIGATION: '.true.' },
+    { DEF_USE_BGC: '.false.' },
+    { subgrid: 'PFT', domain: 'regional' },
+  );
+  assert.equal(result.patch.DEF_USE_CROP, '.false.');
+  assert.equal(result.patch.DEF_USE_IRRIGATION, '.false.');
+});

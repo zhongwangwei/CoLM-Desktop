@@ -180,3 +180,335 @@ pub struct FileChange {
     pub added: u32,
     pub removed: u32,
 }
+
+/// Serialize complete source edits across CLI processes, not just individual Git commands.
+pub(crate) struct WriteLock(std::path::PathBuf);
+
+impl WriteLock {
+    pub(crate) fn acquire(workspace: &crate::layout::Workspace) -> Result<Self> {
+        let path = workspace.dir.join("source-write.lock");
+        let started = std::time::Instant::now();
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(error) = writeln!(file, "{}", std::process::id()) {
+                        let _ = std::fs::remove_file(&path);
+                        return Err(error.into());
+                    }
+                    return Ok(Self(path));
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        || (cfg!(windows)
+                            && error.kind() == std::io::ErrorKind::PermissionDenied) =>
+                {
+                    anyhow::ensure!(started.elapsed().as_secs() < 15,
+                        "workspace is busy; if its writer crashed, remove {} after confirming no write is running", path.display());
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+                Err(error) => return Err(error).context("cannot lock workspace source"),
+            }
+        }
+    }
+}
+
+impl Drop for WriteLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DiskEntry {
+    Directory(std::fs::Permissions),
+    Link(std::path::PathBuf),
+    File {
+        digest: Vec<u8>,
+        permissions: std::fs::Permissions,
+    },
+}
+
+type DiskState = std::collections::BTreeMap<std::path::PathBuf, DiskEntry>;
+
+fn capture(root: &Path, paths: &[String], backup: Option<&Path>) -> Result<DiskState> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut entries = DiskState::new();
+    let mut pending: Vec<_> = paths.iter().map(std::path::PathBuf::from).collect();
+    while let Some(path) = pending.pop() {
+        if entries.contains_key(&path) {
+            continue;
+        }
+        let full = root.join(&path);
+        let meta = match std::fs::symlink_metadata(&full) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let entry = if meta.file_type().is_symlink() {
+            DiskEntry::Link(std::fs::read_link(&full)?)
+        } else if meta.is_dir() {
+            for child in std::fs::read_dir(&full)? {
+                pending.push(path.join(child?.file_name()));
+            }
+            DiskEntry::Directory(meta.permissions())
+        } else {
+            anyhow::ensure!(
+                meta.is_file(),
+                "cannot back up special file {}",
+                full.display()
+            );
+            let mut file = std::fs::File::open(&full)?;
+            let mut saved = if let Some(backup) = backup {
+                let dest = backup.join(&path);
+                std::fs::create_dir_all(dest.parent().context("missing backup parent")?)?;
+                Some(std::fs::File::create(dest)?)
+            } else {
+                None
+            };
+            let mut hasher = Sha256::new();
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                let size = file.read(&mut buffer)?;
+                if size == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..size]);
+                if let Some(saved) = &mut saved {
+                    use std::io::Write;
+                    saved.write_all(&buffer[..size])?;
+                }
+            }
+            DiskEntry::File {
+                digest: hasher.finalize().to_vec(),
+                permissions: meta.permissions(),
+            }
+        };
+        entries.insert(path, entry);
+    }
+    Ok(entries)
+}
+
+/// Back up only owned paths, including ignored contents of a replaced directory.
+pub(crate) struct Edit {
+    root: std::path::PathBuf,
+    backup: std::path::PathBuf,
+    paths: Vec<String>,
+    before: DiskState,
+    expected: DiskState,
+    index: Vec<u8>,
+    expected_index: Vec<u8>,
+    head: String,
+}
+
+impl Edit {
+    pub(crate) fn begin(
+        workspace: &crate::layout::Workspace,
+        mut paths: Vec<String>,
+    ) -> Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = workspace.src();
+        paths.extend(
+            colm_remote::engine::source_links(&root)?
+                .keys()
+                .map(|p| p.to_string_lossy().replace('\\', "/")),
+        );
+        paths.push(colm_remote::engine::SOURCE_LINKS_FILE.into());
+        paths.sort();
+        paths.dedup();
+        let mut args = vec!["--literal-pathspecs", "ls-files", "--stage", "-z", "--"];
+        args.extend(paths.iter().map(String::as_str));
+        let index = run_bytes(&root, &args)?;
+        let head = head(&root)?;
+        let backup = workspace.dir.join(format!(
+            ".edit-backup-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&backup)?;
+        let before = match capture(&root, &paths, Some(&backup.join("files"))) {
+            Ok(before) => before,
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&backup);
+                return Err(error);
+            }
+        };
+        if capture(&root, &paths, None)? != before {
+            let _ = std::fs::remove_dir_all(&backup);
+            bail!("files changed while preparing the edit; retry after reviewing external changes");
+        }
+        std::fs::write(backup.join("index"), &index)?;
+        std::fs::write(backup.join("entries.txt"), format!("{before:#?}"))?;
+        Ok(Self {
+            root,
+            backup,
+            paths,
+            expected: before.clone(),
+            before,
+            expected_index: index.clone(),
+            index,
+            head,
+        })
+    }
+
+    /// Update only paths this operation actually wrote, never arbitrary post-error state.
+    pub(crate) fn record(&mut self, paths: &[String]) -> Result<()> {
+        let changed = capture(&self.root, paths, None)?;
+        self.expected
+            .retain(|path, _| !paths.iter().any(|scope| path.starts_with(scope)));
+        self.expected.extend(changed);
+        Ok(())
+    }
+
+    pub(crate) fn change<T>(
+        &mut self,
+        paths: &[String],
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        self.checkpoint()?;
+        let result = operation();
+        self.record(paths)?;
+        result
+    }
+
+    /// External changes are conflicts, not something the rollback owns.
+    pub(crate) fn checkpoint(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.index_state()? == self.expected_index,
+            "the Git index changed outside this operation; preserve and review its staging"
+        );
+        anyhow::ensure!(capture(&self.root, &self.paths, None)? == self.expected,
+            "files changed outside this operation; preserve and review those changes before retrying");
+        Ok(())
+    }
+
+    fn index_state(&self) -> Result<Vec<u8>> {
+        let mut args = vec!["--literal-pathspecs", "ls-files", "--stage", "-z", "--"];
+        args.extend(self.paths.iter().map(String::as_str));
+        run_bytes(&self.root, &args)
+    }
+
+    pub(crate) fn record_index(&mut self) -> Result<()> {
+        self.expected_index = self.index_state()?;
+        Ok(())
+    }
+
+    pub(crate) fn stage(&mut self, args: &[&str]) -> Result<()> {
+        anyhow::ensure!(
+            self.index_state()? == self.expected_index,
+            "the Git index changed outside this operation; preserve and review its staging"
+        );
+        run(&self.root, args)?;
+        self.record_index()
+    }
+
+    pub(crate) fn finish<T>(self, result: Result<T>) -> Result<T> {
+        match result {
+            Ok(value) => {
+                if let Err(error) = std::fs::remove_dir_all(&self.backup) {
+                    eprintln!(
+                        "workspace edit succeeded; could not remove backup {}: {error}",
+                        self.backup.display()
+                    );
+                }
+                Ok(value)
+            }
+            Err(error) => {
+                let rollback = (|| {
+                    // Never undo a successful commit or an external branch change.
+                    anyhow::ensure!(
+                        head(&self.root)? == self.head,
+                        "workspace HEAD changed; files were preserved"
+                    );
+                    self.rollback()
+                })();
+                match rollback {
+                    Ok(()) => {
+                        let _ = std::fs::remove_dir_all(&self.backup);
+                        Err(error)
+                    }
+                    Err(rollback) => Err(error.context(format!(
+                        "rollback incomplete: {rollback:#}; originals retained at {}",
+                        self.backup.display()
+                    ))),
+                }
+            }
+        }
+    }
+
+    fn rollback(&self) -> Result<()> {
+        let current = capture(&self.root, &self.paths, None)?;
+        anyhow::ensure!(
+            current == self.expected,
+            "files changed again during the operation; preserved them"
+        );
+        anyhow::ensure!(
+            self.index_state()? == self.expected_index,
+            "the Git index changed again during the operation; preserved its staging"
+        );
+        if self.expected_index != self.index {
+            // Restore the index only for the paths owned by this operation.
+            let mut args = vec!["--literal-pathspecs", "ls-files", "-z", "--"];
+            args.extend(self.paths.iter().map(String::as_str));
+            let indexed = run_bytes(&self.root, &args)?;
+            run_with_input(
+                &self.root,
+                &["update-index", "--force-remove", "-z", "--stdin"],
+                &indexed,
+            )?;
+            run_with_input(
+                &self.root,
+                &["update-index", "-z", "--index-info"],
+                &self.index,
+            )?;
+        }
+        for (path, entry) in current.iter().rev() {
+            if self.before.get(path) == Some(entry) {
+                continue;
+            }
+            let full = self.root.join(path);
+            if matches!(entry, DiskEntry::Directory(_)) {
+                // Never recursively remove a directory: a newly arrived user file must survive.
+                if matches!(self.before.get(path), Some(DiskEntry::Directory(_))) {
+                    continue;
+                }
+                std::fs::remove_dir(&full)?;
+            } else {
+                std::fs::remove_file(&full)?;
+            }
+        }
+        for (path, entry) in &self.before {
+            if current.get(path) == Some(entry) {
+                continue;
+            }
+            let full = self.root.join(path);
+            std::fs::create_dir_all(full.parent().context("missing restore parent")?)?;
+            match entry {
+                DiskEntry::Directory(_) => std::fs::create_dir_all(full)?,
+                DiskEntry::File { permissions, .. } => {
+                    std::fs::copy(self.backup.join("files").join(path), &full)?;
+                    std::fs::set_permissions(full, permissions.clone())?;
+                }
+                DiskEntry::Link(target) => {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(target, full)?;
+                    #[cfg(windows)]
+                    std::os::windows::fs::symlink_file(target, full)?;
+                }
+            }
+        }
+        // Apply directory modes last, after restoring children of read-only directories.
+        for (path, entry) in self.before.iter().rev() {
+            if let DiskEntry::Directory(permissions) = entry {
+                std::fs::set_permissions(self.root.join(path), permissions.clone())?;
+            }
+        }
+        Ok(())
+    }
+}

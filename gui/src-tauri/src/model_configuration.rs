@@ -207,8 +207,8 @@ pub(crate) fn query_for_engine(
         if let Some(parent) = parent_gate(field, candidate_reason) {
             state["parent_gate"] = json!(parent);
             state["parent_gate_enabled"] = json!(if parent == "DEF_USE_CROP" {
-                // CROP is a read-only compile capability, not a writable case switch.
-                have.contains("CROP")
+                // Rust crop capability does not require a CROP-compiled kernel.
+                context.crop_capable()
             } else {
                 matches!(doc.get(parent), Some(NmlValue::Bool(true)))
             });
@@ -1241,6 +1241,54 @@ mod tests {
                     crop,
                     "{child}"
                 );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rust_crop_fields_are_configurable_without_compiled_crop() {
+        let (root, _, draft) = fixture();
+        for engine in ["rust", "fortran"] {
+            for single in [false, true] {
+                let mut values = BTreeMap::from([
+                    ("DEF_USE_PFT".into(), ".true.".into()),
+                    ("DEF_USE_LCT".into(), ".false.".into()),
+                    ("DEF_USE_BGC".into(), ".true.".into()),
+                    ("DEF_USE_IRRIGATION".into(), ".true.".into()),
+                ]);
+                if single {
+                    values.insert("SITE_fsitedata".into(), "'site.nc'".into());
+                    values.insert("SITE_landtype".into(), "12".into());
+                }
+                let result = query_for_engine(
+                    &root,
+                    source(&draft, Overlay::default()),
+                    None,
+                    None,
+                    None,
+                    Some(values),
+                    Some(engine),
+                    None,
+                    None,
+                )
+                .unwrap();
+                for name in [
+                    "DEF_USE_FERT",
+                    "DEF_USE_CNSOYFIXN",
+                    "DEF_USE_IRRIGATION",
+                    "DEF_IRRIGATION_ALLOCATION",
+                    "DEF_TUNING_IRRIGATION_MAX_DEPTH",
+                    "DEF_TUNING_CROP_PLANTING_DAY",
+                ] {
+                    let state = field(&result, name);
+                    if engine == "rust" {
+                        assert_eq!(state["mode"], "editable", "{single} {name}: {state}");
+                    }
+                    if state["parent_gate"] == "DEF_USE_CROP" {
+                        assert_eq!(state["parent_gate_enabled"], engine == "rust", "{name}");
+                    }
+                }
             }
         }
         std::fs::remove_dir_all(root).unwrap();

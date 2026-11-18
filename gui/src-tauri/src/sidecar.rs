@@ -3294,11 +3294,22 @@ fn existing_unstructured_mesh(
 }
 
 fn is_crop_case(fields: &[crate::config::FieldChange]) -> bool {
-    fields.iter().any(|field| {
-        field
-            .path
-            .eq_ignore_ascii_case("DEF_TUNING_CROP_PLANTING_DAY")
-    })
+    let assignments = fields
+        .iter()
+        .filter(|field| {
+            [
+                "DEF_USE_CROP",
+                "DEF_USE_IRRIGATION",
+                "DEF_TUNING_CROP_PLANTING_DAY",
+            ]
+            .iter()
+            .any(|name| field.path.eq_ignore_ascii_case(name))
+        })
+        .map(|field| format!("{} = {}", field.path, field.value))
+        .collect::<Vec<_>>()
+        .join("\n");
+    colm_namelist::parse(&format!("&nl_colm\n{assignments}\n/\n"))
+        .is_ok_and(|doc| colm_case::crop_enabled(&doc))
 }
 
 fn validate_bgc_runtime(

@@ -125,6 +125,54 @@ fn simultaneous_operations_are_queued_and_cancellation_is_scoped() {
 }
 
 #[test]
+fn same_session_requests_queue_before_first_reply_and_cancel_together() {
+    let _lock = TEST_LOCK.lock().unwrap();
+    let session = Session::new("shared-server".into()).unwrap();
+    session.operation.pid.store(u32::MAX - 8, Ordering::SeqCst);
+    let first = ask(&session, "first@server's password: ");
+    let first_id = pending().requests[0].request_id.clone();
+    let second = ask(&session, "second@server's password: ");
+    let started = Instant::now();
+    let snapshot = loop {
+        let snapshot = remote_auth_pending().unwrap();
+        if snapshot.requests.len() == 2 {
+            break snapshot;
+        }
+        assert!(started.elapsed() < Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(snapshot.requests[0].request_id, first_id);
+    respond(first_id, Some("first-secret".into())).unwrap();
+    assert_eq!(first.join().unwrap(), b"first-secret");
+    assert_eq!(remote_auth_pending().unwrap().requests.len(), 1);
+    respond(
+        snapshot.requests[1].request_id.clone(),
+        Some("second-secret".into()),
+    )
+    .unwrap();
+    assert_eq!(second.join().unwrap(), b"second-secret");
+    assert_eq!(
+        session.redact("first-secret second-secret"),
+        "[redacted] [redacted]"
+    );
+
+    let first = ask(&session, "first@server's password: ");
+    pending();
+    let second = ask(&session, "second@server's password: ");
+    let started = Instant::now();
+    while remote_auth_pending().unwrap().requests.len() != 2 {
+        assert!(started.elapsed() < Duration::from_secs(3));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let snapshot = remote_auth_pending().unwrap();
+    respond(snapshot.requests[0].request_id.clone(), None).unwrap();
+    assert!(first.join().unwrap().is_empty());
+    assert!(second.join().unwrap().is_empty());
+    assert!(remote_auth_pending().unwrap().requests.is_empty());
+    assert!(respond(snapshot.requests[1].request_id.clone(), Some("late".into())).is_err());
+}
+
+#[test]
 #[cfg(unix)]
 fn cancelling_prompt_marks_and_stops_only_registered_child() {
     let _lock = TEST_LOCK.lock().unwrap();

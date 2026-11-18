@@ -571,17 +571,10 @@ impl Registry {
                     doc.set("DEF_ISOTOPE_PARAM_FILE", Value::Str(namelist_path(cached)))?;
                 }
             }
-            let removed_param_field = remove_fields.iter().any(|key| {
-                colm_namelist::material::PARAM_FILE_FIELDS
-                    .iter()
-                    .any(|field| key.eq_ignore_ascii_case(field))
-            });
-            if !removed_param_field {
-                for (field, value) in
-                    case_process_reference_fields(&original_overlay, &doc, Some(&source))?
-                {
-                    put(&mut doc, &field, value)?;
-                }
+            for (field, value) in
+                case_process_reference_fields(&original_overlay, &doc, Some(&source))?
+            {
+                put(&mut doc, &field, value)?;
             }
             // Remove all recognized model controls, including later edits to legacy cases.
             // Unknown fields remain intact and are never guessed to belong to the model.

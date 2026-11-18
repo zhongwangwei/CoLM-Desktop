@@ -2723,7 +2723,7 @@ fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<
         return Ok(());
     }
     let status = if verified {
-        job::status(&ssh, &pending.record.root, &pending.record.job, lines)?
+        job::report(&ssh, &pending.record.root, &pending.record.job, lines)?.status
     } else {
         job::Status {
             state: job::State::Unknown,
@@ -2776,7 +2776,7 @@ pub(super) fn cmd_status(opts: &Opts) -> Result<()> {
         return cmd_pending_status(opts, pending, lines);
     }
     let record = read_record(&case)?;
-    let status = job::status(&Ssh::new(&record.host)?, &record.root, &record.job, lines)?;
+    let status = job::report(&Ssh::new(&record.host)?, &record.root, &record.job, lines)?.status;
     let ended = job::ended(&status);
     let outcome = json!({"job":record.job,"outcome":"observed","terminal":matches!(status.state, job::State::Finished {..}) || ended.is_some(),"ended":ended,"status":status});
     crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &outcome)?;

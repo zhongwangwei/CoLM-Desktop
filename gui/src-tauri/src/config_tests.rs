@@ -5987,7 +5987,7 @@ fn a_positive_planting_day_keeps_spatial_crop_editable_after_save() {
     );
     assert_eq!(
         mode(&spatial_default, "DEF_TUNING_CROP_PLANTING_DAY"),
-        &FieldMode::Hidden
+        &FieldMode::Editable
     );
 }
 

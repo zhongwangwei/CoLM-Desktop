@@ -90,6 +90,35 @@ fn crop_wizard_fields_enable_crop_site_auditing() {
 }
 
 #[test]
+fn crop_creation_checks_values_and_last_assignment() {
+    for (path, value, expected) in [
+        ("DEF_TUNING_CROP_PLANTING_DAY", "0.", false),
+        ("DEF_TUNING_CROP_PLANTING_DAY", "1.2D2", true),
+        ("DEF_USE_CROP", ".true.", true),
+        ("DEF_USE_IRRIGATION", ".true.", true),
+        ("DEF_USE_CROP", ".false.", false),
+    ] {
+        assert_eq!(
+            is_crop_case(&[crate::config::FieldChange {
+                path: path.into(),
+                value: value.into(),
+            }]),
+            expected
+        );
+    }
+    assert!(!is_crop_case(&[
+        crate::config::FieldChange {
+            path: "DEF_USE_CROP".into(),
+            value: ".true.".into()
+        },
+        crate::config::FieldChange {
+            path: "def_use_crop".into(),
+            value: ".false.".into()
+        },
+    ]));
+}
+
+#[test]
 fn bgc_case_requires_its_runtime_inputs() {
     let mut fields = vec![crate::config::FieldChange {
         path: "DEF_USE_BGC".into(),

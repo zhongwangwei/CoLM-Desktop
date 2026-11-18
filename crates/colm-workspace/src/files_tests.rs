@@ -870,3 +870,207 @@ fn unrelated_invalid_native_links_do_not_block_removal_or_replacement() {
     assert!(!src.join("bad-links").exists());
     assert!(!git::is_dirty(&src).unwrap());
 }
+
+#[test]
+fn failed_file_commits_restore_owned_data_and_ignored_files() {
+    let (root, ws) = fresh("files-rollback");
+    let original = std::fs::read(ws.src().join(MODULE)).unwrap();
+    let replacement = root.join("replacement");
+    std::fs::create_dir_all(&replacement).unwrap();
+    std::fs::write(replacement.join("new.txt"), "replacement").unwrap();
+    let ignored = ws.src().join("vendor/CoLM202X/main/personal.tmp");
+    std::fs::write(ws.src().join(".git/info/exclude"), "personal.tmp\n").unwrap();
+    std::fs::write(&ignored, "keep my ignored notes").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            ignored.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o750),
+        )
+        .unwrap();
+    }
+    git::run(&ws.src(), &["config", "user.name", ""]).unwrap();
+    assert!(write_text(&ws, MODULE, "changed\n", "edit", None).is_err());
+    assert!(create_text(&ws, "new.txt", "new\n", "create").is_err());
+    assert!(!ws.src().join("new.txt").exists());
+    assert!(put_dir(&ws, "vendor/CoLM202X/main", &replacement, "replace").is_err());
+    assert!(remove(&ws, "vendor/CoLM202X/main", "remove").is_err());
+    assert_eq!(std::fs::read(ws.src().join(MODULE)).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(ignored).unwrap(),
+        "keep my ignored notes"
+    );
+    assert!(!ws.src().join("vendor/CoLM202X/main/new.txt").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(ws.src().join("vendor/CoLM202X/main"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o750
+        );
+    }
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn failed_snapshot_preserves_external_edits_and_prior_staging() {
+    let (root, ws) = fresh("snapshot-rollback");
+    std::fs::write(ws.src().join(MODULE), "external edit\n").unwrap();
+    git::run(&ws.src(), &["add", "--", MODULE]).unwrap();
+    let staged = git::run(&ws.src(), &["diff", "--cached"]).unwrap();
+    git::run(&ws.src(), &["config", "user.name", ""]).unwrap();
+    assert!(snapshot_external(&ws).is_err());
+    assert_eq!(git::run(&ws.src(), &["diff", "--cached"]).unwrap(), staged);
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join(MODULE)).unwrap(),
+        "external edit\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn source_write_lock_serializes_separate_processes() {
+    const CHILD_ROOT: &str = "COLM_WORKSPACE_LOCK_TEST_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let ws = Workspace::open(&root.join("ws"), "demo").unwrap();
+        std::fs::write(root.join("child-ready"), "ready").unwrap();
+        create_text(&ws, "child.txt", "child\n", "child").unwrap();
+        return;
+    }
+    let (root, ws) = fresh("process-lock");
+    let guard = git::WriteLock::acquire(&ws).unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "files::files_tests::source_write_lock_serializes_separate_processes",
+        ])
+        .env(CHILD_ROOT, &root)
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !root.join("child-ready").exists() {
+        assert!(started.elapsed().as_secs() < 5, "child did not start");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(!ws.src().join("child.txt").exists());
+    drop(guard);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join("child.txt")).unwrap(),
+        "child\n"
+    );
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn rollback_preserves_a_later_external_edit_and_keeps_original_backup() {
+    let (root, ws) = fresh("rollback-later-edit");
+    let mut edit = git::Edit::begin(&ws, vec![MODULE.into()]).unwrap();
+    std::fs::write(ws.src().join(MODULE), "our edit\n").unwrap();
+    edit.record(&[MODULE.into()]).unwrap();
+    edit.checkpoint().unwrap();
+    std::fs::write(ws.src().join(MODULE), "later external edit\n").unwrap();
+    let error = edit
+        .finish::<()>(Err(anyhow::anyhow!("commit failed")))
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("originals retained"));
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join(MODULE)).unwrap(),
+        "later external edit\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn failed_linked_edit_restores_copies_and_metadata() {
+    let (root, ws) = linked_workspace("links-rollback");
+    let metadata = std::fs::read(ws.src().join(".colm-source-links.json")).unwrap();
+    git::run(&ws.src(), &["config", "user.name", ""]).unwrap();
+    assert!(write_text(&ws, LINK_TARGET, "FF=changed\n", "compiler", None).is_err());
+    assert_linked_bytes(&ws, "FF=old\n");
+    assert!(remove(&ws, LINK_CHAIN, "remove alias").is_err());
+    assert_linked_bytes(&ws, "FF=old\n");
+    assert_eq!(
+        std::fs::read(ws.src().join(".colm-source-links.json")).unwrap(),
+        metadata
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn refused_edit_does_not_claim_an_external_new_file() {
+    let (root, ws) = fresh("rollback-external-create");
+    let edit = git::Edit::begin(&ws, vec!["notes.txt".into()]).unwrap();
+    std::fs::write(ws.src().join("notes.txt"), "external notes\n").unwrap();
+    assert!(edit
+        .finish::<()>(Err(anyhow::anyhow!("already exists")))
+        .is_err());
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join("notes.txt")).unwrap(),
+        "external notes\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn rollback_preserves_new_external_alias_changes_and_index_changes() {
+    let (root, ws) = linked_workspace("rollback-external-alias");
+    let mut edit = git::Edit::begin(&ws, vec![LINK_TARGET.into()]).unwrap();
+    edit.change(&[LINK_TARGET.into()], || {
+        Ok(std::fs::write(ws.src().join(LINK_TARGET), "FF=ours\n")?)
+    })
+    .unwrap();
+    std::fs::write(ws.src().join(LINK_ALIAS), "external alias\n").unwrap();
+    let result = crate::source_links::synchronize(&ws.src(), &mut edit);
+    assert!(edit.finish(result).is_err());
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join(LINK_ALIAS)).unwrap(),
+        "external alias\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+
+    let (root, ws) = fresh("rollback-external-index");
+    let mut edit = git::Edit::begin(&ws, vec![MODULE.into()]).unwrap();
+    edit.change(&[MODULE.into()], || {
+        Ok(std::fs::write(ws.src().join(MODULE), "our edit\n")?)
+    })
+    .unwrap();
+    edit.stage(&["add", "--", MODULE]).unwrap();
+    git::run(&ws.src(), &["reset", "--", MODULE]).unwrap();
+    let error = edit
+        .finish::<()>(Err(anyhow::anyhow!("commit failed")))
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("preserved its staging"));
+    assert!(git::run(&ws.src(), &["diff", "--cached"])
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join(MODULE)).unwrap(),
+        "our edit\n"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn partial_owned_io_failure_restores_original_bytes() {
+    let (root, ws) = fresh("rollback-partial-write");
+    let before = std::fs::read(ws.src().join(MODULE)).unwrap();
+    let mut edit = git::Edit::begin(&ws, vec![MODULE.into()]).unwrap();
+    let result = edit.change(&[MODULE.into()], || -> anyhow::Result<()> {
+        std::fs::write(ws.src().join(MODULE), "partial write")?;
+        anyhow::bail!("simulated write failure")
+    });
+    assert!(edit.finish(result).is_err());
+    assert_eq!(std::fs::read(ws.src().join(MODULE)).unwrap(), before);
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -404,8 +404,15 @@ export function exclusionPatch(
   const catchment = context.grid === 'catchment';
   const close = (key: string, zh: string, en: string) => {
     if (key === 'DEF_TUNING_CROP_PLANTING_DAY') {
-      if (read(key) === undefined || read(key) === null) return false;
+      if (
+        (read(key) === undefined || read(key) === null) &&
+        !on('DEF_USE_CROP') &&
+        !on('DEF_USE_IRRIGATION')
+      )
+        return false;
       out[key] = null;
+      if (on('DEF_USE_CROP')) out.DEF_USE_CROP = '.false.';
+      if (on('DEF_USE_IRRIGATION')) out.DEF_USE_IRRIGATION = '.false.';
     } else {
       if (!on(key)) return false;
       out[key] = '.false.';

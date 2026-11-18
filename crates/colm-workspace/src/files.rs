@@ -186,15 +186,32 @@ fn check_old_subtree(workspace: &Workspace, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn commit(workspace: &Workspace, path: &str, message: &str) -> Result<Applied> {
+fn commit(
+    workspace: &Workspace,
+    path: &str,
+    message: &str,
+    edit: &mut git::Edit,
+) -> Result<Applied> {
     let src = workspace.src();
     let mut files = vec![path.to_owned()];
-    files.extend(crate::source_links::synchronize(&src)?);
+    files.extend(crate::source_links::synchronize(&src, edit)?);
+    edit.checkpoint()?;
     let mut add = vec!["--literal-pathspecs", "add", "-A", "-f", "--"];
     add.extend(files.iter().map(String::as_str));
-    git::run(&src, &add)?;
-    git::run(&src, &["commit", "-q", "-m", &format!("ws: {message}")])
-        .context("nothing changed")?;
+    edit.stage(&add)?;
+    let message = format!("ws: {message}");
+    let mut commit = vec![
+        "--literal-pathspecs",
+        "commit",
+        "-q",
+        "--only",
+        "-m",
+        &message,
+        "--",
+    ];
+    commit.extend(files.iter().map(String::as_str));
+    edit.checkpoint()?;
+    git::run(&src, &commit).context("nothing changed")?;
     let commit = git::head(&src)?;
     Ok(Applied {
         short: git::short(&src, &commit)?,
@@ -247,6 +264,7 @@ fn exclude_editor_leftovers(src: &Path) -> Result<()> {
 /// 冻结都看得到它们。没改什么就返回 `None`。规则与界面里改同：不能碰黄金参考与 `.git`；
 /// 被 `.gitignore` 忽略的编译产物不记。
 pub fn snapshot_external(workspace: &Workspace) -> Result<Option<Applied>> {
+    let _guard = git::WriteLock::acquire(workspace)?;
     let src = workspace.src();
     exclude_editor_leftovers(&src)?;
     let status = git::run(
@@ -268,6 +286,7 @@ pub fn snapshot_external(workspace: &Workspace) -> Result<Option<Applied>> {
                 .next()
                 .context("missing rename source in git status")?;
             check_path(source).with_context(|| format!("{source} was changed outside the app"))?;
+            files.push(source.to_owned());
         }
         check_path(path).with_context(|| format!("{path} was changed outside the app"))?;
         files.push(path.to_owned());
@@ -275,43 +294,76 @@ pub fn snapshot_external(workspace: &Workspace) -> Result<Option<Applied>> {
     if files.is_empty() {
         return Ok(None);
     }
-    crate::source_links::synchronize(&src)?;
-    git::run(&src, &["add", "-A"])?;
-    // 上面查的是 status 那一刻的文件；编辑器在这之后、add 之前又写的文件也会被 add 带进来，没经过检查
-    // （复验 D2-06）。按真正要提交的那一份重查，有违规就撤回暂存、整次拒绝。
-    let staged = git::run(
-        &src,
-        &["diff", "--cached", "--no-renames", "--name-only", "-z"],
-    )?;
-    let mut files = Vec::new();
-    for path in staged.split('\0').filter(|path| !path.is_empty()) {
-        if let Err(error) = if path == colm_remote::engine::SOURCE_LINKS_FILE {
-            Ok(())
-        } else {
-            check_path(path)
-        } {
-            let _ = git::run(&src, &["reset", "-q"]);
-            return Err(error.context(format!("{path} was changed outside the app")));
+    let mut edit = git::Edit::begin(workspace, files.clone())?;
+    let result = (|| {
+        files.extend(crate::source_links::synchronize(&src, &mut edit)?);
+        edit.checkpoint()?;
+        // Already staged deletions/rename sources have no index entry left for `git add`.
+        let tracked = git::run(&src, &["ls-files", "-z"])?;
+        let tracked: std::collections::HashSet<_> = tracked.split('\0').collect();
+        let to_add: Vec<_> = files
+            .iter()
+            .filter(|path| {
+                std::fs::symlink_metadata(src.join(path)).is_ok() || tracked.contains(path.as_str())
+            })
+            .map(String::as_str)
+            .collect();
+        if !to_add.is_empty() {
+            let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
+            add.extend(to_add);
+            edit.stage(&add)?;
         }
-        files.push(path.to_owned());
-    }
-    if files.is_empty() {
-        return Ok(None);
-    }
-    let shown = files.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
-    let more = files.len().saturating_sub(5);
-    let message = if more > 0 {
-        format!("ws: external edit of {shown} and {more} more")
-    } else {
-        format!("ws: external edit of {shown}")
-    };
-    git::run(&src, &["commit", "-q", "-m", &message])?;
-    let commit = git::head(&src)?;
-    Ok(Some(Applied {
-        short: git::short(&src, &commit)?,
-        commit,
-        files,
-    }))
+        // Recheck the actual index too; an external Git client can stage additional paths.
+        let staged = git::run(
+            &src,
+            &["diff", "--cached", "--no-renames", "--name-only", "-z"],
+        )?;
+        let selected = files;
+        let mut files = Vec::new();
+        for path in staged.split('\0').filter(|path| !path.is_empty()) {
+            ensure!(
+                selected.iter().any(|selected| selected == path),
+                "the Git index changed during the snapshot; retry after reviewing external changes"
+            );
+            if let Err(error) = if path == colm_remote::engine::SOURCE_LINKS_FILE {
+                Ok(())
+            } else {
+                check_path(path)
+            } {
+                return Err(error.context(format!("{path} was changed outside the app")));
+            }
+            files.push(path.to_owned());
+        }
+        if files.is_empty() {
+            return Ok(None);
+        }
+        let shown = files.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+        let more = files.len().saturating_sub(5);
+        let message = if more > 0 {
+            format!("ws: external edit of {shown} and {more} more")
+        } else {
+            format!("ws: external edit of {shown}")
+        };
+        let mut commit = vec![
+            "--literal-pathspecs",
+            "commit",
+            "-q",
+            "--only",
+            "-m",
+            &message,
+            "--",
+        ];
+        commit.extend(files.iter().map(String::as_str));
+        edit.checkpoint()?;
+        git::run(&src, &commit)?;
+        let commit = git::head(&src)?;
+        Ok(Some(Applied {
+            short: git::short(&src, &commit)?,
+            commit,
+            files,
+        }))
+    })();
+    edit.finish(result)
 }
 
 /// 列出一个目录（空串是源码根目录）；不列 `.git`。
@@ -386,6 +438,7 @@ pub fn write_text(
     message: &str,
     expected_hash: Option<&str>,
 ) -> Result<Written> {
+    let _guard = git::WriteLock::acquire(workspace)?;
     let message = check_message(message)?;
     check_text(text)?;
     let file = target(workspace, path)?;
@@ -394,15 +447,20 @@ pub fn write_text(
     // 会让用户莫名其妙，而"文件在软件外被改了"才是他需要处理的事（GUI-03）。
     check_expected(&file, path, expected_hash)?;
     clean(workspace)?;
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&file, text)?;
-    let applied = commit(workspace, path, &message)?;
-    Ok(Written {
-        applied,
-        hash: sha256_bytes(text.as_bytes()),
-    })
+    let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
+    let result = (|| {
+        check_expected(&file, path, expected_hash)?;
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        edit.change(&[path.to_owned()], || Ok(std::fs::write(&file, text)?))?;
+        let applied = commit(workspace, path, &message, &mut edit)?;
+        Ok(Written {
+            applied,
+            hash: sha256_bytes(text.as_bytes()),
+        })
+    })();
+    edit.finish(result)
 }
 
 /// 原子新建一个文本文件并提交：目标已存在就拒绝，原文件一个字节都不动。
@@ -410,29 +468,23 @@ pub fn write_text(
 /// 不能用"先查 exists 再写"：两次操作之间别的进程/另一个界面实例可能刚好创建同名文件，先查再写
 /// 就会把它覆盖。`OpenOptions::create_new` 把"存在性检查 + 创建"合成一次系统调用，并发下至多
 /// 一个成功——这是 GUI-01 要求在后端保证的部分，前端列表只是提前提示。
-/// 进程内的写锁：`create_text` 等操作都是"检查干净 → 建文件 → git 提交"三步，两步并发时
-/// 会在 git 的 index.lock 上互相踩（CI ubuntu 实测：两个线程都失败，唯一赢家变成 0）。
-/// 这些操作本来就该串行（同一工作区的两次改文件不能交错提交），用一把进程内互斥锁把整段
-/// 临界区包起来；跨进程并发仍由 git 的锁文件兜底。
-static WORKSPACE_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 pub fn create_text(
     workspace: &Workspace,
     path: &str,
     text: &str,
     message: &str,
 ) -> Result<Written> {
+    let _guard = git::WriteLock::acquire(workspace)?;
     let message = check_message(message)?;
     check_text(text)?;
     let file = target(workspace, path)?;
-    let _guard = WORKSPACE_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     clean(workspace)?;
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut handle = match std::fs::OpenOptions::new()
+    let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
+    let result = (|| {
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut handle = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&file)
@@ -443,21 +495,19 @@ pub fn create_text(
         ),
         Err(error) => return Err(error.into()),
     };
-    handle.write_all(text.as_bytes())?;
-    drop(handle);
-    // 创建成功但提交失败（比如并发下工作区突然变脏）时，把刚建的文件删掉：失败不能留下一个
-    // 未提交的空文件，那会让工作区从此处于 dirty 状态、后续每次保存都被"先提交"挡住。
-    let applied = match commit(workspace, path, &message) {
-        Ok(applied) => applied,
-        Err(error) => {
-            let _ = std::fs::remove_file(&file);
-            return Err(error);
-        }
-    };
-    Ok(Written {
-        applied,
-        hash: sha256_bytes(text.as_bytes()),
-    })
+        edit.record(&[path.to_owned()])?;
+        edit.change(
+            &[path.to_owned()],
+            || Ok(handle.write_all(text.as_bytes())?),
+        )?;
+        drop(handle);
+        let applied = commit(workspace, path, &message, &mut edit)?;
+        Ok(Written {
+            applied,
+            hash: sha256_bytes(text.as_bytes()),
+        })
+    })();
+    edit.finish(result)
 }
 
 /// 用本机的一个文件替换（或新增）工作区里的文件；可以是二进制。`create_only` 为真时只允许新建，
@@ -469,6 +519,7 @@ pub fn put_file(
     message: &str,
     create_only: bool,
 ) -> Result<Applied> {
+    let _guard = git::WriteLock::acquire(workspace)?;
     let message = check_message(message)?;
     let meta = std::fs::symlink_metadata(from)
         .with_context(|| format!("cannot read {}", from.display()))?;
@@ -506,13 +557,15 @@ pub fn put_file(
             .open(from)?
     };
     clean(workspace)?;
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if create_only {
-        let mut source =
-            std::fs::File::open(from).with_context(|| format!("cannot read {}", from.display()))?;
-        let mut destination = match std::fs::OpenOptions::new()
+    let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
+    let result = (|| {
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if create_only {
+            let mut source = std::fs::File::open(from)
+                .with_context(|| format!("cannot read {}", from.display()))?;
+            let mut destination = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&file)
@@ -523,23 +576,24 @@ pub fn put_file(
             ),
             Err(error) => return Err(error.into()),
         };
-        std::io::copy(&mut source, &mut destination)
-            .with_context(|| format!("cannot copy {}", from.display()))?;
-        drop(destination);
+            edit.record(&[path.to_owned()])?;
+            edit.change(&[path.to_owned()], || {
+                std::io::copy(&mut source, &mut destination)
+                    .with_context(|| format!("cannot copy {}", from.display()))
+            })?;
+            drop(destination);
+            #[cfg(windows)]
+            drop(source_guard);
+            return commit(workspace, path, &message, &mut edit);
+        }
+        edit.change(&[path.to_owned()], || {
+            std::fs::copy(from, &file).with_context(|| format!("cannot copy {}", from.display()))
+        })?;
         #[cfg(windows)]
         drop(source_guard);
-        return match commit(workspace, path, &message) {
-            Ok(applied) => Ok(applied),
-            Err(error) => {
-                let _ = std::fs::remove_file(&file);
-                Err(error)
-            }
-        };
-    }
-    std::fs::copy(from, &file).with_context(|| format!("cannot copy {}", from.display()))?;
-    #[cfg(windows)]
-    drop(source_guard);
-    commit(workspace, path, &message)
+        commit(workspace, path, &message, &mut edit)
+    })();
+    edit.finish(result)
 }
 
 /// 本机文件夹里要复制的文件；超过上限或含符号链接就拒绝，一个字节都不写。
@@ -580,6 +634,7 @@ fn tree_files(from: &Path) -> Result<Vec<PathBuf>> {
 
 /// 用本机的一个文件夹整个替换工作区里的目录（比如换掉一个物理模块）；原目录里的东西全部换掉。
 pub fn put_dir(workspace: &Workspace, path: &str, from: &Path, message: &str) -> Result<Applied> {
+    let _guard = git::WriteLock::acquire(workspace)?;
     let message = check_message(message)?;
     ensure!(
         std::fs::symlink_metadata(from).is_ok_and(|meta| meta.is_dir()),
@@ -604,37 +659,52 @@ pub fn put_dir(workspace: &Workspace, path: &str, from: &Path, message: &str) ->
         check_path(&format!("{path}/{}", relative.replace('\\', "/")))?;
     }
     clean(workspace)?;
-    let directories = crate::source_links::check_removal(&workspace.src(), path, Some(from))?;
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir)?;
-    }
-    for directory in directories {
-        std::fs::create_dir_all(dir.join(directory))?;
-    }
-    for file in &files {
-        let destination = dir.join(file);
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::copy(from.join(file), &destination)?;
-    }
-    std::fs::create_dir_all(&dir)?;
-    commit(workspace, path, &message)
+    let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
+    let result = (|| {
+        let directories = crate::source_links::check_removal(&workspace.src(), path, Some(from))?;
+        edit.change(&[path.to_owned()], || {
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)?;
+            }
+            for directory in directories {
+                std::fs::create_dir_all(dir.join(directory))?;
+            }
+            for file in &files {
+                let destination = dir.join(file);
+                if let Some(parent) = destination.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::copy(from.join(file), &destination)?;
+            }
+            std::fs::create_dir_all(&dir)?;
+            Ok(())
+        })?;
+        commit(workspace, path, &message, &mut edit)
+    })();
+    edit.finish(result)
 }
 
 /// 删除工作区里的一个文件或目录并提交。
 pub fn remove(workspace: &Workspace, path: &str, message: &str) -> Result<Applied> {
+    let _guard = git::WriteLock::acquire(workspace)?;
     let message = check_message(message)?;
     let item = physical_target(workspace, path)?;
     check_old_subtree(workspace, path)?;
     clean(workspace)?;
-    crate::source_links::check_removal(&workspace.src(), path, None)?;
-    match std::fs::symlink_metadata(&item) {
-        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&item)?,
-        Ok(_) => std::fs::remove_file(&item)?,
-        Err(_) => bail!("{path} does not exist"),
-    }
-    commit(workspace, path, &message)
+    let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
+    let result = (|| {
+        crate::source_links::check_removal(&workspace.src(), path, None)?;
+        edit.change(&[path.to_owned()], || {
+            match std::fs::symlink_metadata(&item) {
+                Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&item)?,
+                Ok(_) => std::fs::remove_file(&item)?,
+                Err(_) => bail!("{path} does not exist"),
+            }
+            Ok(())
+        })?;
+        commit(workspace, path, &message, &mut edit)
+    })();
+    edit.finish(result)
 }
 
 #[cfg(test)]

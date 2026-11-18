@@ -833,6 +833,33 @@ pub(crate) fn case_profile_of(dir: &Path, spatial: bool) -> Result<CaseProfile, 
     let stages = std::fs::read_to_string(dir.join("stages.json")).ok();
     let record = recorded_case(dir);
     let mut profile = case_profile(&text, spatial, stages.as_deref(), record.mode.as_deref())?;
+    // Keep missing/offline site files repairable; actual local metadata uses the same CLI
+    // predicate as execution, without linking NetCDF into the window process.
+    if !profile.crop && !spatial {
+        if let Some(colm_namelist::Value::Str(site)) = effective.get("SITE_fsitedata") {
+            let site = Path::new(site);
+            let site = if site.is_absolute() {
+                site.to_path_buf()
+            } else {
+                dir.join(site)
+            };
+            if site.is_file() {
+                // Metadata is advisory here; the run preflight still reports unreadable sites.
+                match crate::sidecar::capture(&["case-crop".into(), dir.display().to_string()]) {
+                    Ok(json) => {
+                        profile.crop = serde_json::from_str::<serde_json::Value>(&json)
+                            .ok()
+                            .and_then(|value| value["crop"].as_bool())
+                            .unwrap_or(false);
+                    }
+                    Err(error) => eprintln!(
+                        "cannot inspect crop metadata for {}: {error}",
+                        dir.display()
+                    ),
+                }
+            }
+        }
+    }
     profile.obs_file = case_default_observation(dir, &record);
     profile.domain_kind = record.domain;
     profile.shapefile = record.shapefile;
@@ -862,8 +889,7 @@ fn real_input_dir(dir: String) -> String {
 }
 
 /// 反推规则：网格看哪种网格字段写了；次网格看 `DEF_USE_PFT/PC`，分类优先算例显式选择、
-/// 建例记录，最后回退上次内核；作物看内核 CROP 宏或建例播种日字段（`DEF_USE_CROP`
-/// 只是宏的只读反映，建例时不写）；甲烷看材料名单；河湖汇流只对经纬度与非结构网格有意义（缺省开）。
+/// 建例记录，最后回退上次内核；作物看内核 CROP 宏、显式运行时开关或正的播种日；甲烷看材料名单；河湖汇流只对经纬度与非结构网格有意义（缺省开）。
 pub(crate) fn case_profile(
     text: &str,
     spatial: bool,
@@ -925,7 +951,7 @@ pub(crate) fn case_profile(
     } else {
         has_macro("LULC_USGS")
     };
-    let crop = has_macro("CROP") || has("DEF_TUNING_CROP_PLANTING_DAY");
+    let crop = has_macro("CROP") || colm_case::crop_enabled(&doc);
     let subgrid = if logical(&doc, "DEF_USE_PFT") {
         "PFT"
     } else if logical(&doc, "DEF_USE_PC") {

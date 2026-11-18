@@ -25,6 +25,7 @@ CHROME = os.environ.get(
 )
 TMP = ROOT / "tmp/manual-build"
 VERSION = json.loads((ROOT / "gui/package.json").read_text(encoding="utf-8"))["version"]
+VERSION_PATTERN = r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?"
 
 CHAPTERS = [
     "1. 安装与启动",
@@ -58,6 +59,17 @@ def norm(t: str) -> str:
     for a, b in [("⻚", "页"), ("⻅", "见"), ("⻆", "角"), ("⻓", "长"), ("⻔", "门")]:
         t = t.replace(a, b)
     return re.sub(r"\s+", "", t)
+
+
+def sync_version(path: pathlib.Path, prefix: str, count: int) -> None:
+    text = path.read_text(encoding="utf-8")
+    updated, matches = re.subn(
+        rf"({prefix}){VERSION_PATTERN}", lambda match: match[1] + VERSION, text
+    )
+    if matches != count:
+        raise SystemExit(f"expected {count} version labels in {path}, found {matches}")
+    if updated != text:
+        path.write_text(updated, encoding="utf-8")
 
 
 def build_base_md() -> str:
@@ -206,6 +218,8 @@ def stamp_and_merge(body_pdf: pathlib.Path, cover_pdf: pathlib.Path, out: pathli
 
 def main():
     TMP.mkdir(parents=True, exist_ok=True)
+    sync_version(BASE / "README.md", r"\*\*适用版本：\*\* `|；软件版本 ", 2)
+    sync_version(BASE / "cover.html", r"<th>适用版本</th><td>v", 1)
     base_md_text = build_base_md()
     (TMP / "pdf.md").write_text(strip_relative_links(base_md_text), encoding="utf-8")
     pandoc_html(TMP / "pdf.md", BASE / ".body-pdf.html")

@@ -218,11 +218,14 @@ pub fn ended(status: &Status) -> Option<&'static str> {
 pub fn status_script(root: &str, id: &str, lines: usize) -> String {
     let dir = quote(&job_dir(root, id));
     format!(
-        r#"{prelude}{alive}cd {dir} 2>/dev/null || {{ echo "state=unknown"; exit 0; }}
+        r#"{prelude}cd {dir} 2>/dev/null || {{ echo "state=unknown"; exit 0; }}
+colm_status_query() {{
+{query}}}
+COLM_QUERY=
+if [ ! -f exit_code ]; then COLM_QUERY=$(colm_status_query); fi
 if [ -f exit_code ] && [ -f cancelled ]; then echo "state=lost"; echo "detail=CANCELLED by request (exit $(cat exit_code))"; echo "terminal=confirmed"
 elif [ -f exit_code ]; then echo "state=finished $(cat exit_code)"
-else
-{query}fi
+else printf '%s\n' "$COLM_QUERY"; fi
 if [ -f cancel_requested ]; then echo "cancel_requested=yes"; else echo "cancel_requested=no"; fi
 echo "phase=$(tail -n 1 phase 2>/dev/null)"
 echo "---log---"
@@ -230,7 +233,6 @@ tail -n {lines} log 2>/dev/null
 true
 "#,
         prelude = sched::PATH_PRELUDE,
-        alive = crate::pack::ALIVE,
         query = sched::QUERY,
     )
 }

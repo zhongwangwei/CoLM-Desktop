@@ -660,8 +660,7 @@ fn forcing_dir_text(dir: &std::path::Path) -> String {
 /// 为一个 POINT 算例接入独立的边界层高度文件。
 ///
 /// 这不是单改 `DEF_USE_CBL_HEIGHT`：第九个强迫变量的文件名、变量名、时间步长
-/// 都在 `forcing.nml`。先校验两份文件的时间轴与空间形状，再写 forcing.nml，
-/// 最后才打开 case.nml 开关；即使最后一步写失败，也只会留下未启用的备用配置。
+/// 都在 `forcing.nml`。校验时间轴、空间形状与算例配置后，两份文件在同一事务中写入。
 #[tauri::command]
 pub fn configure_cbl_batch(
     dirs: Vec<String>,
@@ -795,14 +794,22 @@ pub fn configure_cbl_batch(
         put(&mut forcing_doc, path, value, "nl_colm_forcing")
             .map_err(|e| format!("{}: {e}", forcing_path.display()))?;
     }
-    // Same locked, staged replacement as every other configuration write: a crash or a
-    // concurrent save never leaves a truncated forcing.nml.
-    crate::config::write_files_atomic(&[(forcing_path, forcing_doc.to_string())])?;
-    crate::config::set_field_batch(
+    let forcing = crate::config::Prepared::replacement(
+        forcing_path,
+        forcing_text,
+        forcing_doc.to_string(),
+        (case_path, case_text),
+    );
+    crate::config::set_fields_with_forcing(
         dirs,
-        "DEF_USE_CBL_HEIGHT".into(),
-        ".true.".into(),
+        vec![crate::config::FieldChange {
+            path: "DEF_USE_CBL_HEIGHT".into(),
+            value: ".true.".into(),
+        }],
+        &[],
         kernel_dir,
+        None,
+        Some(&forcing),
     )
 }
 

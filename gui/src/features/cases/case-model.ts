@@ -1,3 +1,4 @@
+import { fortranNumberInputValue } from '../../lib/param-presentation';
 import { bilingual } from '../../lib/bilingual';
 import type { Site } from '../../lib/types';
 export type { Site } from '../../lib/types';
@@ -177,7 +178,18 @@ export function effectiveModelFields(
     : values;
 }
 export function cropEnabled(fields: Record<string, string>): boolean {
-  return Object.keys(fields).some((key) => key.toUpperCase() === 'DEF_TUNING_CROP_PLANTING_DAY');
+  return Object.entries(fields).some(([key, raw]) => {
+    const name = key.toUpperCase();
+    if (name === 'DEF_USE_CROP' || name === 'DEF_USE_IRRIGATION')
+      return /^\.?(?:true|t)\.?$/i.test(raw.trim());
+    if (name !== 'DEF_TUNING_CROP_PLANTING_DAY') return false;
+    const value = fortranNumberInputValue(raw);
+    return (
+      value !== null &&
+      /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value) &&
+      Number(value) > 0
+    );
+  });
 }
 
 export function casePreparationOptions(

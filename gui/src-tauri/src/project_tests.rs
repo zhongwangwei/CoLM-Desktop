@@ -728,3 +728,32 @@ fn reopening_a_spatial_project_backfills_grid_bounds_and_forcing() {
     assert_eq!(form["mesh"], "/mesh/ugrid.nc");
     assert!(!form.contains_key("catchment"));
 }
+
+#[test]
+fn crop_profile_uses_runtime_values_not_presence() {
+    for (assignment, crop) in [
+        ("DEF_TUNING_CROP_PLANTING_DAY=0.", false),
+        ("DEF_TUNING_CROP_PLANTING_DAY=-1", false),
+        ("DEF_TUNING_CROP_PLANTING_DAY=1.2D2", true),
+        ("DEF_USE_CROP=.true.", true),
+        ("DEF_USE_IRRIGATION=.true.", true),
+        ("DEF_USE_CROP=.false.", false),
+    ] {
+        let text = format!("&nl_colm\n{assignment}\n/\n");
+        assert_eq!(
+            case_profile(&text, false, None, None).unwrap().crop,
+            crop,
+            "{assignment}"
+        );
+        assert!(
+            case_profile(
+                &text,
+                false,
+                Some(r#"{"colm":{"kernel":"preset=crop;macros=CROP"}}"#),
+                None
+            )
+            .unwrap()
+            .crop
+        );
+    }
+}

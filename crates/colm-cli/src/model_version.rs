@@ -2062,7 +2062,14 @@ fn branch_parent_code(
 }
 
 fn branch_saved_code(opts: &Opts, saved: &CodeRef, label: &str, draft_id: &str) -> Result<CodeRef> {
-    let name = format!("ver-{}", draft_id.trim_start_matches("model-"));
+    let suffix = draft_id.trim_start_matches("model-");
+    let name = if suffix.len() <= 36 {
+        format!("ver-{suffix}")
+    } else {
+        // Model IDs are validated ASCII and can be longer than a workspace name.
+        let hash = colm_kernel::sha256_hex(draft_id.as_bytes());
+        format!("long-ver-{}-{}", &suffix[..14], &hash[..16])
+    };
     // 官方版优先用源码缓存里的普通目录：从源码包建仓库时被 .gitignore 忽略的文件不会被跟踪，
     // 内容哈希只算跟踪的文件，就和冻结时对不上（官方 r99 实测）。
     let plain = cache_dir(opts, saved)?.join("source");
@@ -4805,7 +4812,7 @@ mod inherited_draft_tests {
         let draft = store
             .create_draft(
                 serde_json::from_value(serde_json::json!({
-                    "id":"legacy", "name":"Legacy", "note":"old saved official selection",
+                    "id":"x".repeat(100), "name":"Legacy", "note":"old saved official selection",
                     "parent":parent.version, "code":saved_code, "overlay":{}, "generation":0
                 }))
                 .unwrap(),
@@ -4835,8 +4842,10 @@ mod inherited_draft_tests {
         let branched = branch_draft_code(&store, &opts).unwrap();
         assert_eq!(branched["code_editable"], true);
         assert_eq!(branched["code"]["source_sha256"], saved_code.source_sha256);
+        let workspace = branched["code"]["workspace"].as_str().unwrap();
         assert_eq!(
-            std::fs::read_to_string(root.join("ws/ver-legacy/src/Cargo.toml")).unwrap(),
+            std::fs::read_to_string(root.join("ws").join(workspace).join("src/Cargo.toml"))
+                .unwrap(),
             "[workspace]\n# saved official source\n"
         );
         std::fs::remove_dir_all(root).unwrap();

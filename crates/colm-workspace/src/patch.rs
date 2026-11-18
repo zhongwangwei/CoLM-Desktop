@@ -51,7 +51,38 @@ fn header_paths(header: &str) -> Result<Vec<String>> {
 /// 补丁里碰到的路径（`diff --git` 头、`--- a/…`、`+++ b/…`、`rename`/`copy` 行）。`/dev/null` 不算。
 pub fn touched_paths(diff: &str) -> Result<Vec<String>> {
     let mut paths = Vec::new();
+    let mut remaining = (0usize, 0usize);
     for line in diff.lines() {
+        if remaining != (0, 0) {
+            match line.as_bytes().first() {
+                Some(b' ') => {
+                    remaining.0 = remaining.0.saturating_sub(1);
+                    remaining.1 = remaining.1.saturating_sub(1);
+                }
+                Some(b'-') => remaining.0 = remaining.0.saturating_sub(1),
+                Some(b'+') => remaining.1 = remaining.1.saturating_sub(1),
+                Some(b'\\') => (),
+                _ => bail!("invalid patch hunk payload"),
+            }
+            continue;
+        }
+        if let Some(header) = line.strip_prefix("@@ ") {
+            let mut ranges = header.split_whitespace();
+            let count = |range: Option<&str>, prefix| -> Result<usize> {
+                let range = range
+                    .and_then(|r| r.strip_prefix(prefix))
+                    .context("invalid patch hunk header")?;
+                Ok(match range.split_once(',') {
+                    Some((_, count)) => count.parse()?,
+                    None => {
+                        range.parse::<usize>()?;
+                        1
+                    }
+                })
+            };
+            remaining = (count(ranges.next(), '-')?, count(ranges.next(), '+')?);
+            continue;
+        }
         // ponytail: reject Git C-quoted paths until a complete decoder is needed.
         if let Some(header) = line.strip_prefix("diff --git ") {
             ensure!(
@@ -142,6 +173,7 @@ pub fn check_path(path: &str) -> Result<()> {
 
 /// 应用补丁并提交。补丁先整体检查（`git apply --check`），不能应用就一个字节都不改。
 pub fn apply(workspace: &Workspace, diff: &str, message: &str) -> Result<Applied> {
+    let _guard = git::WriteLock::acquire(workspace)?;
     ensure!(
         diff.len() <= MAX_PATCH_BYTES,
         "the patch is {} bytes; the limit is {MAX_PATCH_BYTES}",
@@ -176,33 +208,39 @@ pub fn apply(workspace: &Workspace, diff: &str, message: &str) -> Result<Applied
         &bytes,
     )
     .context("the patch does not apply to the current files")?;
-    let native_links = crate::source_links::valid_native_links(&src)?;
-    git::run_with_input(&src, &["apply", "--whitespace=nowarn", "-"], &bytes)?;
-    match crate::source_links::check_native_links(&src, &native_links)
-        .and_then(|()| crate::source_links::synchronize(&src))
-    {
-        Ok(aliases) => files.extend(aliases),
-        Err(error) => {
-            git::run_with_input(
-                &src,
-                &["apply", "--reverse", "--whitespace=nowarn", "-"],
-                &bytes,
-            )
-            .context("cannot undo a patch with invalid source links")?;
-            return Err(error);
-        }
-    }
-    let mut add = vec!["--literal-pathspecs", "add", "--"];
-    add.extend(files.iter().map(String::as_str));
-    git::run(&src, &add)?;
-    git::run(&src, &["commit", "-q", "-m", &format!("ws: {message}")])
-        .context("the patch applied but nothing changed")?;
-    let commit = git::head(&src)?;
-    Ok(Applied {
-        short: git::short(&src, &commit)?,
-        commit,
-        files,
-    })
+    let mut edit = git::Edit::begin(workspace, files.clone())?;
+    let result = (|| {
+        let native_links = crate::source_links::valid_native_links(&src)?;
+        edit.checkpoint()?;
+        git::run_with_input(&src, &["apply", "--whitespace=nowarn", "-"], &bytes)?;
+        edit.record(&files)?;
+        crate::source_links::check_native_links(&src, &native_links)?;
+        files.extend(crate::source_links::synchronize(&src, &mut edit)?);
+        edit.checkpoint()?;
+        let mut add = vec!["--literal-pathspecs", "add", "--"];
+        add.extend(files.iter().map(String::as_str));
+        edit.stage(&add)?;
+        let message = format!("ws: {message}");
+        let mut commit = vec![
+            "--literal-pathspecs",
+            "commit",
+            "-q",
+            "--only",
+            "-m",
+            &message,
+            "--",
+        ];
+        commit.extend(files.iter().map(String::as_str));
+        edit.checkpoint()?;
+        git::run(&src, &commit).context("the patch applied but nothing changed")?;
+        let commit = git::head(&src)?;
+        Ok(Applied {
+            short: git::short(&src, &commit)?,
+            commit,
+            files,
+        })
+    })();
+    edit.finish(result)
 }
 
 #[derive(Debug, Serialize)]
@@ -327,6 +365,7 @@ fn read_diff_output(mut child: std::process::Child) -> Result<FileDiff> {
 
 /// Restore only the selected file, preserving history with one new commit.
 pub fn revert_file(workspace: &Workspace, path: &str, message: &str) -> Result<Applied> {
+    let _guard = git::WriteLock::acquire(workspace)?;
     let message = message.trim();
     ensure!(
         !message.is_empty() && message.len() <= 200 && !message.contains(['\n', '\r', '\0']),
@@ -339,49 +378,59 @@ pub fn revert_file(workspace: &Workspace, path: &str, message: &str) -> Result<A
     );
     checked_changed_file(workspace, path)?;
     crate::source_links::check_restore(&src, path, workspace.official_base())?;
-    git::run(
-        &src,
-        &[
+    let mut edit = git::Edit::begin(workspace, vec![path.to_owned()])?;
+    let result = (|| {
+        edit.checkpoint()?;
+        git::run(
+            &src,
+            &[
+                "--literal-pathspecs",
+                "restore",
+                "--source",
+                workspace.official_base(),
+                "--staged",
+                "--worktree",
+                "--",
+                path,
+            ],
+        )?;
+        edit.record(&[path.to_owned()])?;
+        edit.record_index()?;
+        let mut files = vec![path.to_owned()];
+        let aliases = crate::source_links::synchronize(&src, &mut edit)?;
+        if !aliases.is_empty() {
+            let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
+            add.extend(aliases.iter().map(String::as_str));
+            edit.stage(&add)?;
+        }
+        files.extend(aliases);
+        edit.checkpoint()?;
+        let message = format!("ws: {message}");
+        let mut commit = vec![
             "--literal-pathspecs",
-            "restore",
-            "--source",
-            workspace.official_base(),
-            "--staged",
-            "--worktree",
+            "commit",
+            "-q",
+            "--only",
+            "-m",
+            &message,
             "--",
-            path,
-        ],
-    )?;
-    let mut files = vec![path.to_owned()];
-    let aliases = crate::source_links::synchronize(&src)?;
-    if !aliases.is_empty() {
-        let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
-        add.extend(aliases.iter().map(String::as_str));
-        git::run(&src, &add)?;
-    }
-    files.extend(aliases);
-    let message = format!("ws: {message}");
-    let mut commit = vec![
-        "--literal-pathspecs",
-        "commit",
-        "-q",
-        "--only",
-        "-m",
-        &message,
-        "--",
-    ];
-    commit.extend(files.iter().map(String::as_str));
-    git::run(&src, &commit)?;
-    let commit = git::head(&src)?;
-    Ok(Applied {
-        short: git::short(&src, &commit)?,
-        commit,
-        files,
-    })
+        ];
+        commit.extend(files.iter().map(String::as_str));
+        edit.checkpoint()?;
+        git::run(&src, &commit)?;
+        let commit = git::head(&src)?;
+        Ok(Applied {
+            short: git::short(&src, &commit)?,
+            commit,
+            files,
+        })
+    })();
+    edit.finish(result)
 }
 
 /// 撤回到某个提交（只能撤回到工作区自己的提交里：基线提交或之后的）。之后的提交被丢弃。
 pub fn revert_to(workspace: &Workspace, commit: &str) -> Result<String> {
+    let _guard = git::WriteLock::acquire(workspace)?;
     ensure!(
         !commit.is_empty() && commit.chars().all(|c| c.is_ascii_hexdigit()),
         "give a commit id (hex), got {commit:?}"

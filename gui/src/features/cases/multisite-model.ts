@@ -176,6 +176,7 @@ export function planMultiSites({
       );
     } else {
       delete fields.DEF_TUNING_CROP_PLANTING_DAY;
+      if ('DEF_USE_CROP' in fields) fields.DEF_USE_CROP = '.false.';
       if (scanned.urban)
         Object.assign(fields, {
           DEF_USE_BGC: '.false.',
@@ -185,7 +186,7 @@ export function planMultiSites({
           DEF_SOLUTE_NAMES: "''",
         });
     }
-    if (structure !== 'PFT') fields.DEF_USE_IRRIGATION = '.false.';
+    if (!scanned.crop || structure !== 'PFT') fields.DEF_USE_IRRIGATION = '.false.';
     Object.assign(
       fields,
       cutoff

@@ -320,3 +320,117 @@ fn an_existing_product_is_overwritten_only_on_request() {
     assert!(refuse_existing(&dst, Some(true)).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn cbl_configuration_commits_both_files_or_neither() {
+    use crate::config::{set_fields_with_forcing, FieldChange, Prepared};
+    use std::fs;
+    for scenario in [
+        "success",
+        "invalid-kernel",
+        "invalid-case",
+        "readonly-case",
+        "stale-forcing",
+        "stale-case-reference",
+    ] {
+        let root = std::env::temp_dir().join(format!(
+            "colm-cbl-transaction-{}-{scenario}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let case = root.join("case.nml");
+        // A custom absolute reference must survive the update.
+        let header = root.join("custom-forcing.nml");
+        let original_case = format!("&nl_colm\n DEF_CASE_NAME = 'cbl-test'\n DEF_USE_CBL_HEIGHT = .true.\n DEF_forcing_namelist = '{}'\n/\n", header.display());
+        let original_case = if scenario == "invalid-case" {
+            original_case.replace("/\n", " DEF_simulation_time%timestep = -1\n/\n")
+        } else {
+            original_case
+        };
+        let original_forcing =
+            "&nl_colm_forcing\n DEF_forcing%dataset = 'POINT'\n DEF_forcing%CBL_vname = 'old'\n/\n";
+        let updated = original_forcing.replace("'old'", "'PBLH'");
+        fs::write(&case, &original_case).unwrap();
+        fs::write(&header, original_forcing).unwrap();
+        let prepared = Prepared::replacement(
+            header.clone(),
+            original_forcing.into(),
+            updated.clone(),
+            (case.clone(), original_case.clone()),
+        );
+        let other_header = root.join("other-forcing.nml");
+        fs::write(&other_header, original_forcing).unwrap();
+        let expected_case = if scenario == "stale-case-reference" {
+            let changed = original_case
+                .replace(
+                    &header.to_string_lossy().to_string(),
+                    &other_header.to_string_lossy(),
+                )
+                .replace(
+                    "DEF_USE_CBL_HEIGHT = .true.",
+                    "DEF_USE_CBL_HEIGHT = .false.",
+                );
+            fs::write(&case, &changed).unwrap();
+            changed
+        } else {
+            original_case.clone()
+        };
+        let permissions = fs::metadata(&case).unwrap().permissions();
+        if scenario == "readonly-case" {
+            let mut readonly = permissions.clone();
+            readonly.set_readonly(true);
+            fs::set_permissions(&case, readonly).unwrap();
+        }
+        let expected_forcing = if scenario == "stale-forcing" {
+            fs::write(&header, "changed concurrently").unwrap();
+            "changed concurrently"
+        } else {
+            original_forcing
+        };
+        let kernel = (scenario == "invalid-kernel")
+            .then(|| root.join("missing-kernel").to_string_lossy().into_owned());
+        let result = set_fields_with_forcing(
+            vec![root.to_string_lossy().into_owned()],
+            vec![FieldChange {
+                path: "DEF_USE_CBL_HEIGHT".into(),
+                value: ".true.".into(),
+            }],
+            &[],
+            kernel,
+            None,
+            Some(&prepared),
+        );
+        fs::set_permissions(&case, permissions).unwrap();
+        if scenario == "success" {
+            result.unwrap();
+            let doc = colm_namelist::parse(&fs::read_to_string(&case).unwrap()).unwrap();
+            assert_eq!(
+                doc.get("DEF_USE_CBL_HEIGHT"),
+                Some(&colm_namelist::Value::Bool(true))
+            );
+            assert_eq!(
+                doc.get("DEF_forcing_namelist"),
+                Some(&colm_namelist::Value::Str(
+                    header.to_string_lossy().into_owned()
+                ))
+            );
+            assert!(doc.get("DEF_forcing%CBL_vname").is_none());
+            assert_eq!(fs::read_to_string(&header).unwrap(), updated);
+        } else {
+            let error = result.err().expect(scenario);
+            match scenario {
+                "invalid-kernel" => assert!(error.contains("missing-kernel"), "{error}"),
+                "invalid-case" => assert!(error.contains("timestep"), "{error}"),
+                "readonly-case" => assert!(error.contains("case.nml"), "{error}"),
+                "stale-forcing" | "stale-case-reference" => {
+                    assert!(error.contains("已改变"), "{error}")
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(fs::read_to_string(&case).unwrap(), expected_case);
+            assert_eq!(fs::read_to_string(&header).unwrap(), expected_forcing);
+        }
+        assert_eq!(fs::read_to_string(&other_header).unwrap(), original_forcing);
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
