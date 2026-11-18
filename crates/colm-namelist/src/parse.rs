@@ -136,12 +136,12 @@ fn parse_assignments(mut raw: &str, items: &mut Vec<Item>) -> Result<()> {
 fn assignment_equals(s: &str) -> Option<usize> {
     let mut tail = s.trim_start();
     loop {
-        if !tail.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        let end = tail
+            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '@')
+            .unwrap_or(tail.len());
+        if !crate::value::valid_field_name(&tail[..end]) {
             return None;
         }
-        let end = tail
-            .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .unwrap_or(tail.len());
         tail = tail[end..].trim_start();
         if tail.starts_with('(') {
             let end = tail.find(')')?;
@@ -163,7 +163,7 @@ fn next_assignment(s: &str) -> Option<usize> {
         if quote.is_none()
             && depth == 0
             && boundary
-            && c.is_ascii_alphabetic()
+            && (c.is_ascii_alphabetic() || c == '@')
             && assignment_equals(&s[at..]).is_some()
         {
             return Some(at);

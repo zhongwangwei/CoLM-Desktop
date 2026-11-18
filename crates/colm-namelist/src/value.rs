@@ -53,6 +53,25 @@ pub struct Path {
     pub segments: Vec<Segment>,
 }
 
+/// Legacy material keys must remain readable until the GUI migrates them.
+/// They are historical application syntax, not general Fortran identifiers.
+pub(crate) fn valid_field_name(name: &str) -> bool {
+    const MATERIAL_PREFIX: &str = "@@DEF_MATERIAL_@@";
+    if name.eq_ignore_ascii_case("@@DEF_USE_MATERIAL@@") {
+        return true;
+    }
+    let name = if name
+        .get(..MATERIAL_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(MATERIAL_PREFIX))
+    {
+        &name[MATERIAL_PREFIX.len()..]
+    } else {
+        name
+    };
+    name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 impl Path {
     pub fn parse(s: &str) -> Result<Self> {
         let s = s.trim();
@@ -83,9 +102,7 @@ impl Path {
             if name.is_empty() {
                 bail!("empty path segment in {s}");
             }
-            if !name.starts_with(|c: char| c.is_ascii_alphabetic())
-                || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-            {
+            if !valid_field_name(name) {
                 bail!("invalid field name in {s}");
             }
             segments.push(if i == 0 {

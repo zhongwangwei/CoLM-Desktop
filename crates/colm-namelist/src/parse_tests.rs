@@ -442,3 +442,42 @@ fn same_line_values_match_gfortran_oracle_fixtures() {
         assert_eq!(parsed.get("path"), Some(&Value::Str(path.into())));
     }
 }
+
+#[test]
+fn legacy_material_keys_round_trip_and_remain_editable_for_migration() {
+    for source in [
+        "&nl_colm\n @@DEF_USE_MATERIAL@@=.true.\n @@DEF_MATERIAL_@@PARAM_FILES='HDO:hdo.nml'\n /\n",
+        "&nl_colm modern=1,@@DEF_USE_MATERIAL@@=.true., @@DEF_MATERIAL_@@PARAM_FILES='HDO:hdo.nml', other=2 /\n",
+        "&nl_colm @@def_use_material@@=.true. @@def_material_@@param_files='HDO:hdo.nml' /\n",
+    ] {
+        let mut parsed = doc(source);
+        assert_eq!(parsed.to_string(), source);
+        assert_eq!(parsed.get("@@DEF_USE_MATERIAL@@"), Some(&Value::Bool(true)));
+        assert_eq!(parsed.get("@@DEF_MATERIAL_@@PARAM_FILES"), Some(&Value::Str("HDO:hdo.nml".into())));
+        parsed.set("@@DEF_USE_MATERIAL@@", Value::Bool(false)).unwrap();
+        assert_eq!(doc(&parsed.to_string()).get("@@DEF_USE_MATERIAL@@"), Some(&Value::Bool(false)));
+        parsed.remove("@@DEF_USE_MATERIAL@@").unwrap();
+        parsed.remove("@@DEF_MATERIAL_@@PARAM_FILES").unwrap();
+        let reparsed = doc(&parsed.to_string());
+        assert!(reparsed.get("@@DEF_USE_MATERIAL@@").is_none());
+        assert!(reparsed.get("@@DEF_MATERIAL_@@PARAM_FILES").is_none());
+        assert!(!parsed.to_string().contains("@@"));
+    }
+}
+
+#[test]
+fn legacy_material_compatibility_does_not_admit_arbitrary_invalid_keys() {
+    for key in [
+        "@@OTHER@@",
+        "@@DEF_MATERIAL_@@",
+        "@@DEF_MATERIAL_@@BAD-NAME",
+        "@@DEF_USE_MATERIAL@@extra",
+        "bad@name",
+    ] {
+        assert!(Path::parse(key).is_err(), "accepted {key}");
+        assert!(
+            parse(&format!("&g a=1 {key}=2 /\n")).is_err(),
+            "accepted {key}"
+        );
+    }
+}
