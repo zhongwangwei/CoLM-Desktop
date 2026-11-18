@@ -417,7 +417,7 @@ fn cbl_configuration_commits_both_files_or_neither() {
             assert!(doc.get("DEF_forcing%CBL_vname").is_none());
             assert_eq!(fs::read_to_string(&header).unwrap(), updated);
         } else {
-            let error = result.err().expect(scenario);
+            let error = result.expect_err(scenario);
             match scenario {
                 "invalid-kernel" => assert!(error.contains("missing-kernel"), "{error}"),
                 "invalid-case" => assert!(error.contains("timestep"), "{error}"),
