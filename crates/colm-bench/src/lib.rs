@@ -42,9 +42,8 @@ pub const UV_ARCHIVES: [(&str, &str, &str); 6] = [
         "724279317fee6e5fa8ad1908e4eba2bbe764ef1ece5b3f4597927b62b1fe562a",
     ),
 ];
-/// PyPI 上装的 OpenBench 版本。只实测过这一版（登记表 JSON 里的 Infinity、`check` 与 `run` 对相对
-/// fulllist 的解析不一致都是按它处理的）；不锁版本时新发布会悄悄换掉行为（复验 D2-03）。换版本要重跑一次评估。
-pub const OPENBENCH_VERSION: &str = "3.0.8";
+/// 固定经过评估回归验证的 PyPI 发布版，升级时重跑站点和格点评估。
+pub const OPENBENCH_VERSION: &str = "3.1.2";
 /// OpenBench 要求 Python ≥ 3.10；3.12 的科学计算轮子（cartopy、netCDF4）三个平台都齐。
 pub const PYTHON_VERSION: &str = "3.12";
 /// 这个平台（`macos-aarch64` 这样的写法，同 `std::env::consts` 的 OS 与 ARCH）该下载的 uv 压缩包与它的 SHA-256。

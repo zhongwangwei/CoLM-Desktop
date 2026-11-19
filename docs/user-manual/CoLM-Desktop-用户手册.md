@@ -1,6 +1,6 @@
 # CoLM Desktop 用户手册
 
-**适用版本：** `0.3.0-beta.19`（测试版）\
+**适用版本：** `0.3.0-beta.20`（测试版）\
 **平台：** macOS（Apple Silicon / Intel）、Windows x86_64、Linux x86_64  
 **手册截图：** 2026-11-07/08 在 macOS 上由真实窗口采集；示例项目为 `~/Desktop/Github/CoLM-Desktop/tmp/manual-project`（CN-Cng 示例算例，缩到 2008-01-01 → 2008-01-03 便于演示）。  
 **附录：** [CLI 命令参考](#appendix-c) · [配置字段总表（964 项）](#appendix-a) · [参数库索引（1369 项）](#appendix-b)
@@ -418,20 +418,12 @@ tmp/manual-project/CN-Cng/runs/07fddf66…/
 
 # 11. 比较页（OpenBench）
 
-![图 21 比较页](images/21-compare.jpg)
-
-**图 21 标注：** ① 安装、重装与维护（展开后有一键安装；环境状态/本次评估在该节上下方）。
-
 - OpenBench 安装在软件自己的数据目录（约 400 MB），不碰系统 Python，不与你自己的 OpenBench 混用；
 - 首次使用：展开"安装、重装与维护" → 一键安装（uv → 专用 Python 3.12 → OpenBench 及依赖），需要联网；
 - 安装完成后在"本次评估"选择模拟、参考数据、指标/评分、时间尺度（可到年/月气候态），可本机或服务器运行；日志实时显示、可停止，只取回报告；
 - 支持登记模型变量、非标准模拟与多参考数据；评估报告在结果页/比较页查看。
 
-![图 22 OpenBench 安装与维护](images/22-openbench-install.jpg)
-
-**图 22 标注：** ②"安装、重装与维护"折叠区 ④ 安装位置（打开目录）；环境状态与一键安装在同页上下方。
-
-> 安装过程会先装 uv（约 20 MB，校验后使用），再装专用 Python 3.12，最后装 OpenBench 及依赖（约 400 MB，需要联网）。三个状态全部显示"已安装"后，"本次评估"区域才会出现配置表单。
+展开“安装、重装与维护”可查看安装位置。OpenBench 就绪后可填写“本次评估”。已有环境可以原地更新，更新完成后会显示“OpenBench 已安装最新版”。
 
 ---
 
@@ -1002,7 +994,7 @@ EXIT:0
 | CLI `history-catalog` | 实际执行 | 输出 48 步、变量目录 JSON |
 | 真实远程 Slurm（Rust/Fortran、pack、ranks=1） | 已在 tianhe 实测 | 见 `docs/implementation-verification.md` 2026-11-07 验收章节 |
 
-*手册生成日期：2026-11-19；软件版本 0.3.0-beta.19。*
+*手册生成日期：2026-11-19；软件版本 0.3.0-beta.20。*
 
 
 <div class="appendix-a">

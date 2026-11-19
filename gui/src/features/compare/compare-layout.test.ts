@@ -132,9 +132,9 @@ const readyStatus = {
   uv_own: true,
   uv_version: '0.8.0',
   uv_pinned: '0.8.0',
-  openbench_pinned: '3.0.8',
+  openbench_pinned: '3.1.2',
   python: '/ob/python/bin/python',
-  openbench: '3.0.8',
+  openbench: '3.1.2',
   projects: [] as { name: string; report: string | null }[],
 };
 const referenceList = [
@@ -526,7 +526,8 @@ test('U-04: the comparison page opens as environment → this evaluation → job
 
   // 环境块只显示机器与是否就绪；安装/重装/维护在折叠区（Advanced）里。
   const environment = page.section('environment')!;
-  assert.match(text(environment), /OpenBench is ready \(3\.0\.8\)/);
+  assert.match(text(environment), /The latest OpenBench release is installed/);
+  assert.doesNotMatch(text(environment), /3\.1\.2/);
   const folded = walk(environment).find((node) => node.type === 'Advanced');
   assert.ok(folded, 'install/maintenance fold');
   assert.equal(text(folded.props.title), 'Install, reinstall and maintenance');
@@ -564,6 +565,18 @@ test('U-04: the comparison page opens as environment → this evaluation → job
   const jobs = page.section('jobs')!;
   assert.match(text(jobs), /Reports/);
   assert.match(text(jobs), /Load a report…/);
+});
+
+test('an older OpenBench can be updated without showing version numbers', async () => {
+  const page = pageHarness({ localStatus: { ...readyStatus, openbench: '3.0.8' } });
+  await page.mount();
+  const environment = text(page.section('environment'));
+  assert.match(environment, /OpenBench is ready/);
+  assert.doesNotMatch(environment, /3\.(0\.8|1\.2)|latest OpenBench release is installed/);
+  assert.deepEqual(
+    page.actions().find((action) => action.id === 'compare-reinstall-openbench')?.label,
+    'Install latest release',
+  );
 });
 
 test('U-04: the per-simulation entry is named "Edit simulation information" and the dialog agrees', async () => {

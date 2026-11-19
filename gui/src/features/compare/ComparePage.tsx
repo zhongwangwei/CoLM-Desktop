@@ -910,10 +910,12 @@ export default function ComparePage() {
       );
   };
 
-  const ready = !!status?.openbench;
+  const openbench = status?.openbench;
+  const ready = !!openbench;
+  const latestOpenbench = ready && openbench === status?.openbench_pinned;
   // 指标/评分清单从当前机器的 OpenBench registry 读取；读失败时保留常用兜底，不挡住生成配置。
   useEffect(() => {
-    if (!ready) return;
+    if (!openbench) return;
     let alive = true;
     void invokeJson<MetricOptions>(
       remote ? 'bench_remote_metric_options' : 'bench_metric_options',
@@ -938,8 +940,7 @@ export default function ComparePage() {
     return () => {
       alive = false;
     };
-    // 只在切换机器/OpenBench 就绪时读一次；远端状态变化不重新拉清单。
-  }, [ready, remote, host]);
+  }, [openbench, remote, host]);
   const steps: ('uv' | 'python' | 'openbench')[] = [
     ...(status?.uv || status?.uv_version ? [] : (['uv'] as const)),
     ...(status?.python ? [] : (['python'] as const)),
@@ -2020,10 +2021,9 @@ export default function ComparePage() {
             {!status
               ? t('正在检查已经装了什么…', 'Checking what is installed…')
               : ready
-                ? t(
-                    `OpenBench 已就绪（${status.openbench}）。`,
-                    `OpenBench is ready (${status.openbench}).`,
-                  )
+                ? latestOpenbench
+                  ? t('OpenBench 已安装最新版。', 'The latest OpenBench release is installed.')
+                  : t('OpenBench 已就绪。', 'OpenBench is ready.')
                 : t(
                     'OpenBench 还没有装好：展开下面的「安装、重装与维护」安装环境。',
                     'OpenBench is not installed yet: expand “Install, reinstall and maintenance” below to set it up.',
@@ -2086,13 +2086,11 @@ export default function ComparePage() {
                   </li>
                   <li>
                     {t('OpenBench：', 'OpenBench: ')}
-                    {status.openbench ?? t('未安装', 'not installed')}
-                    {status.openbench &&
-                      status.openbench !== status.openbench_pinned &&
-                      t(
-                        `（软件验证过的是 ${status.openbench_pinned}；装的是别的版本或本地源码，评估结果以它为准）`,
-                        ` (the app was verified with ${status.openbench_pinned}; this is another version or a local source, so results follow it)`,
-                      )}
+                    {latestOpenbench
+                      ? t('已安装最新版', 'latest release installed')
+                      : ready
+                        ? t('已安装，可切换到发布版', 'installed, release available')
+                        : t('未安装', 'not installed')}
                   </li>
                 </>
               )}
@@ -2103,12 +2101,7 @@ export default function ComparePage() {
                   value={source}
                   onChange={(e) => setSource(e.target.value as 'pypi' | 'local')}
                 >
-                  <option value="pypi">
-                    {t(
-                      `PyPI 发布版（colm-openbench ${status?.openbench_pinned ?? ''}）`,
-                      `PyPI release (colm-openbench ${status?.openbench_pinned ?? ''})`,
-                    )}
-                  </option>
+                  <option value="pypi">{t('PyPI 发布版', 'PyPI release')}</option>
                   <option value="local">
                     {remote
                       ? t(
@@ -2171,7 +2164,11 @@ export default function ComparePage() {
               {ready && (
                 <ActionButton
                   action="compare-reinstall-openbench"
-                  label={t('重装 OpenBench', 'Reinstall OpenBench')}
+                  label={
+                    source === 'pypi' && !latestOpenbench
+                      ? t('安装最新版', 'Install latest release')
+                      : t('重装 OpenBench', 'Reinstall OpenBench')
+                  }
                   kind="commit"
                   disabled={busy || (source === 'local' && !localSource)}
                   run={() => install(['openbench'])}
@@ -2685,8 +2682,8 @@ export default function ComparePage() {
                   <Field
                     label={t('统计检验', 'Statistical tests')}
                     hint={t(
-                      'OpenBench 独立的统计检验阶段（statistics），默认不启用；勾选的方法才写进配置。Basic 与 False_Discovery_Rate 在 OpenBench 3.0.8 的配置驱动统计里跑不了（运行器缺实现/数据条目不匹配），因此不在可选项里；Three_Cornered_Hat 需要至少两个格点模拟。统计只用格点参考数据，纯单点或参考全是单点时会没有结果。',
-                      'OpenBench’s independent statistical-analysis phase (statistics), disabled by default; only ticked methods are written. Basic and False_Discovery_Rate cannot run in OpenBench 3.0.8 config-driven statistics (missing implementation / mismatched data entries), so they are not offered; Three_Cornered_Hat needs at least two gridded simulations. Statistics only use gridded references, so station-only designs or station-only references produce no output.',
+                      'OpenBench 独立的统计检验阶段（statistics），默认不启用；勾选的方法才写进配置。Basic 与 False_Discovery_Rate 在 OpenBench 的配置驱动统计里跑不了（运行器缺实现/数据条目不匹配），因此不在可选项里；Three_Cornered_Hat 需要至少两个格点模拟。统计只用格点参考数据，纯单点或参考全是单点时会没有结果。',
+                      'OpenBench’s independent statistical-analysis phase (statistics), disabled by default; only ticked methods are written. Basic and False_Discovery_Rate cannot run in OpenBench config-driven statistics (missing implementation / mismatched data entries), so they are not offered; Three_Cornered_Hat needs at least two gridded simulations. Statistics only use gridded references, so station-only designs or station-only references produce no output.',
                     )}
                   >
                     <div className="button-row">

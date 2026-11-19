@@ -736,12 +736,12 @@ export const STATISTICS_SCHEMA_ITEMS = [
  */
 export const KNOWN_BROKEN_STATISTICS_ITEMS: Record<string, [string, string]> = {
   Basic: [
-    'OpenBench 3.0.8 的配置驱动统计没有实现 Basic（运行器只有 Mean/Median/Max/Min/Sum），选中后统计阶段会报错。',
-    'OpenBench 3.0.8 does not implement Basic in its config-driven statistics (only Mean/Median/Max/Min/Sum exist); selecting it makes the statistics phase fail.',
+    'OpenBench 的配置驱动统计没有实现 Basic（运行器只有 Mean/Median/Max/Min/Sum），选中后统计阶段会报错。',
+    'OpenBench does not implement Basic in its config-driven statistics (only Mean/Median/Max/Min/Sum exist); selecting it makes the statistics phase fail.',
   ],
   False_Discovery_Rate: [
-    'OpenBench 3.0.8 的 False_Discovery_Rate 与配置适配器的数据条目不匹配（适配器给单源条目、运行器按双源读取），选中后统计阶段会报 KeyError。',
-    'OpenBench 3.0.8’s False_Discovery_Rate expects two-source entries that the config adapter does not emit; selecting it fails with a KeyError in the statistics phase.',
+    'OpenBench 的 False_Discovery_Rate 与配置适配器的数据条目不匹配（适配器给单源条目、运行器按双源读取），选中后统计阶段会报 KeyError。',
+    'OpenBench’s False_Discovery_Rate expects two-source entries that the config adapter does not emit; selecting it fails with a KeyError in the statistics phase.',
   ],
 };
 
@@ -835,8 +835,8 @@ export function statisticsStationWarning(simulations: BenchSimulation[]): [strin
   const usable = simulations.filter((sim) => sim.info && sim.info.comparable !== false);
   if (!usable.length || usable.some((sim) => sim.info.spatial)) return null;
   return [
-    'OpenBench 3.0.8 的统计检验阶段基于格点场：当前只有单点模拟，不会产出统计结果（实测无输出、也不报错）。需要统计结果的话，请至少加入一个格点模拟。',
-    'OpenBench 3.0.8 computes statistics on gridded fields: with station simulations only, this phase produces no output (observed silently). Add at least one gridded simulation to get statistics.',
+    'OpenBench 的统计检验阶段基于格点场：当前只有单点模拟，不会产出统计结果（实测无输出、也不报错）。需要统计结果的话，请至少加入一个格点模拟。',
+    'OpenBench computes statistics on gridded fields: with station simulations only, this phase produces no output (observed silently). Add at least one gridded simulation to get statistics.',
   ];
 }
 
@@ -858,8 +858,8 @@ export function statisticsMethodWarnings(
     const gridSims = simulations.filter((sim) => sim.info.spatial).length;
     if (gridSims < 2)
       warnings.push([
-        'Three_Cornered_Hat 需要至少两个格点模拟（OpenBench 3.0.8 的 nX = 格点数 + 1 个参考，nX<3 会直接报错）。',
-        'Three_Cornered_Hat needs at least two gridded simulations (OpenBench 3.0.8 sets nX = gridded sources + 1 reference and fails when nX < 3).',
+        'Three_Cornered_Hat 需要至少两个格点模拟（OpenBench 的 nX = 格点数 + 1 个参考，nX<3 会直接报错）。',
+        'Three_Cornered_Hat needs at least two gridded simulations (OpenBench sets nX = gridded sources + 1 reference and fails when nX < 3).',
       ]);
   }
   return warnings;
@@ -891,8 +891,8 @@ export function statisticsReferenceWarning(
   }
   if (!checked) return null;
   return [
-    'OpenBench 3.0.8 的统计检验只使用格点参考数据（适配器会跳过单点参考/单点模拟）：当前所选的参考都是单点，统计阶段不会产出结果。',
-    'OpenBench 3.0.8 statistics only use gridded references (the adapter skips station references and simulations): all selected references are station data, so the statistics phase produces no output.',
+    'OpenBench 的统计检验只使用格点参考数据（适配器会跳过单点参考/单点模拟）：当前所选的参考都是单点，统计阶段不会产出结果。',
+    'OpenBench statistics only use gridded references (the adapter skips station references and simulations): all selected references are station data, so the statistics phase produces no output.',
   ];
 }
 
@@ -1012,8 +1012,8 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
     if (!VALID_COMPARISON_ITEMS.has(name))
       throw new Error(
         bilingual(
-          `不是 OpenBench 3.0.8 支持的比较图表：${name}`,
-          `OpenBench 3.0.8 does not support the comparison item ${name}`,
+          `不是 OpenBench 支持的比较图表：${name}`,
+          `OpenBench does not support the comparison item ${name}`,
         ),
       );
   for (const item of design.simulations.length >= 2 ? COMPARISON_ITEMS : []) {
@@ -1038,8 +1038,8 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
     if (!VALID_STATISTICS_ITEMS.has(name))
       throw new Error(
         bilingual(
-          `不是 OpenBench 3.0.8 支持的统计方法：${name}`,
-          `OpenBench 3.0.8 does not support the statistics item ${name}`,
+          `不是 OpenBench 支持的统计方法：${name}`,
+          `OpenBench does not support the statistics item ${name}`,
         ),
       );
     const issue = KNOWN_BROKEN_STATISTICS_ITEMS[name];
@@ -1050,8 +1050,8 @@ export function buildOpenbenchConfig(design: ComparisonDesign) {
     if (gridSims < 2)
       throw new Error(
         bilingual(
-          'Three_Cornered_Hat 需要至少两个格点模拟：OpenBench 3.0.8 的 nX = 格点来源数 + 1 个参考，nX<3 会直接报错。',
-          'Three_Cornered_Hat needs at least two gridded simulations: OpenBench 3.0.8 sets nX = gridded sources + 1 reference and fails when nX < 3.',
+          'Three_Cornered_Hat 需要至少两个格点模拟：OpenBench 的 nX = 格点来源数 + 1 个参考，nX<3 会直接报错。',
+          'Three_Cornered_Hat needs at least two gridded simulations: OpenBench sets nX = gridded sources + 1 reference and fails when nX < 3.',
         ),
       );
   }
@@ -1320,8 +1320,8 @@ export function evaluationSummary(design: EvaluationDesign): EvaluationSummaryIt
       ? `${bilingual('已启用', 'enabled')} [${statisticsChosen.join(', ')}]${
           statisticsStationsOnly
             ? ` · ${bilingual(
-                'OpenBench 3.0.8 对纯单点模拟不产出统计结果',
-                'OpenBench 3.0.8 produces no statistics for station-only simulations',
+                'OpenBench 对纯单点模拟不产出统计结果',
+                'OpenBench produces no statistics for station-only simulations',
               )}`
             : ''
         }`

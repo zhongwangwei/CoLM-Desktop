@@ -1048,7 +1048,7 @@ it('writes the cross-simulation comparison phase only with two or more simulatio
   // 拼错的名字、缺少所需输出都在本地拒绝，不留给 OpenBench check。
   assert.throws(
     () => buildOpenbenchConfig({ ...base, comparisonItems: ['Taylor_Diagrm'] }),
-    /OpenBench 3\.0\.8/,
+    /OpenBench does not support the comparison item Taylor_Diagrm/,
   );
   assert.throws(
     () =>
@@ -1167,7 +1167,7 @@ it('writes the statistics phase only when methods are selected', () => {
   assert.doesNotMatch(buildOpenbenchConfig({ ...base, statisticsItems: [] }).config, /statistics:/);
   assert.throws(
     () => buildOpenbenchConfig({ ...base, statisticsItems: ['Not_A_Stat'] }),
-    /OpenBench 3\.0\.8/,
+    /OpenBench does not support the statistics item Not_A_Stat/,
   );
 });
 

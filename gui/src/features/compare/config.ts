@@ -981,8 +981,8 @@ function validateRoot(root: { [key: string]: Yaml }, problems: Problem[]): Effec
       for (const item of items ?? [])
         if (!VALID_COMPARISON_ITEMS.has(item))
           problems.push([
-            `不是 OpenBench 3.0.8 支持的比较图表：${item}`,
-            `OpenBench 3.0.8 does not support the comparison item ${item}`,
+            `不是 OpenBench 支持的比较图表：${item}`,
+            `OpenBench does not support the comparison item ${item}`,
           ]);
       comparison = { enabled: root.comparison.enabled === true, items };
     }
@@ -1012,8 +1012,8 @@ function validateRoot(root: { [key: string]: Yaml }, problems: Problem[]): Effec
       for (const item of items ?? [])
         if (!VALID_STATISTICS_ITEMS.has(item))
           problems.push([
-            `不是 OpenBench 3.0.8 支持的统计方法：${item}`,
-            `OpenBench 3.0.8 does not support the statistics item ${item}`,
+            `不是 OpenBench 支持的统计方法：${item}`,
+            `OpenBench does not support the statistics item ${item}`,
           ]);
       statistics = { enabled: root.statistics.enabled === true, items };
     }
@@ -1145,16 +1145,16 @@ export function structuralProblems(
       const issue = KNOWN_BROKEN_STATISTICS_ITEMS[name];
       if (issue)
         problems.push([
-          `配置里的统计方法 ${name} 在 OpenBench 3.0.8 下会失败：${issue[0]}`,
-          `Statistics item ${name} fails under OpenBench 3.0.8: ${issue[1]}`,
+          `配置里的统计方法 ${name} 在 OpenBench 下会失败：${issue[0]}`,
+          `Statistics item ${name} fails under OpenBench: ${issue[1]}`,
         ]);
     }
     if ((config.statistics.items ?? []).includes('Three_Cornered_Hat')) {
       const gridSims = design.simulations.filter((sim) => sim.info.spatial).length;
       if (gridSims < 2)
         problems.push([
-          '配置里的 Three_Cornered_Hat 需要至少两个格点模拟：OpenBench 3.0.8 的 nX = 格点来源数 + 1 个参考，nX<3 会直接报错。',
-          'Three_Cornered_Hat in the configuration needs at least two gridded simulations: OpenBench 3.0.8 sets nX = gridded sources + 1 reference and fails when nX < 3.',
+          '配置里的 Three_Cornered_Hat 需要至少两个格点模拟：OpenBench 的 nX = 格点来源数 + 1 个参考，nX<3 会直接报错。',
+          'Three_Cornered_Hat in the configuration needs at least two gridded simulations: OpenBench sets nX = gridded sources + 1 reference and fails when nX < 3.',
         ]);
     }
   }
