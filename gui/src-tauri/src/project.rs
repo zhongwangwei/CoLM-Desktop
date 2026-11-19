@@ -73,7 +73,7 @@ fn project_wizard_form(root: String) -> Result<std::collections::BTreeMap<String
     let cases = list_cases(root.clone())?;
     let first = cases.first().ok_or_else(|| format!("{root} 里没有算例"))?;
     let dir = PathBuf::from(&first.dir);
-    let opened = open_case(first.dir.clone())?;
+    let opened = open_case_blocking(first.dir.clone())?;
     let profile = opened.profile;
     let record = recorded_case(&dir);
     let doc = std::fs::read_to_string(dir.join("case.nml"))
@@ -292,8 +292,14 @@ fn wizard_skips(name: &str) -> bool {
             .any(|part| lower.contains(part))
 }
 
-#[tauri::command(async)]
-pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
+#[tauri::command]
+pub async fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
+    tauri::async_runtime::spawn_blocking(move || project_wizard_seed_blocking(root))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn project_wizard_seed_blocking(root: String) -> Result<WizardSeed, String> {
     use crate::config::integer;
     let form = project_wizard_form(root.clone())?;
     let cases = list_cases(root.clone())?;
@@ -893,7 +899,7 @@ fn bounded_site_crop(
     if !landtype.is_empty() {
         args.extend(["--landtype".into(), landtype.clone()]);
     }
-    crate::sidecar::site_probe(move |probe| {
+    crate::sidecar::site_probe(site.clone(), move |probe| {
         if allow_missing {
             match std::fs::metadata(&site) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -920,8 +926,14 @@ fn bounded_site_crop(
 }
 
 /// 「打开已有算例」：`dir` 必须是含 `case.nml` 的算例目录。
-#[tauri::command(async)]
-pub fn open_case(dir: String) -> Result<OpenedCase, String> {
+#[tauri::command]
+pub async fn open_case(dir: String) -> Result<OpenedCase, String> {
+    tauri::async_runtime::spawn_blocking(move || open_case_blocking(dir))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+pub(crate) fn open_case_blocking(dir: String) -> Result<OpenedCase, String> {
     let dir = PathBuf::from(dir);
     let nml = dir.join("case.nml");
     if !nml.is_file() {

@@ -224,7 +224,7 @@ impl WriteLock {
         match std::fs::read_to_string(&legacy) {
             Ok(owner) => {
                 let pid = owner.trim().parse::<u32>().context(
-                    "workspace has an unreadable legacy write lock; inspect source-write.lock before removing it",
+                    "workspace has an unreadable legacy write lock; stop all older CoLM processes before manually removing source-write.lock (an older writer may still be initializing it)",
                 )?;
                 let absent = !colm_case::file_lock::process_is_alive(pid)
                     .context("cannot inspect legacy workspace writer")?;
@@ -243,21 +243,37 @@ impl WriteLock {
             Err(error) => return Err(error).context("cannot inspect legacy workspace writer"),
         }
         let owner = std::process::id().to_string();
-        let mut marker = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&legacy)
-            .context("workspace is busy; cannot claim legacy writer marker")?;
-        let lock = Self {
+        // The OS guard serializes this staging path, including recovery after a crash.
+        let staged = workspace.dir.join(".source-write.pending");
+        match std::fs::remove_file(&staged) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("cannot clear staged workspace writer marker"),
+        }
+        let publish = (|| -> Result<()> {
+            use std::io::Write;
+            let mut marker = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)
+                .context("cannot stage workspace writer marker")?;
+            marker
+                .write_all(owner.as_bytes())
+                .context("cannot write workspace writer marker")?;
+            marker.sync_all()?;
+            drop(marker);
+            // Publish complete bytes without replacing a racing older writer's marker.
+            std::fs::hard_link(&staged, &legacy)
+                .context("workspace is busy or hard links are unavailable; cannot claim legacy writer marker")?;
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&staged);
+        publish?;
+        Ok(Self {
             _file: file,
             legacy,
             owner,
-        };
-        use std::io::Write;
-        marker
-            .write_all(lock.owner.as_bytes())
-            .context("cannot write workspace writer marker")?;
-        Ok(lock)
+        })
     }
 }
 

@@ -34,7 +34,7 @@ use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -5251,63 +5251,100 @@ fn capture_registered_command(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Filesystem calls can hang on a disconnected mount, so keep their workers bounded
-/// even after the caller's deadline has expired.
 pub(crate) fn site_probe<T: Send + 'static>(
+    path: std::path::PathBuf,
     work: impl FnOnce(SiteProbe) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    static ACTIVE: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
+    static POOL: OnceLock<Arc<SiteProbePool>> = OnceLock::new();
     bounded_site_probe(
-        ACTIVE.get_or_init(|| Arc::new(AtomicUsize::new(0))).clone(),
+        POOL.get_or_init(Default::default).clone(),
+        std::path::absolute(path).map_err(|error| error.to_string())?,
         Duration::from_secs(15),
         work,
     )
 }
 
-struct SiteProbeSlot(Arc<AtomicUsize>);
+#[derive(Default)]
+struct SiteProbePool {
+    active: AtomicUsize,
+    workers: Mutex<HashMap<std::path::PathBuf, Arc<AtomicBool>>>,
+}
+
+struct SiteProbeSlot(Arc<SiteProbePool>);
 impl Drop for SiteProbeSlot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct SiteProbeWorker {
+    pool: Arc<SiteProbePool>,
+    path: std::path::PathBuf,
+}
+impl Drop for SiteProbeWorker {
+    fn drop(&mut self) {
+        if let Ok(mut workers) = self.pool.workers.lock() {
+            workers.remove(&self.path);
+        }
     }
 }
 
 fn bounded_site_probe<T: Send + 'static>(
-    active: Arc<AtomicUsize>,
+    pool: Arc<SiteProbePool>,
+    path: std::path::PathBuf,
     timeout: Duration,
     work: impl FnOnce(SiteProbe) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     let deadline = Instant::now() + timeout;
-    loop {
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let worker = loop {
         if Instant::now() >= deadline {
             return Err(site_probe_timeout());
         }
-        let slots = active.load(Ordering::SeqCst);
-        if slots < 4
-            && active
-                .compare_exchange(slots, slots + 1, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
         {
-            break;
+            let mut workers = pool.workers.lock().map_err(|error| error.to_string())?;
+            if let Some(previous) = workers.get(&path) {
+                if previous.load(Ordering::SeqCst) {
+                    return Err(format!(
+                        "上次站点读取仍在等待存储 / Previous site probe still waiting for storage: {}",
+                        path.display()
+                    ));
+                }
+            } else if pool.active.load(Ordering::SeqCst) < 4 {
+                // shortcut: the OS may never return hung I/O, so cap outstanding workers too.
+                if workers.len() >= 32 {
+                    return Err("挂起的站点读取过多，请恢复存储连接 / Too many unfinished site probes; restore storage access".into());
+                }
+                pool.active.fetch_add(1, Ordering::SeqCst);
+                workers.insert(path.clone(), timed_out.clone());
+                break SiteProbeWorker {
+                    pool: pool.clone(),
+                    path,
+                };
+            }
         }
         std::thread::sleep(
             Duration::from_millis(10).min(deadline.saturating_duration_since(Instant::now())),
         );
-    }
-    let slot = SiteProbeSlot(active);
+    };
+    let _slot = SiteProbeSlot(pool);
     let probe = SiteProbe { deadline };
     let (send, receive) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("site-probe".into())
         .spawn(move || {
             let result = work(probe);
-            drop(slot);
+            drop(worker);
             let _ = send.send(result);
         })
         .map_err(|e| e.to_string())?;
     receive
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .map_err(|error| match error {
-            std::sync::mpsc::RecvTimeoutError::Timeout => site_probe_timeout(),
+            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                timed_out.store(true, Ordering::SeqCst);
+                site_probe_timeout()
+            }
             std::sync::mpsc::RecvTimeoutError::Disconnected => {
                 "站点读取进程意外结束 / Site probe stopped".into()
             }
@@ -5355,7 +5392,7 @@ impl SiteProbe {
         });
         loop {
             if self.check().is_err() || guard.stopped() {
-                // The caller has its own deadline. Keep this slot until cleanup completes.
+                // Keep the path reserved until cleanup completes.
                 let terminated = terminate_process_tree(pid);
                 let _ = receive.recv();
                 terminated?;

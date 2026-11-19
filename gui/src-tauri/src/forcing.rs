@@ -662,7 +662,17 @@ fn forcing_dir_text(dir: &std::path::Path) -> String {
 /// 这不是单改 `DEF_USE_CBL_HEIGHT`：第九个强迫变量的文件名、变量名、时间步长
 /// 都在 `forcing.nml`。校验时间轴、空间形状与算例配置后，两份文件在同一事务中写入。
 #[tauri::command]
-pub fn configure_cbl_batch(
+pub async fn configure_cbl_batch(
+    dirs: Vec<String>,
+    file: String,
+    kernel_dir: Option<String>,
+) -> Result<crate::config::BatchWrite, String> {
+    tauri::async_runtime::spawn_blocking(move || configure_cbl(dirs, file, kernel_dir))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn configure_cbl(
     dirs: Vec<String>,
     file: String,
     kernel_dir: Option<String>,
@@ -816,7 +826,17 @@ pub fn configure_cbl_batch(
 /// 打开臭氧胁迫并绑定一份可读的 NetCDF 数据。臭氧不依赖 BGC，但只有植被
 /// 叶片会使用它；可见性由 config.rs 的地表约束负责。
 #[tauri::command]
-pub fn configure_ozone_batch(
+pub async fn configure_ozone_batch(
+    dirs: Vec<String>,
+    file: String,
+    kernel_dir: Option<String>,
+) -> Result<crate::config::BatchWrite, String> {
+    tauri::async_runtime::spawn_blocking(move || configure_ozone(dirs, file, kernel_dir))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn configure_ozone(
     dirs: Vec<String>,
     file: String,
     kernel_dir: Option<String>,
@@ -850,7 +870,7 @@ pub fn configure_ozone_batch(
             time.len
         ));
     }
-    crate::config::set_fields_batch(
+    crate::config::set_fields_with_forcing(
         dirs,
         vec![
             crate::config::FieldChange {
@@ -866,7 +886,10 @@ pub fn configure_ozone_batch(
                 value: chosen.display().to_string(),
             },
         ],
+        &[],
         kernel_dir,
+        None,
+        None,
     )
 }
 

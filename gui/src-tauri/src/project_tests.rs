@@ -257,9 +257,9 @@ fn selected_case_scheme_takes_precedence_over_prior_kernel_classification() {
 #[test]
 fn opening_a_directory_without_case_nml_is_refused() {
     let root = tmp("open-none");
-    assert!(open_case(root.to_string_lossy().into_owned()).is_err());
+    assert!(open_case_blocking(root.to_string_lossy().into_owned()).is_err());
     let dir = make_case(&root, "c", "CN-Cng");
-    let opened = open_case(dir.to_string_lossy().into_owned()).expect("opens");
+    let opened = open_case_blocking(dir.to_string_lossy().into_owned()).expect("opens");
     assert_eq!(opened.entry.name, "CN-Cng");
     assert_eq!(Path::new(&opened.root), root.as_path());
 }
@@ -309,7 +309,7 @@ fn the_creation_record_round_trips() {
     };
     record_case(&dir.to_string_lossy(), &record).unwrap();
     assert_eq!(recorded_case(&dir), record);
-    let opened = open_case(dir.to_string_lossy().into_owned()).expect("opens");
+    let opened = open_case_blocking(dir.to_string_lossy().into_owned()).expect("opens");
     assert_eq!(opened.profile.domain_kind.as_deref(), Some("watershed"));
     assert_eq!(opened.profile.shapefile.as_deref(), Some("/d/basin.shp"));
     assert_eq!(opened.profile.subgrid, "USGS");
@@ -320,7 +320,13 @@ fn run_host_round_trips_and_local_selection_preserves_case_metadata() {
     let root = tmp("run-host-record");
     let dir = make_case(&root, "c", "CN-Cng");
     let dir_arg = dir.to_string_lossy().into_owned();
-    assert_eq!(open_case(dir_arg.clone()).unwrap().profile.run_host, None);
+    assert_eq!(
+        open_case_blocking(dir_arg.clone())
+            .unwrap()
+            .profile
+            .run_host,
+        None
+    );
     let mut record = CaseRecord {
         mode: Some("usgs".into()),
         domain: Some("watershed".into()),
@@ -335,7 +341,7 @@ fn run_host_round_trips_and_local_selection_preserves_case_metadata() {
     record.run_host = Some("7920l".into());
     assert_eq!(recorded_case(&dir), record);
     assert_eq!(
-        open_case(dir_arg.clone())
+        open_case_blocking(dir_arg.clone())
             .unwrap()
             .profile
             .run_host
@@ -413,7 +419,7 @@ fn default_observation_matches_site_and_forcing() {
     );
     std::fs::write(dir.join("forcing.nml"), forcing_nml).unwrap();
 
-    let opened = open_case(dir.to_string_lossy().into_owned()).expect("opens");
+    let opened = open_case_blocking(dir.to_string_lossy().into_owned()).expect("opens");
     assert_eq!(
         opened.profile.obs_file.as_deref(),
         Some(obs_file.to_str().unwrap())
@@ -437,7 +443,7 @@ fn server_case_cannot_change_its_owning_host() {
         listed[0].remote_directory.as_deref(),
         Some("/server/project/site")
     );
-    let opened = open_case(argument.clone()).unwrap();
+    let opened = open_case_blocking(argument.clone()).unwrap();
     assert_eq!(opened.entry.run_host, listed[0].run_host);
     assert_eq!(opened.entry.remote_directory, listed[0].remote_directory);
     for host in [None, Some("other".into())] {
@@ -446,7 +452,7 @@ fn server_case_cannot_change_its_owning_host() {
     }
     set_case_run_host(argument.clone(), Some("compute".into())).unwrap();
     assert_eq!(
-        open_case(argument)
+        open_case_blocking(argument)
             .unwrap()
             .profile
             .remote_directory
@@ -481,7 +487,7 @@ fn a_project_reopens_as_the_form_it_was_created_with() {
         },
     )
     .unwrap();
-    let seed = project_wizard_seed(root.to_string_lossy().into_owned()).unwrap();
+    let seed = project_wizard_seed_blocking(root.to_string_lossy().into_owned()).unwrap();
     let form = &seed.form;
     let get = |key: &str| form.get(key).map(String::as_str);
     assert_eq!(get("host"), Some("compute"));
@@ -593,7 +599,7 @@ fn open_case_keeps_unavailable_forcing_repairable_without_validating_it() {
             .unwrap();
         }
         let argument = dir.to_string_lossy().into_owned();
-        let opened = open_case(argument.clone()).unwrap_or_else(|error| {
+        let opened = open_case_blocking(argument.clone()).unwrap_or_else(|error| {
             panic!("{name}: cannot reach forcing repair controls: {error}")
         });
         assert_eq!(opened.profile.grid, Some("latlon"));
@@ -609,12 +615,12 @@ fn open_case_keeps_unavailable_forcing_repairable_without_validating_it() {
         assert!(crate::config::case_forcing_input(argument.clone()).is_err());
         if name != "missing" {
             assert!(
-                crate::config::set_field_batch(
+                tauri::async_runtime::block_on(crate::config::set_field_batch(
                     vec![argument],
                     "DEF_simulation_time%start_year".into(),
                     "2001".into(),
                     None,
-                )
+                ))
                 .is_err(),
                 "{name}: save must still reject the unreadable header"
             );

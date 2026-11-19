@@ -1396,3 +1396,53 @@ fn workspace_guard_excludes_legacy_writers_and_releases_their_marker() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "foreign marker");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn workspace_guard_preserves_an_initializing_legacy_writer() {
+    use std::io::Write;
+    let (root, ws) = fresh("initializing-legacy-writer");
+    let path = ws.dir.join("source-write.lock");
+    let mut old_writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    let error = git::WriteLock::acquire(&ws).err().unwrap();
+    assert!(error.to_string().contains("stop all older CoLM processes"));
+    assert_eq!(std::fs::read(&path).unwrap(), b"");
+    old_writer
+        .write_all(std::process::id().to_string().as_bytes())
+        .unwrap();
+    drop(old_writer);
+    assert!(git::WriteLock::acquire(&ws).is_err());
+    std::fs::remove_file(&path).unwrap();
+    drop(git::WriteLock::acquire(&ws).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_guard_recovers_incomplete_staging_without_publishing_it() {
+    let (root, ws) = fresh("incomplete-writer-staging");
+    let staged = ws.dir.join(".source-write.pending");
+    let legacy = ws.dir.join("source-write.lock");
+    for partial in ["", "1"] {
+        std::fs::write(&staged, partial).unwrap();
+        let guard = git::WriteLock::acquire(&ws).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&legacy).unwrap(),
+            std::process::id().to_string()
+        );
+        assert!(!staged.exists());
+        drop(guard);
+        assert!(!legacy.exists());
+    }
+    std::fs::create_dir(&staged).unwrap();
+    assert!(git::WriteLock::acquire(&ws).is_err());
+    assert!(
+        !legacy.exists(),
+        "preparation failure must not publish a marker"
+    );
+    std::fs::remove_dir(&staged).unwrap();
+    drop(git::WriteLock::acquire(&ws).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}

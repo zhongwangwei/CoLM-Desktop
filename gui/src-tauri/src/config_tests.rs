@@ -1,15 +1,15 @@
 use super::*;
 
 fn set_batch(dirs: Vec<String>, path: String, value: String) -> Result<BatchWrite, String> {
-    super::set_field_batch(dirs, path, value, None)
+    tauri::async_runtime::block_on(super::set_field_batch(dirs, path, value, None))
 }
 
 fn set_batches(dirs: Vec<String>, fields: Vec<FieldChange>) -> Result<BatchWrite, String> {
-    super::set_fields_batch(dirs, fields, None)
+    tauri::async_runtime::block_on(super::set_fields_batch(dirs, fields, None))
 }
 
 fn set_test_spinup(dirs: Vec<String>, years: u32, repeat: u32) -> Result<BatchWrite, String> {
-    super::set_spinup(dirs, years, repeat, None, None)
+    super::set_spinup_blocking(dirs, years, repeat, None, None)
 }
 
 const SAMPLE: &str = "\
@@ -2494,13 +2494,13 @@ fn pft_expert_defaults_and_sparse_batch_overrides_use_fortran_slots() {
     assert!(states.iter().any(|state| state.name == "DEF_PFT_GRADM"));
     assert!(!states.iter().any(|state| state.name == "DEF_PFT_G1"));
 
-    let written = set_pft_parameter_batch(
+    let written = tauri::async_runtime::block_on(set_pft_parameter_batch(
         dirs.clone(),
         13,
         "DEF_PFT_VMAX25".into(),
         Some("60".into()),
         kernel_dir.clone(),
-    )
+    ))
     .unwrap();
     assert_eq!(written.written, 2);
     for dir in &dirs {
@@ -2508,26 +2508,26 @@ fn pft_expert_defaults_and_sparse_batch_overrides_use_fortran_slots() {
         assert!(text.contains("DEF_PFT_VMAX25(14) = 60"), "{dir}: {text}");
     }
 
-    set_pft_parameter_batch(
+    tauri::async_runtime::block_on(set_pft_parameter_batch(
         dirs.clone(),
         13,
         "DEF_PFT_VMAX25".into(),
         None,
         kernel_dir.clone(),
-    )
+    ))
     .unwrap();
     for dir in &dirs {
         let text = std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap();
         assert!(!text.contains("DEF_PFT_VMAX25"), "{dir}: {text}");
     }
 
-    let err = set_pft_parameter_batch(
+    let err = tauri::async_runtime::block_on(set_pft_parameter_batch(
         dirs.clone(),
         13,
         "DEF_PFT_MXMAT".into(),
         Some("1e20".into()),
         kernel_dir.clone(),
-    )
+    ))
     .unwrap_err();
     assert!(err.contains("i32") || err.contains("Fortran"), "{err}");
 
@@ -2535,13 +2535,13 @@ fn pft_expert_defaults_and_sparse_batch_overrides_use_fortran_slots() {
         .iter()
         .map(|dir| std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap())
         .collect();
-    assert!(set_pft_parameter_batch(
+    assert!(tauri::async_runtime::block_on(set_pft_parameter_batch(
         dirs.clone(),
         13,
         "DEF_PFT_SQRTDI".into(),
         Some("0".into()),
         kernel_dir,
-    )
+    ))
     .is_err());
     for (dir, expected) in dirs.iter().zip(before) {
         assert_eq!(
@@ -3197,7 +3197,12 @@ fn explicit_override_export_import_round_trip_omits_inherited_defaults() {
         .iter()
         .any(|record| record.raw_key == "DEF_TUNING_CAPR"));
 
-    reset_field_batch(dirs.clone(), "DEF_TUNING_ZLND".into(), None).unwrap();
+    tauri::async_runtime::block_on(reset_field_batch(
+        dirs.clone(),
+        "DEF_TUNING_ZLND".into(),
+        None,
+    ))
+    .unwrap();
     let json = serde_json::to_string(&bundle).unwrap();
     let preview = preview_import_parameter_overrides(dirs.clone(), json.clone(), None).unwrap();
     assert!(preview.can_apply, "{:#?}", preview.items);
@@ -3320,7 +3325,7 @@ fn pft_matrix_multi_cell_write_is_one_atomic_case_batch() {
         ],
     );
     let kernel = pft_test_kernel("matrix-atomic");
-    let result = set_pft_parameters_batch(
+    let result = set_pft_parameters(
         vec![
             PftBatchChange {
                 dirs: dirs.clone(),
@@ -3983,12 +3988,12 @@ fn runtime_contract_mirrors_engine_entry_checks() {
 fn history_variable_toggles_go_to_the_history_namelist() {
     let dir = batch("history-toggle", &[SAMPLE]).remove(0);
     let case_dir = std::path::Path::new(&dir);
-    super::set_field_batch(
+    tauri::async_runtime::block_on(super::set_field_batch(
         vec![dir.clone()],
         "DEF_hist_vars%fsena".into(),
         ".false.".into(),
         None,
-    )
+    ))
     .unwrap();
     let case = std::fs::read_to_string(case_dir.join("case.nml")).unwrap();
     assert!(
@@ -4003,12 +4008,12 @@ fn history_variable_toggles_go_to_the_history_namelist() {
         "{history}"
     );
     // 第二次改另一项：沿用同一个文件。
-    super::set_field_batch(
+    tauri::async_runtime::block_on(super::set_field_batch(
         vec![dir.clone()],
         "DEF_hist_vars%fevpa".into(),
         ".false.".into(),
         None,
-    )
+    ))
     .unwrap();
     let doc =
         colm_namelist::parse(&std::fs::read_to_string(case_dir.join("case.nml")).unwrap()).unwrap();
@@ -4597,7 +4602,7 @@ fn vic_parameter_file_follows_scalar_or_grid_mode() {
 #[test]
 fn replay_spinup_retains_the_first_formal_year_and_counts_extra_cycles() {
     let dirs = batch("spinup-replay", &[NML_A]);
-    super::set_spinup(dirs.clone(), 1, 10, None, Some(true)).unwrap();
+    super::set_spinup_blocking(dirs.clone(), 1, 10, None, Some(true)).unwrap();
     let timing = super::read_timing(dirs.clone()).unwrap();
     assert_eq!(timing.output_start, timing.start);
     let text = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
@@ -4605,12 +4610,12 @@ fn replay_spinup_retains_the_first_formal_year_and_counts_extra_cycles() {
     let legacy = super::one_timing(&doc);
     assert!(timing.total_steps > legacy.5);
     // Changing the repetition count preserves the saved replay mode.
-    super::set_spinup(dirs.clone(), 1, 2, None, None).unwrap();
+    super::set_spinup_blocking(dirs.clone(), 1, 2, None, None).unwrap();
     assert_eq!(
         super::read_timing(dirs.clone()).unwrap().output_start,
         timing.start
     );
-    super::set_spinup(dirs.clone(), 0, 0, None, None).unwrap();
+    super::set_spinup_blocking(dirs.clone(), 0, 0, None, None).unwrap();
     assert!(!colm_case::spinup_replay_enabled(std::path::Path::new(&dirs[0])).unwrap());
 }
 
@@ -4629,11 +4634,11 @@ fn replay_spinup_allows_a_single_year_of_forcing() {
 /
 "],
     );
-    super::set_spinup(dirs.clone(), 1, 10, None, Some(true)).unwrap();
+    super::set_spinup_blocking(dirs.clone(), 1, 10, None, Some(true)).unwrap();
     let timing = super::read_timing(dirs.clone()).unwrap();
     assert_eq!(timing.output_start, "2002-01-01");
     assert_eq!(timing.total_steps, 365 * 24 * 11);
-    let err = super::set_spinup(dirs, 2, 10, None, Some(true)).unwrap_err();
+    let err = super::set_spinup_blocking(dirs, 2, 10, None, Some(true)).unwrap_err();
     assert!(err.contains("预热截止时间"));
 }
 

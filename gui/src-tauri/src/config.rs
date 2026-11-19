@@ -3514,7 +3514,7 @@ pub fn pft_parameter_states(
 }
 
 #[tauri::command]
-pub fn set_pft_parameter_batch(
+pub async fn set_pft_parameter_batch(
     dirs: Vec<String>,
     pft_type: u8,
     name: String,
@@ -3530,6 +3530,7 @@ pub fn set_pft_parameter_batch(
         }],
         kernel_dir,
     )
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -3543,7 +3544,16 @@ pub struct PftBatchChange {
 
 /// Validate every PFT/PC cell first, then commit every affected case.nml atomically.
 #[tauri::command]
-pub fn set_pft_parameters_batch(
+pub async fn set_pft_parameters_batch(
+    changes: Vec<PftBatchChange>,
+    kernel_dir: String,
+) -> Result<BatchWrite, String> {
+    tauri::async_runtime::spawn_blocking(move || set_pft_parameters(changes, kernel_dir))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn set_pft_parameters(
     changes: Vec<PftBatchChange>,
     kernel_dir: String,
 ) -> Result<BatchWrite, String> {
@@ -5918,19 +5928,29 @@ fn stage_methane_parameter(dir: &str, mode: Option<&str>) -> Result<(), String> 
 /// **先全改完再落盘。** 中途出错就一份都不写 —— 半批配置好的算例
 /// 与整批配置好的在界面上长得一样，而它们跑出来的东西不一样。
 #[tauri::command]
-pub fn set_field_batch(
+pub async fn set_field_batch(
     dirs: Vec<String>,
     path: String,
     value: String,
     kernel_dir: Option<String>,
 ) -> Result<BatchWrite, String> {
-    set_fields_batch(dirs, vec![FieldChange { path, value }], kernel_dir)
+    set_fields_batch(dirs, vec![FieldChange { path, value }], kernel_dir).await
 }
 
 /// 删除一个 case.nml 显式覆盖。恢复内置值必须走删除语义，不能把当前默认值
 /// 固化回文件；任一目标校验失败时整批保持不变。
 #[tauri::command]
-pub fn reset_field_batch(
+pub async fn reset_field_batch(
+    dirs: Vec<String>,
+    path: String,
+    kernel_dir: Option<String>,
+) -> Result<BatchWrite, String> {
+    tauri::async_runtime::spawn_blocking(move || reset_field(dirs, path, kernel_dir))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+fn reset_field(
     dirs: Vec<String>,
     path: String,
     kernel_dir: Option<String>,
@@ -5985,12 +6005,16 @@ pub fn reset_field_batch(
 /// 用于“启用初始场并选择文件”和互斥开关：不能先把父开关写成 true，再因
 /// 路径或另一开关写入失败而留下半套配置。
 #[tauri::command]
-pub fn set_fields_batch(
+pub async fn set_fields_batch(
     dirs: Vec<String>,
     fields: Vec<FieldChange>,
     kernel_dir: Option<String>,
 ) -> Result<BatchWrite, String> {
-    set_fields_with_context(dirs, fields, kernel_dir, None)
+    tauri::async_runtime::spawn_blocking(move || {
+        set_fields_with_context(dirs, fields, kernel_dir, None)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn set_fields_with_context(
@@ -6488,7 +6512,21 @@ fn one_timing_with_replay(
 /// 用同一个绝对年份会让一部分算例的预热落在窗口之外（等于没预热），
 /// 另一部分落得过深（等于把输出砍掉一大截）。
 #[tauri::command]
-pub fn set_spinup(
+pub async fn set_spinup(
+    dirs: Vec<String>,
+    years: u32,
+    repeat: u32,
+    kernel_dir: Option<String>,
+    replay_start: Option<bool>,
+) -> Result<BatchWrite, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        set_spinup_blocking(dirs, years, repeat, kernel_dir, replay_start)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn set_spinup_blocking(
     dirs: Vec<String>,
     years: u32,
     repeat: u32,
@@ -6619,19 +6657,26 @@ pub async fn case_data_save(
     {
         return Err("不能同时修改强迫场数据目录和原始配置文件路径".into());
     }
-    let forcing = forcing
-        .as_ref()
-        .map(|input| case_forcing::prepare(&dirs, input))
-        .transpose()?;
-    let case_fields = fields
-        .iter()
-        .filter(|field| !field.path.starts_with("DEF_hist_vars%"))
-        .map(|field| Ok((field.path.clone(), typed(&field.path, &field.value)?)))
-        .collect::<Result<Vec<_>, String>>()?;
-    let before = read_all(&dirs)?;
-    let forcing_before = case_save_input_snapshot(&dirs, &fields)?;
+    let (dirs, fields, forcing, case_fields, before, forcing_before) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let forcing = forcing
+                .as_ref()
+                .map(|input| case_forcing::prepare(&dirs, input))
+                .transpose()?;
+            let case_fields = fields
+                .iter()
+                .filter(|field| !field.path.starts_with("DEF_hist_vars%"))
+                .map(|field| Ok((field.path.clone(), typed(&field.path, &field.value)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            let before = read_all(&dirs)?;
+            let forcing_before = case_save_input_snapshot(&dirs, &fields)?;
+            Ok::<_, String>((dirs, fields, forcing, case_fields, before, forcing_before))
+        })
+        .await
+        .map_err(|error| error.to_string())??;
     let mut contexts = Vec::new();
     let result = async {
+        let mut forcing = forcing;
         for dir in &dirs {
             let context = crate::model::model_case_context_with_fields(
                 dir.clone(),
@@ -6642,45 +6687,70 @@ pub async fn case_data_save(
             .await?;
             let context_dir = context.entry.dir;
             contexts.push(context_dir.clone());
-            if let Some(forcing) = &forcing {
-                forcing.stage_preview(&context_dir)?;
-                if let Some((host, _)) = crate::remote::server_case_owner(dir)? {
-                    let doc = colm_namelist::parse(&forcing.text).map_err(|e| e.to_string())?;
-                    crate::remote::check_server_paths(app.clone(), &host, serde_json::json!([{"path":character(&doc,"DEF_dir_forcing"),"directory":true}])).await?;
-                }
+            let source_dir = dir.clone();
+            let preview_dir = context_dir.clone();
+            let (prepared, forcing_check) = tauri::async_runtime::spawn_blocking(move || {
+                let check = if let Some(forcing) = &forcing {
+                    forcing.stage_preview(&preview_dir)?;
+                    if let Some((host, _)) = crate::remote::server_case_owner(&source_dir)? {
+                        let doc = colm_namelist::parse(&forcing.text).map_err(|e| e.to_string())?;
+                        Some((host, serde_json::json!([{"path":character(&doc,"DEF_dir_forcing"),"directory":true}])))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                Ok::<_, String>((forcing, check))
+            }).await.map_err(|error| error.to_string())??;
+            forcing = prepared;
+            if let Some((host, paths)) = forcing_check {
+                crate::remote::check_server_paths(app.clone(), &host, paths).await?;
             }
-            stage_case_material_parameters(dir, &context_dir, &fields)?;
-            if let Some((host, _)) = crate::remote::server_case_owner(dir)? {
-                let text =
-                    std::fs::read_to_string(std::path::Path::new(&context_dir).join("case.nml"))
+            let source_dir = dir.clone();
+            let staged_fields = fields.clone();
+            let selected_kernel = kernel_dir.clone();
+            let runtime_check = tauri::async_runtime::spawn_blocking(move || {
+                stage_case_material_parameters(&source_dir, &context_dir, &staged_fields)?;
+                if let Some((host, _)) = crate::remote::server_case_owner(&source_dir)? {
+                    let text = std::fs::read_to_string(std::path::Path::new(&context_dir).join("case.nml"))
                         .map_err(|error| error.to_string())?;
-                let candidate = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
-                crate::remote::check_server_paths(
-                    app.clone(),
-                    &host,
-                    server_runtime_paths(
+                    let candidate = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
+                    Ok::<_, String>(Some((host, server_runtime_paths(
                         &candidate,
-                        std::path::Path::new(dir),
-                        kernel_dir.as_deref(),
-                    )?,
-                )
-                .await?;
+                        std::path::Path::new(&source_dir),
+                        selected_kernel.as_deref(),
+                    )?)))
+                } else {
+                    Ok(None)
+                }
+            }).await.map_err(|error| error.to_string())??;
+            if let Some((host, paths)) = runtime_check {
+                crate::remote::check_server_paths(app.clone(), &host, paths).await?;
             }
         }
-        if read_all(&dirs)? != before || case_save_input_snapshot(&dirs, &fields)? != forcing_before {
-            return Err("case data changed while validating; reload before saving".into());
-        }
-        let saved = set_fields_with_forcing(
-            dirs.clone(),
-            fields,
-            &remove_fields,
-            kernel_dir,
-            Some(&contexts),
-            forcing.as_ref(),
-        )?;
-        for dir in &dirs {
-            if crate::remote::server_case_owner(dir)?.is_some() {
-                crate::remote_cases::sync_case(&app, dir)
+        let commit_contexts = contexts.clone();
+        let sync_dirs = dirs.clone();
+        let saved = tauri::async_runtime::spawn_blocking(move || {
+            if read_all(&dirs)? != before || case_save_input_snapshot(&dirs, &fields)? != forcing_before {
+                return Err("case data changed while validating; reload before saving".into());
+            }
+            set_fields_with_forcing(
+                dirs,
+                fields,
+                &remove_fields,
+                kernel_dir,
+                Some(&commit_contexts),
+                forcing.as_ref(),
+            )
+        }).await.map_err(|error| error.to_string())??;
+        for dir in sync_dirs {
+            let local_path = dir.clone();
+            let remote_owner = tauri::async_runtime::spawn_blocking(move || {
+                crate::remote::server_case_owner(&local_path)
+            }).await.map_err(|error| error.to_string())??;
+            if remote_owner.is_some() {
+                crate::remote_cases::sync_case(&app, &dir)
                     .await
                     .map_err(|error| {
                         format!("本地配置已保存，服务器同步失败，请重试保存：{error}")
@@ -6690,8 +6760,11 @@ pub async fn case_data_save(
         Ok(saved)
     }
     .await;
-    for context in contexts {
-        let _ = std::fs::remove_dir_all(context);
-    }
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        for context in contexts {
+            let _ = std::fs::remove_dir_all(context);
+        }
+    })
+    .await;
     result
 }

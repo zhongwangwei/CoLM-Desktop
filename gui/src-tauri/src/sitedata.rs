@@ -92,7 +92,8 @@ pub struct SiteClassifications {
 #[tauri::command]
 pub async fn site_classifications(dir: String) -> Result<SiteClassifications, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        crate::sidecar::site_probe(move |probe| {
+        let key = std::path::Path::new(&dir).join("case.nml");
+        crate::sidecar::site_probe(key, move |probe| {
             let case_dir = std::path::Path::new(&dir);
             let doc = case_site_document(case_dir)?;
             let site = case_site_file(case_dir, &doc)?;

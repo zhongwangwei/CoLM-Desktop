@@ -2833,58 +2833,94 @@ fn migration_preparation_is_registered_and_releases_on_import_failure() {
 }
 
 #[test]
-fn site_probe_bounds_stalled_workers_and_recovers_slots() {
-    let active = Arc::new(AtomicUsize::new(0));
+fn timed_out_probes_release_active_slots_and_reserve_only_their_paths() {
+    let pool = Arc::new(SiteProbePool::default());
     let (release, waiting) = std::sync::mpsc::channel::<()>();
     let waiting = Arc::new(Mutex::new(waiting));
-    for _ in 0..4 {
+    for index in 0..4 {
         let waiting = waiting.clone();
-        let result = bounded_site_probe(active.clone(), Duration::from_millis(20), move |_| {
-            waiting.lock().unwrap().recv().unwrap();
-            Ok(true)
-        });
+        let result = bounded_site_probe(
+            pool.clone(),
+            format!("hung-{index}").into(),
+            Duration::from_millis(20),
+            move |_| {
+                waiting.lock().unwrap().recv().unwrap();
+                Ok(true)
+            },
+        );
         assert!(result.unwrap_err().contains("timed out"));
     }
-    assert_eq!(active.load(Ordering::SeqCst), 4);
-    assert!(
-        bounded_site_probe::<bool>(active.clone(), Duration::from_millis(30), |_| panic!(
-            "no worker may start while all slots are held"
-        ))
-        .unwrap_err()
-        .contains("timed out")
+    assert_eq!(pool.active.load(Ordering::SeqCst), 0);
+    assert_eq!(pool.workers.lock().unwrap().len(), 4);
+    let retry = bounded_site_probe::<bool>(
+        pool.clone(),
+        "hung-0".into(),
+        Duration::from_secs(1),
+        |_| panic!("the previous worker still owns this path"),
     );
+    assert!(retry.unwrap_err().contains("still waiting for storage"));
+    assert!(bounded_site_probe(
+        pool.clone(),
+        "healthy".into(),
+        Duration::from_secs(1),
+        |_| { Ok(true) }
+    )
+    .unwrap());
     for _ in 0..4 {
         release.send(()).unwrap();
     }
     let deadline = Instant::now() + Duration::from_secs(2);
-    while active.load(Ordering::SeqCst) != 0 {
+    while !pool.workers.lock().unwrap().is_empty() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(bounded_site_probe(active, Duration::from_secs(1), |_| Ok(true)).unwrap());
+    assert!(
+        bounded_site_probe(pool, "hung-0".into(), Duration::from_secs(1), |_| Ok(true)).unwrap()
+    );
+}
+
+#[test]
+fn outstanding_site_probe_workers_are_bounded() {
+    let pool = Arc::new(SiteProbePool::default());
+    for index in 0..32 {
+        pool.workers.lock().unwrap().insert(
+            format!("hung-{index}").into(),
+            Arc::new(AtomicBool::new(true)),
+        );
+    }
+    let result = bounded_site_probe::<bool>(pool, "extra".into(), Duration::from_secs(1), |_| {
+        panic!("no worker may start after the outstanding worker limit")
+    });
+    assert!(result
+        .unwrap_err()
+        .contains("Too many unfinished site probes"));
 }
 
 #[test]
 #[cfg(unix)]
 fn site_probe_deadline_terminates_and_reaps_sidecar() {
-    let active = Arc::new(AtomicUsize::new(0));
-    let (pid_send, pid_recv) = std::sync::mpsc::channel();
-    let result = bounded_site_probe(active.clone(), Duration::from_millis(100), move |probe| {
-        let mut command = std::process::Command::new("sh");
-        command.args(["-c", "echo $$; exec sleep 30"]);
-        // capture_command returns only after timeout cleanup, even though caller has returned.
-        let result = probe.capture_command(&mut command);
-        pid_send.send(result).unwrap();
-        Ok(())
-    });
+    let pool = Arc::new(SiteProbePool::default());
+    let (send, receive) = std::sync::mpsc::channel();
+    let result = bounded_site_probe(
+        pool.clone(),
+        "subprocess".into(),
+        Duration::from_millis(100),
+        move |probe| {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "echo $$; exec sleep 30"]);
+            let result = probe.capture_command(&mut command);
+            send.send(result).unwrap();
+            Ok(())
+        },
+    );
     assert!(result.unwrap_err().contains("timed out"));
-    assert!(pid_recv
+    assert!(receive
         .recv_timeout(Duration::from_secs(3))
         .unwrap()
         .unwrap_err()
         .contains("timed out"));
     let deadline = Instant::now() + Duration::from_secs(2);
-    while active.load(Ordering::SeqCst) != 0 {
+    while !pool.workers.lock().unwrap().is_empty() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -2892,19 +2928,25 @@ fn site_probe_deadline_terminates_and_reaps_sidecar() {
 
 #[test]
 fn site_probe_waits_for_admission_within_original_deadline() {
-    let active = Arc::new(AtomicUsize::new(4));
-    let release_active = active.clone();
+    let pool = Arc::new(SiteProbePool::default());
+    pool.active.store(4, Ordering::SeqCst);
+    let release_pool = pool.clone();
     let release = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(40));
-        release_active.fetch_sub(1, Ordering::SeqCst);
+        release_pool.active.fetch_sub(1, Ordering::SeqCst);
     });
     let started = Instant::now();
-    let result = bounded_site_probe(active.clone(), Duration::from_millis(500), move |probe| {
-        assert!(probe.deadline <= started + Duration::from_millis(510));
-        assert!(Instant::now().duration_since(started) >= Duration::from_millis(30));
-        Ok(true)
-    });
+    let result = bounded_site_probe(
+        pool.clone(),
+        "queued".into(),
+        Duration::from_millis(500),
+        move |probe| {
+            assert!(probe.deadline <= started + Duration::from_millis(510));
+            assert!(Instant::now().duration_since(started) >= Duration::from_millis(30));
+            Ok(true)
+        },
+    );
     release.join().unwrap();
     assert!(result.unwrap());
-    assert_eq!(active.load(Ordering::SeqCst), 3);
+    assert_eq!(pool.active.load(Ordering::SeqCst), 3);
 }

@@ -410,7 +410,7 @@ async fn finish_locally(
     crate::config::apply_fields(local, fields)?;
     if let Some(repeat) = request.get("spinup_repeat").and_then(Value::as_u64) {
         let repeat = u32::try_from(repeat).map_err(|_| "spinup_repeat is too large")?;
-        crate::config::set_spinup(vec![local.clone()], 1, repeat, None, Some(true))?;
+        crate::config::set_spinup(vec![local.clone()], 1, repeat, None, Some(true)).await?;
     }
 
     crate::model::bind_new_case(local, model_revision.cloned(), creation, fields).await?;

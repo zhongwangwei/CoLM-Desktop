@@ -1359,61 +1359,82 @@ pub(crate) async fn model_case_context_with_fields(
     case_fields: &[(String, colm_namelist::Value)],
     remove_fields: &[String],
 ) -> Result<crate::project::OpenedCase, String> {
-    let source = crate::project::open_case(dir.clone())?;
+    let source = crate::project::open_case(dir.clone()).await?;
     let version = match model_revision {
         Some(v) => v,
         None => model_migrate_case(dir.clone(), None).await?.version,
     };
-    let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
-    let parent = root()?.join("previews");
-    std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
-    let id = preview_id(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| e.to_string())?
-            .as_nanos(),
-    );
-    let run = registry
-        .materialize_run_with_case_changes(
-            &version,
-            Path::new(&dir),
-            &parent.join(&id),
-            &id,
-            case_fields,
-            remove_fields,
-        )
-        .map_err(|e| format!("Cannot read case configuration {dir}: {e:#}"))?;
+    let version_for_preview = version.clone();
+    let case_fields = case_fields.to_vec();
+    let remove_fields = remove_fields.to_vec();
+    let (registry, run, case_fields) = tauri::async_runtime::spawn_blocking(move || {
+        let root = root()?;
+        let parent = root.join("previews");
+        let registry = Registry::open(root).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+        let id = preview_id(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos(),
+        );
+        let run = registry
+            .materialize_run_with_case_changes(
+                &version_for_preview,
+                Path::new(&dir),
+                &parent.join(&id),
+                &id,
+                &case_fields,
+                &remove_fields,
+            )
+            .map_err(|e| format!("Cannot read case configuration {dir}: {e:#}"))?;
+        Ok::<_, String>((registry, run, case_fields))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     let prepared = async {
-        let frozen = registry.get(&version).map_err(|error| error.to_string())?;
-        let effective = colm_namelist::parse(
-            &std::fs::read_to_string(run.run_case.join("case.nml"))
-                .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
-        let names = requested_material_templates(case_fields, &effective)?;
-        let missing =
-            prepare_preview_material_templates(&run.run_case, &frozen.overlay, &names, None)?;
-        if !missing.is_empty() {
+        let preview = run.run_case.clone();
+        let selected = version.clone();
+        let (overlay, missing) = tauri::async_runtime::spawn_blocking(move || {
+            let frozen = registry.get(&selected).map_err(|error| error.to_string())?;
+            let effective = colm_namelist::parse(
+                &std::fs::read_to_string(preview.join("case.nml"))
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            let names = requested_material_templates(&case_fields, &effective)?;
+            let missing =
+                prepare_preview_material_templates(&preview, &frozen.overlay, &names, None)?;
+            Ok::<_, String>((frozen.overlay, missing))
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        let preview = run.run_case.clone();
+        let verified = if !missing.is_empty() {
             // This existing CLI boundary verifies the snapshot hash and workspace commit before
             // exposing its source directory; never guess a cache path or use this app's templates.
-            let context = assistant_context(version.clone(), None).await?;
-            let verified = Path::new(
+            let context = assistant_context(version, None).await?;
+            Some(PathBuf::from(
                 context["source_dir"]
                     .as_str()
                     .ok_or("verified source missing")?,
-            );
-            prepare_preview_material_templates(
-                &run.run_case,
-                &frozen.overlay,
-                &missing,
-                Some(verified),
-            )?;
-        }
-        open_preview_with_case_identity(run.run_case.display().to_string(), &source.profile)
+            ))
+        } else {
+            None
+        };
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Some(verified) = verified {
+                prepare_preview_material_templates(&preview, &overlay, &missing, Some(&verified))?;
+            }
+            open_preview_with_case_identity(preview.display().to_string(), &source.profile)
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
     .await;
     if prepared.is_err() {
-        let _ = std::fs::remove_dir_all(&run.run_case);
+        let _ = tauri::async_runtime::spawn_blocking(move || std::fs::remove_dir_all(run.run_case))
+            .await;
     }
     prepared
 }
@@ -1566,7 +1587,7 @@ fn open_preview_with_case_identity(
     dir: String,
     source: &crate::project::CaseProfile,
 ) -> Result<crate::project::OpenedCase, String> {
-    let mut preview = crate::project::open_case(dir)?;
+    let mut preview = crate::project::open_case_blocking(dir)?;
     carry_case_identity(&mut preview.profile, source);
     Ok(preview)
 }
@@ -2863,7 +2884,8 @@ mod tests {
                 ),
             )
             .unwrap();
-            let source = crate::project::open_case(source_dir.display().to_string()).unwrap();
+            let source =
+                crate::project::open_case_blocking(source_dir.display().to_string()).unwrap();
             let draft = registry
                 .create_draft(ModelDraft {
                     code_editable: None,

@@ -989,7 +989,10 @@ mod tests {
             }]
         };
         assert!(set_fields_with_forcing(dirs.clone(), edit(), &[], None, None, None).is_err());
-        assert!(reset_field_batch(dirs.clone(), key.into(), None).is_err());
+        assert!(
+            tauri::async_runtime::block_on(reset_field_batch(dirs.clone(), key.into(), None))
+                .is_err()
+        );
         assert_eq!(std::fs::read(&metadata).unwrap(), before);
         assert_eq!(
             std::fs::read(case.join("case.nml")).unwrap(),
@@ -998,7 +1001,8 @@ mod tests {
         std::fs::set_permissions(&metadata, original_permissions).unwrap();
         for (step, removed) in [false, true, false].into_iter().enumerate() {
             if removed {
-                reset_field_batch(dirs.clone(), key.into(), None).unwrap();
+                tauri::async_runtime::block_on(reset_field_batch(dirs.clone(), key.into(), None))
+                    .unwrap();
             } else {
                 set_fields_with_forcing(dirs.clone(), edit(), &[], None, None, None).unwrap();
             }
@@ -1501,7 +1505,8 @@ mod tests {
                 None,
             )
             .unwrap();
-            let opened = crate::project::open_case(case.to_string_lossy().into_owned()).unwrap();
+            let opened =
+                crate::project::open_case_blocking(case.to_string_lossy().into_owned()).unwrap();
             assert_eq!(opened.profile.subgrid, scheme);
             assert_eq!(
                 opened.profile.classification,
