@@ -20,13 +20,14 @@
   MOD_CMD = -J
 
   # HDF5 打开 netCDF 文件时会置 invalid；zero/overflow 仍由 CoLM 捕获。
-  # 安装包默认使用 -O2；需要定位越界时显式设 COLM_KERNEL_PROFILE=debug。
+  # 安装包默认使用 -O2 且不带 -g（MinGW PE 会把 DWARF 调试段打进 .exe，体积膨胀一倍以上，
+  # 启动与杀毒扫描均变慢；COFF 符号表仍可供 -fbacktrace 使用）。需要定位越界或完整调试信息时设 COLM_KERNEL_PROFILE=debug。
   COLM_KERNEL_PROFILE ?= production
-  FOPTS_COMMON = -fdefault-real-8 -fdefault-double-8 -ffree-form -g \
+  FOPTS_COMMON = -fdefault-real-8 -fdefault-double-8 -ffree-form \
                  -ffpe-trap=zero,overflow -fbacktrace -cpp \
                  -ffree-line-length-0 -fallow-argument-mismatch
   FOPTS_PRODUCTION = -O2 $(FOPTS_COMMON)
-  FOPTS_DEBUG = -O0 -fcheck=all $(FOPTS_COMMON)
+  FOPTS_DEBUG = -O0 -g -fcheck=all $(FOPTS_COMMON)
   ifeq ($(COLM_KERNEL_PROFILE),production)
      FOPTS = $(FOPTS_PRODUCTION)
   else ifeq ($(COLM_KERNEL_PROFILE),debug)

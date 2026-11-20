@@ -241,3 +241,74 @@ fn an_extended_length_prefix_is_stripped_but_a_unc_path_stays_a_unc_path() {
         );
     }
 }
+
+#[test]
+fn open_installed_validates_manifest_and_presence_without_hashing_binaries() {
+    let d = fake_kernel("installed-ok", ALL);
+    let k = Kernel::open_installed(&d).expect("valid installed kernel opens");
+    assert_eq!(k.manifest.preset, "default");
+    assert_eq!(k.dir, plain(d.canonicalize().expect("canonicalize")));
+
+    // 二进制被替换时 open_installed 仍列出预设（避免启动阶段全量哈希超时），
+    // 真正运行前仍由 Kernel::open 拦住。
+    std::fs::write(d.join(program_file("colm")), "tampered").expect("write");
+    Kernel::open_installed(&d).expect("open_installed skips binary hashing");
+    let err = Kernel::open(&d).unwrap_err();
+    assert!(format!("{err:#}").contains("sha256"), "{err:#}");
+
+    // 缺少可执行文件或文件位置是个目录时拒绝。
+    let missing = fake_kernel("installed-missing", &ALL[..2]);
+    let err = Kernel::open_installed(&missing).unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains(&program_file("colm")), "{msg}");
+    assert!(msg.contains("missing"), "{msg}");
+
+    let dir_instead_of_file = fake_kernel("installed-dir-exe", &ALL[..2]);
+    std::fs::create_dir(dir_instead_of_file.join(program_file("colm"))).expect("mkdir");
+    let err = Kernel::open_installed(&dir_instead_of_file).unwrap_err();
+    assert!(format!("{err:#}").contains("missing"), "{err:#}");
+
+    // sha256 记录缺失或为空时拒绝。
+    let empty_hash = fake_kernel("installed-empty-hash", ALL);
+    let mut manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(empty_hash.join("manifest.json")).expect("read manifest"),
+    )
+    .expect("parse manifest");
+    manifest["sha256"]["colm"] = serde_json::Value::String(String::new());
+    std::fs::write(
+        empty_hash.join("manifest.json"),
+        serde_json::to_vec(&manifest).expect("serialize"),
+    )
+    .expect("write manifest");
+    let err = Kernel::open_installed(&empty_hash).unwrap_err();
+    assert!(format!("{err:#}").contains("sha256"), "{err:#}");
+
+    manifest["sha256"].as_object_mut().unwrap().remove("colm");
+    std::fs::write(
+        empty_hash.join("manifest.json"),
+        serde_json::to_vec(&manifest).expect("serialize"),
+    )
+    .expect("write manifest");
+    let err = Kernel::open_installed(&empty_hash).unwrap_err();
+    assert!(format!("{err:#}").contains("sha256"), "{err:#}");
+
+    // 不支持的 schema 版本时拒绝。
+    let bad_schema = fake_kernel("installed-schema", ALL);
+    let updated = std::fs::read_to_string(bad_schema.join("manifest.json"))
+        .unwrap()
+        .replace("\"schema\": 1", "\"schema\": 99");
+    std::fs::write(bad_schema.join("manifest.json"), updated).unwrap();
+    let err = Kernel::open_installed(&bad_schema).unwrap_err();
+    assert!(format!("{err:#}").contains("schema"), "{err:#}");
+}
+
+#[test]
+fn sha256_file_streams_multi_chunk_files_identically_to_sha256_hex() {
+    let dir = workdir("stream-sha");
+    let payload: Vec<u8> = (0..(200 * 1024))
+        .map(|i| ((i * 31 + 7) % 251) as u8)
+        .collect();
+    let path = dir.join("large.bin");
+    std::fs::write(&path, &payload).expect("write payload");
+    assert_eq!(sha256_file(&path).expect("hash file"), sha256_hex(&payload));
+}

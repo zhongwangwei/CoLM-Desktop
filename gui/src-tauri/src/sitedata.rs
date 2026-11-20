@@ -124,7 +124,7 @@ fn pft_site_input(case_dir: &std::path::Path) -> Result<(std::path::PathBuf, Opt
 #[tauri::command]
 pub async fn site_pfts(dir: String, kernel_dir: String) -> Result<Vec<PftComponentReport>, String> {
     let (site, landtype) = pft_site_input(std::path::Path::new(&dir))?;
-    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+    let kernel = colm_kernel::Kernel::open_manifest(std::path::Path::new(&kernel_dir))
         .map_err(|error| format!("{error:#}"))?;
     let mut args = vec!["site-pfts".to_string(), site.to_string_lossy().to_string()];
     if kernel.manifest.macros.iter().any(|name| name == "CROP") {

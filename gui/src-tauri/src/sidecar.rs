@@ -1906,7 +1906,7 @@ fn cli_candidates(sibling_dir: Option<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// 一个可选的物理预设，交给前端做下拉框。
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct KernelEntry {
     /// `manifest.json` 里的 preset 名 —— 不是目录名。两者一致时也以清单为准，
     /// 因为跑起来认的是清单。
@@ -1921,6 +1921,95 @@ pub struct KernelEntry {
     pub platform: String,
 }
 
+type SharedKernelScan = Arc<(
+    Mutex<Option<Result<Vec<KernelEntry>, String>>>,
+    std::sync::Condvar,
+)>;
+
+/// 同一时间只跑一轮内核枚举；启动超时后点击“重试启动”等并发请求等待这一轮结果，不再叠加第二轮扫盘。
+/// 完成后清空进行中的槽位（不长期缓存结果），确保新建内核后再次检查能立即看到最新目录。
+#[derive(Default)]
+struct InFlightKernelScan {
+    active: Mutex<Option<SharedKernelScan>>,
+}
+
+impl InFlightKernelScan {
+    fn run(
+        &self,
+        scan: impl FnOnce() -> Result<Vec<KernelEntry>, String>,
+    ) -> Result<Vec<KernelEntry>, String> {
+        let (slot, leader) = {
+            let mut active = self
+                .active
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(existing) = active.as_ref() {
+                (existing.clone(), false)
+            } else {
+                let slot: SharedKernelScan = Default::default();
+                *active = Some(slot.clone());
+                (slot, true)
+            }
+        };
+        if !leader {
+            let (lock, ready) = &*slot;
+            let mut outcome = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            while outcome.is_none() {
+                outcome = ready
+                    .wait(outcome)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            return outcome.clone().expect("checked above");
+        }
+        let mut guard = ClearKernelScanOnDrop {
+            owner: self,
+            slot,
+            settled: false,
+        };
+        let result = scan();
+        guard.finish(&result);
+        result
+    }
+}
+
+struct ClearKernelScanOnDrop<'a> {
+    owner: &'a InFlightKernelScan,
+    slot: SharedKernelScan,
+    settled: bool,
+}
+
+impl ClearKernelScanOnDrop<'_> {
+    fn finish(&mut self, result: &Result<Vec<KernelEntry>, String>) {
+        {
+            let mut active = self
+                .owner
+                .active
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if active
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.slot))
+            {
+                *active = None;
+            }
+        }
+        let (lock, ready) = &*self.slot;
+        *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result.clone());
+        ready.notify_all();
+        self.settled = true;
+    }
+}
+
+impl Drop for ClearKernelScanOnDrop<'_> {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.finish(&Err(
+                "读取模型内核时发生内部中断 / Kernel scan aborted unexpectedly".into(),
+            ));
+        }
+    }
+}
+
 /// 列出能用的物理预设。
 ///
 /// 发行版顺序：环境变量 → 随程序打包的那份 → 仓库构建产物。开发版把
@@ -1931,33 +2020,42 @@ pub struct KernelEntry {
 /// 这里用 `resource_dir()` 是**对的**，与 `resolve_cli` 不同：Tauri 把
 /// `bundle.resources` 放进 `Contents/Resources/`，而把 `externalBin`
 /// 放在主二进制旁边。两个目录不同，两处各按各的来。
-// 要哈希约 200 MB 的内核文件；同步命令跑在主线程，启动时整个窗口卡住（第 732 轮）。
+///
+/// 枚举时只走 `Kernel::open_installed`（校验 `manifest.json` + 检查三个可执行文件在场），
+/// 不在启动阶段逐一读取数百 MB 二进制计算 sha256：Windows 上串行读 45 个未签名 `.exe`
+/// 容易触发实时杀毒扫描并超过启动超时。真正的 sha256 完整性校验在运行 Fortran 阶段前
+/// 由 `colm-cli` 调 `Kernel::open` 执行。
 #[tauri::command]
 pub async fn list_kernels(app: tauri::AppHandle) -> Result<Vec<KernelEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || list_kernels_blocking(app))
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?
 }
 
-fn list_kernels_blocking(app: tauri::AppHandle) -> Vec<KernelEntry> {
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Ok(p) = std::env::var("COLM_KERNELS") {
-        roots.push(PathBuf::from(p));
-    }
-    roots.extend(kernel_roots(app.path().resource_dir().ok()));
+fn list_kernels_blocking(app: tauri::AppHandle) -> Result<Vec<KernelEntry>, String> {
+    static SCAN: OnceLock<InFlightKernelScan> = OnceLock::new();
+    SCAN.get_or_init(Default::default).run(move || {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        if let Ok(p) = std::env::var("COLM_KERNELS") {
+            roots.push(PathBuf::from(p));
+        }
+        roots.extend(kernel_roots(app.path().resource_dir().ok()));
+        Ok(list_kernels_in_roots(&roots))
+    })
+}
 
-    let mut out: Vec<KernelEntry> = Vec::new();
+fn list_kernels_in_roots(roots: &[PathBuf]) -> Vec<KernelEntry> {
     for root in roots {
-        let Ok(rd) = std::fs::read_dir(&root) else {
+        let Ok(rd) = std::fs::read_dir(root) else {
             continue;
         };
         let mut found: Vec<KernelEntry> = rd
             .filter_map(|e| e.ok())
+            .filter(|e| !e.file_type().is_ok_and(|t| t.is_file()))
             .filter_map(|e| {
-                // 走 `Kernel::open` 而不是自己读 json：它会连三个二进制的
-                // sha256 一起校验。列出一个校验不过的内核，等于把
-                // 「构建过但被换了」推迟到用户点下运行的那一刻才暴露。
-                let k = colm_kernel::Kernel::open(&e.path()).ok()?;
+                // 走 `Kernel::open_installed`：校验清单结构与三个二进制在场，
+                // 不在启动枚举时把整套内核读进内存算 sha256；运行期再由 `Kernel::open` 验哈希。
+                let k = colm_kernel::Kernel::open_installed(&e.path()).ok()?;
                 Some(KernelEntry {
                     preset: k.manifest.preset.clone(),
                     dir: k.dir.to_string_lossy().into_owned(),
@@ -1980,9 +2078,8 @@ fn list_kernels_blocking(app: tauri::AppHandle) -> Vec<KernelEntry> {
             );
             return found; // 先命中的那一层赢，不混着列
         }
-        out.append(&mut found);
     }
-    out
+    Vec::new()
 }
 
 fn kernel_roots(resource_dir: Option<PathBuf>) -> Vec<PathBuf> {

@@ -6278,3 +6278,45 @@ fn crop_fortran_marker_is_staged_without_polluting_namelist() {
     let record: serde_json::Value = serde_json::from_str(&writes[0].1).unwrap();
     assert_eq!(record["crop"], false);
 }
+
+#[test]
+fn metadata_commands_open_manifest_without_reading_kernel_executables() {
+    let kernel_dir =
+        std::env::temp_dir().join(format!("colm-manifest-only-kernel-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&kernel_dir);
+    std::fs::create_dir_all(&kernel_dir).unwrap();
+    let manifest = serde_json::json!({
+        "schema": 1,
+        "preset": "default",
+        "platform": std::env::consts::OS,
+        "colm_git_sha": "test",
+        "generator_args": "SinglePoint LULC_IGBP CaMaOFF CROPOFF",
+        "build_profile": "production",
+        "macros": ["SinglePoint", "LULC_IGBP", "URBAN_MODEL"],
+        "built_with": "test",
+        "netcdf_c": "test",
+        "netcdf_fortran": "test",
+        "hdf5": "",
+        "sha256": {
+            "mksrfdata": "deadbeef",
+            "mkinidata": "deadbeef",
+            "colm": "deadbeef",
+        },
+    });
+    std::fs::write(
+        kernel_dir.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let kernel_path = kernel_dir.to_string_lossy().into_owned();
+    let irrelevant =
+        irrelevant_fields(kernel_path.clone()).expect("irrelevant_fields uses manifest");
+    assert!(!irrelevant.is_empty());
+
+    let vars = crate::histvars::hist_vars("&nl_colm\n/\n".into(), kernel_path, None, None)
+        .expect("hist_vars uses manifest");
+    assert!(!vars.is_empty());
+
+    let _ = std::fs::remove_dir_all(&kernel_dir);
+}

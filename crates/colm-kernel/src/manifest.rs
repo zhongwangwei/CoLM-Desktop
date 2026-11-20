@@ -25,6 +25,7 @@
 //! 完全不同：前者是没构建，后者是构建过但被换了。
 
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -125,19 +126,33 @@ pub struct Kernel {
     pub manifest: Manifest,
 }
 
+#[derive(Clone, Copy)]
+enum ProgramCheck {
+    None,
+    Present,
+    VerifySha256,
+}
+
 impl Kernel {
     /// 读清单并校验三个二进制。任一不符即失败。
     pub fn open(dir: &Path) -> Result<Kernel> {
-        Self::read(dir, true)
+        Self::read(dir, ProgramCheck::VerifySha256)
+    }
+
+    /// 读清单并仅检查三个可执行文件与清单里的 sha256 记录都在场，不读取/哈希二进制内容。
+    /// 供界面启动枚举使用：避免 Windows 上冷启动时全量读取数百 MB 未签名 `.exe` 触发杀毒扫描超时；
+    /// 真正执行 Fortran 阶段前仍由 [`Kernel::open`] 做完整 sha256 校验。
+    pub fn open_installed(dir: &Path) -> Result<Kernel> {
+        Self::read(dir, ProgramCheck::Present)
     }
 
     /// 只读清单，不要求三个 Fortran 二进制在场：引擎与前处理都用 Rust 时它们不会被执行，只用到清单里的
     /// 宏与身份。远程服务器上只放一份清单（第 637 轮），不必为它编一个 Fortran 内核。
     pub fn open_manifest(dir: &Path) -> Result<Kernel> {
-        Self::read(dir, false)
+        Self::read(dir, ProgramCheck::None)
     }
 
-    fn read(dir: &Path, check_programs: bool) -> Result<Kernel> {
+    fn read(dir: &Path, check: ProgramCheck) -> Result<Kernel> {
         let mpath = dir.join("manifest.json");
         let text = std::fs::read_to_string(&mpath)
             .with_context(|| format!("cannot read the kernel manifest at {}", mpath.display()))?;
@@ -153,28 +168,36 @@ impl Kernel {
             );
         }
 
-        for prog in PROGRAMS.into_iter().filter(|_| check_programs) {
-            let exe = dir.join(program_file(prog));
-            if !exe.exists() {
-                bail!(
-                    "{} is missing from the kernel at {}; the preset has not been built",
-                    program_file(prog),
-                    dir.display()
-                );
-            }
-            let want = manifest.sha256.get(prog).with_context(|| {
-                format!(
-                    "the manifest at {} records no sha256 for {prog}",
-                    mpath.display()
-                )
-            })?;
-            let got = sha256_file(&exe)?;
-            if &got != want {
-                bail!(
-                    "{} does not match its manifest sha256\n  expected {want}\n  actual   {got}\n\
-                     the binary has been replaced since the manifest was written; rebuild the preset",
-                    program_file(prog)
-                );
+        if !matches!(check, ProgramCheck::None) {
+            for prog in PROGRAMS {
+                let exe = dir.join(program_file(prog));
+                if !std::fs::metadata(&exe).is_ok_and(|meta| meta.is_file()) {
+                    bail!(
+                        "{} is missing from the kernel at {}; the preset has not been built",
+                        program_file(prog),
+                        dir.display()
+                    );
+                }
+                let want = manifest
+                    .sha256
+                    .get(prog)
+                    .filter(|hash| !hash.is_empty())
+                    .with_context(|| {
+                        format!(
+                            "the manifest at {} records no sha256 for {prog}",
+                            mpath.display()
+                        )
+                    })?;
+                if matches!(check, ProgramCheck::VerifySha256) {
+                    let got = sha256_file(&exe)?;
+                    if &got != want {
+                        bail!(
+                            "{} does not match its manifest sha256\n  expected {want}\n  actual   {got}\n\
+                             the binary has been replaced since the manifest was written; rebuild the preset",
+                            program_file(prog)
+                        );
+                    }
+                }
             }
         }
 
@@ -203,9 +226,21 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn sha256_file(p: &Path) -> Result<String> {
-    let bytes =
-        std::fs::read(p).with_context(|| format!("cannot read {} to hash it", p.display()))?;
-    Ok(sha256_hex(&bytes))
+    let mut file = std::fs::File::open(p)
+        .with_context(|| format!("cannot read {} to hash it", p.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => hasher.update(&buf[..n]),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                return Err(err).with_context(|| format!("cannot read {} to hash it", p.display()));
+            }
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 #[cfg(test)]

@@ -396,6 +396,11 @@ fi
 case "$(uname -s)" in
   MINGW*|MSYS*)
     for p in mksrfdata mkinidata colm; do mv "$DEST/$p.x" "$DEST/$p.exe"; done
+    # 剥离生产 `.exe` 里来自上游静态库或编译产物的调试段（在计算 manifest sha256 之前），
+    # 减小安装包体积与 Windows 杀毒实时扫描开销。仅在 Windows MinGW 下执行：macOS BSD strip 不支持 --strip-debug。
+    if [ "$PROFILE" = production ] && command -v strip >/dev/null 2>&1; then
+      for p in mksrfdata mkinidata colm; do strip --strip-debug "$DEST/$p.exe"; done
+    fi
     EXE=.exe ;;
   *) EXE=.x ;;
 esac

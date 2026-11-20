@@ -341,7 +341,7 @@ pub fn export_parameter_overrides(
         .as_deref()
         .filter(|path| !path.trim().is_empty())
         .map(|path| {
-            colm_kernel::Kernel::open(std::path::Path::new(path))
+            colm_kernel::Kernel::open_manifest(std::path::Path::new(path))
                 .map_err(|error| format!("{error:#}"))
         })
         .transpose()?;
@@ -593,7 +593,7 @@ fn prepare_parameter_import(
     let kernel = kernel_dir
         .filter(|path| !path.trim().is_empty())
         .map(|path| {
-            colm_kernel::Kernel::open(std::path::Path::new(path))
+            colm_kernel::Kernel::open_manifest(std::path::Path::new(path))
                 .map_err(|error| format!("{error:#}"))
         })
         .transpose()?;
@@ -905,7 +905,7 @@ pub fn apply_import_parameter_overrides(
 /// 参数与输出变量，切换内核后重新读取即可。
 #[tauri::command]
 pub fn irrelevant_fields(kernel_dir: String) -> Result<Vec<String>, String> {
-    let k = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+    let k = colm_kernel::Kernel::open_manifest(std::path::Path::new(&kernel_dir))
         .map_err(|e| format!("{e:#}"))?;
     let have: std::collections::BTreeSet<&str> =
         k.manifest.macros.iter().map(String::as_str).collect();
@@ -1663,7 +1663,7 @@ fn kernel_facts(kernel_dir: Option<&str>) -> Result<Option<KernelFacts>, String>
     let Some(dir) = kernel_dir.filter(|dir| !dir.trim().is_empty()) else {
         return Ok(None);
     };
-    let kernel = colm_kernel::Kernel::open(std::path::Path::new(dir))
+    let kernel = colm_kernel::Kernel::open_manifest(std::path::Path::new(dir))
         .map_err(|error| format!("{error:#}"))?;
     let has = |name: &str| kernel.manifest.macros.iter().any(|macro_| macro_ == name);
     Ok(Some(KernelFacts {
@@ -3202,7 +3202,7 @@ pub(crate) fn field_states(
     if dirs.is_empty() {
         return Err("没有可配置的算例".into());
     }
-    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+    let kernel = colm_kernel::Kernel::open_manifest(std::path::Path::new(&kernel_dir))
         .map_err(|e| format!("{e:#}"))?;
     let have: std::collections::BTreeSet<&str> =
         kernel.manifest.macros.iter().map(String::as_str).collect();
@@ -3259,7 +3259,7 @@ pub fn land_cover_contexts(
     dirs: Vec<String>,
     kernel_dir: String,
 ) -> Result<Vec<LandCoverContext>, String> {
-    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+    let kernel = colm_kernel::Kernel::open_manifest(std::path::Path::new(&kernel_dir))
         .map_err(|error| format!("{error:#}"))?;
     let have = kernel
         .manifest
@@ -3404,7 +3404,7 @@ pub fn pft_parameter_states(
     if dirs.is_empty() {
         return Err("没有可配置的算例".into());
     }
-    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+    let kernel = colm_kernel::Kernel::open_manifest(std::path::Path::new(&kernel_dir))
         .map_err(|error| format!("{error:#}"))?;
     let have: std::collections::BTreeSet<&str> =
         kernel.manifest.macros.iter().map(String::as_str).collect();
@@ -3560,7 +3560,7 @@ fn set_pft_parameters(
     if changes.is_empty() || changes.iter().any(|change| change.dirs.is_empty()) {
         return Err("没有可配置的 PFT/PC 单元格".into());
     }
-    let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+    let kernel = colm_kernel::Kernel::open_manifest(std::path::Path::new(&kernel_dir))
         .map_err(|error| format!("{error:#}"))?;
     let have: std::collections::BTreeSet<&str> =
         kernel.manifest.macros.iter().map(String::as_str).collect();
@@ -4462,7 +4462,7 @@ pub fn process_parameter_files(
     // 没给内核时无法判断是否编进网格河湖，按没有处理（只少给选项，不会给出跑不了的选项）。
     let grid_river = match kernel_dir.filter(|dir| !dir.trim().is_empty()) {
         Some(kernel_dir) => {
-            let kernel = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+            let kernel = colm_kernel::Kernel::open_manifest(std::path::Path::new(&kernel_dir))
                 .map_err(|e| format!("{e:#}"))?;
             kernel
                 .manifest

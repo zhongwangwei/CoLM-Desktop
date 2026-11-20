@@ -128,6 +128,22 @@ fn makeoptions_default_to_production_o2_and_keep_debug_profiles() {
         let debug = make_var(&makeoptions, "FOPTS_DEBUG");
         assert_has_all(&debug, debug_checks);
     }
+
+    let msys2 = read("oracle/scripts/makeoptions/Makeoptions.msys2");
+    assert_has_none(&make_var(&msys2, "FOPTS_PRODUCTION"), &["-g"]);
+    assert_has_all(&make_var(&msys2, "FOPTS_DEBUG"), &["-g"]);
+
+    let script = read("oracle/scripts/build_kernel.sh");
+    let strip_pos = script
+        .find("strip --strip-debug")
+        .expect("build_kernel.sh must strip debug sections on Windows production kernels");
+    let sha_pos = script
+        .find("\"sha256\":")
+        .expect("build_kernel.sh must write sha256 into manifest.json");
+    assert!(
+        strip_pos < sha_pos,
+        "Windows debug stripping must happen before computing manifest sha256 hashes"
+    );
 }
 
 #[test]

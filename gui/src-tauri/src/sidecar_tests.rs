@@ -2950,3 +2950,208 @@ fn site_probe_waits_for_admission_within_original_deadline() {
     assert!(result.unwrap());
     assert_eq!(pool.active.load(Ordering::SeqCst), 3);
 }
+
+fn write_test_kernel_dir(dir: &std::path::Path, preset: &str, programs: &[(&str, &[u8])]) {
+    std::fs::create_dir_all(dir).unwrap();
+    let mut hashes = serde_json::Map::new();
+    for (prog, bytes) in programs {
+        std::fs::write(dir.join(colm_kernel::program_file(prog)), bytes).unwrap();
+        hashes.insert(
+            (*prog).into(),
+            serde_json::Value::String(colm_kernel::sha256_hex(bytes)),
+        );
+    }
+    let manifest = serde_json::json!({
+        "schema": 1,
+        "preset": preset,
+        "platform": std::env::consts::OS,
+        "colm_git_sha": "test",
+        "generator_args": "SinglePoint LULC_IGBP CaMaOFF CROPOFF",
+        "build_profile": "production",
+        "macros": ["SinglePoint", "LULC_IGBP"],
+        "built_with": "test",
+        "netcdf_c": "test",
+        "netcdf_fortran": "test",
+        "hdf5": "",
+        "sha256": hashes,
+    });
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn list_kernels_in_roots_accepts_present_binaries_without_hashing_and_skips_incomplete_presets() {
+    let root = std::env::temp_dir().join(format!("colm-list-kernels-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let primary = root.join("primary");
+    let fallback = root.join("fallback");
+    std::fs::create_dir_all(&primary).unwrap();
+    std::fs::create_dir_all(&fallback).unwrap();
+
+    // 有效预设（usgs）与内容与清单不符的预设（default）：列表枚举阶段均应列出。
+    let valid_bins = [
+        ("mksrfdata", b"a".as_slice()),
+        ("mkinidata", b"b".as_slice()),
+        ("colm", b"c".as_slice()),
+    ];
+    write_test_kernel_dir(&primary.join("usgs"), "usgs", &valid_bins);
+    write_test_kernel_dir(&primary.join("default"), "default", &valid_bins);
+    std::fs::write(
+        primary
+            .join("default")
+            .join(colm_kernel::program_file("colm")),
+        b"tampered-bytes",
+    )
+    .unwrap();
+
+    // 缺少 colm 二进制的预设、_runtime 目录、顶层普通文件均应跳过。
+    write_test_kernel_dir(&primary.join("incomplete"), "incomplete", &valid_bins[..2]);
+    std::fs::create_dir_all(primary.join("_runtime/bin")).unwrap();
+    std::fs::write(primary.join(".DS_Store"), b"noise").unwrap();
+
+    // 回落目录不应和第一层非空目录混在一起。
+    write_test_kernel_dir(&fallback.join("crop"), "crop", &valid_bins);
+
+    let entries =
+        list_kernels_in_roots(&[root.join("nonexistent"), primary.clone(), fallback.clone()]);
+    let presets: Vec<&str> = entries.iter().map(|entry| entry.preset.as_str()).collect();
+    assert_eq!(presets, vec!["default", "usgs"]);
+
+    // 若第一层没有任何有效预设，则落到第二层。
+    let empty_first = root.join("empty-first");
+    std::fs::create_dir_all(&empty_first).unwrap();
+    let fallback_entries = list_kernels_in_roots(&[empty_first, fallback]);
+    let fallback_presets: Vec<&str> = fallback_entries
+        .iter()
+        .map(|entry| entry.preset.as_str())
+        .collect();
+    assert_eq!(fallback_presets, vec!["crop"]);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn in_flight_kernel_scan_deduplicates_concurrent_calls_and_rescans_after_completion() {
+    let coordinator = Arc::new(InFlightKernelScan::default());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    let first_coord = coordinator.clone();
+    let first_calls = calls.clone();
+    let first = std::thread::spawn(move || {
+        first_coord.run(move || {
+            let n = first_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(vec![KernelEntry {
+                preset: format!("scan-{n}"),
+                dir: "/kernels/default".into(),
+                generator_args: String::new(),
+                macros: Vec::new(),
+                colm_git_sha: String::new(),
+                platform: String::new(),
+            }])
+        })
+    });
+
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let second_coord = coordinator.clone();
+    let second_calls = calls.clone();
+    let second = std::thread::spawn(move || {
+        second_coord.run(move || {
+            second_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        })
+    });
+
+    // 确保第二个线程已进入等待队列，而不是立刻跑起第二次扫描。
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    release_tx.send(()).unwrap();
+    let res1 = first.join().unwrap().unwrap();
+    let res2 = second.join().unwrap().unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(res1[0].preset, "scan-1");
+    assert_eq!(res2[0].preset, "scan-1");
+
+    // 完成后不永久缓存：下一次调用会重新扫描。
+    let res3 = coordinator
+        .run(|| {
+            let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(vec![KernelEntry {
+                preset: format!("scan-{n}"),
+                dir: "/kernels/default".into(),
+                generator_args: String::new(),
+                macros: Vec::new(),
+                colm_git_sha: String::new(),
+                platform: String::new(),
+            }])
+        })
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(res3[0].preset, "scan-2");
+}
+
+#[test]
+fn in_flight_kernel_scan_unblocks_waiters_and_recovers_after_panic() {
+    let coordinator = Arc::new(InFlightKernelScan::default());
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    let first_coord = coordinator.clone();
+    let first = std::thread::spawn(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _ = first_coord.run(move || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                panic!("simulated panic during kernel scan");
+            });
+        }))
+    });
+
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    let second_coord = coordinator.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn(move || {
+        let res = second_coord.run(|| Ok(Vec::new()));
+        done_tx.send(res).unwrap();
+    });
+
+    std::thread::sleep(Duration::from_millis(30));
+    release_tx.send(()).unwrap();
+
+    assert!(first.join().unwrap().is_err());
+    let waiter_err = done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("waiter must be unblocked when leader panics")
+        .err()
+        .expect("waiter receives error after leader panic");
+    assert!(
+        waiter_err.contains("Kernel scan aborted unexpectedly"),
+        "{waiter_err}"
+    );
+    second.join().unwrap();
+
+    // 槽位已释放，后续扫描可正常恢复。
+    let recovered = coordinator
+        .run(|| {
+            Ok(vec![KernelEntry {
+                preset: "default".into(),
+                dir: "/kernels/default".into(),
+                generator_args: String::new(),
+                macros: Vec::new(),
+                colm_git_sha: String::new(),
+                platform: String::new(),
+            }])
+        })
+        .unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].preset, "default");
+}

@@ -98,7 +98,7 @@ pub fn hist_vars(
     dir: Option<String>,
     engine: Option<String>,
 ) -> Result<Vec<HistVar>, String> {
-    let k = colm_kernel::Kernel::open(std::path::Path::new(&kernel_dir))
+    let k = colm_kernel::Kernel::open_manifest(std::path::Path::new(&kernel_dir))
         .map_err(|e| format!("{e:#}"))?;
     let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{e:#}"))?;
     // 旧算例的 CH4 开关还在 `@@DEF_USE_MATERIAL@@`/`@@DEF_MATERIAL_@@NAMES` 里；不迁移的话
